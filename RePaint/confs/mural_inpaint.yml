@@ -1,0 +1,90 @@
+# confs/mural_inpaint.yml
+# 基本沿用官方 inet256_thick 配置，只改路径等少数字段
+
+attention_resolutions: 32,16,8
+class_cond: false
+diffusion_steps: 1000
+learn_sigma: true
+noise_schedule: linear
+
+num_channels: 256
+num_head_channels: 64
+num_heads: 4
+num_res_blocks: 2
+resblock_updown: true
+channel_mult: ''
+dropout: 0.0
+
+use_fp16: false
+use_scale_shift_norm: true
+use_checkpoint: false
+use_new_attention_order: false
+
+num_samples: 100
+show_progress: true
+timestep_respacing: '250'
+use_kl: false
+predict_xstart: false
+rescale_timesteps: false
+rescale_learned_sigmas: false
+clip_denoised: true
+use_ddim: false
+
+classifier_scale: 4.0
+lr_kernel_n_std: 2
+classifier_use_fp16: false
+classifier_width: 128
+classifier_depth: 2
+classifier_attention_resolutions: 32,16,8
+classifier_use_scale_shift_norm: true
+classifier_resblock_updown: true
+classifier_pool: attention
+num_heads_upsample: -1
+
+latex_name: RePaint
+method_name: RePaint
+image_size: 256
+
+# TODO: 换成你下载好的 RePaint 预训练模型路径（一般是 places256_300000.pt）
+model_path: ./data/pretrained/places256_300000.pt
+
+name: mural_inpaint_example
+
+inpa_inj_sched_prev: true
+inpa_inj_sched_prev_cumnoise: false
+print_estimated_vars: true
+n_jobs: 1
+
+schedule_jump_params:
+  t_T: 250
+  n_sample: 1
+  jump_length: 10
+  jump_n_sample: 10
+
+data:
+  eval:
+    mural_inpaint:
+      mask_loader: true
+
+      # 这里指向你统一整理的 mural_inpaint 路径
+      gt_path: ./datasets/mural_inpaint/images
+      mask_path: ./datasets/mural_inpaint/masks
+
+      image_size: 256          # RePaint 模型是 256×256，数据会被内部 resize
+      class_cond: false
+      deterministic: true
+      random_crop: false
+      random_flip: false
+      return_dict: true
+      drop_last: false
+
+      batch_size: 1
+      return_dataloader: true
+      offset: 0
+      max_len: 50              # 最多跑多少张图，你可以改大一点
+
+      paths:
+        srs: ./log/mural_inpaint_example/inpainted
+        lrs: ./log/mural_inpaint_example/gt_masked
+        gts: ./log/mural_inpaint_example/gt
+        gt_keep_masks: ./log/mural_inpaint_example/gt_keep_mask
