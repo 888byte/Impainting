@@ -8,7 +8,7 @@ We follow the common "diffuse only missing entries" practice:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -60,7 +60,10 @@ def diffusion_loss(
     x0: torch.Tensor,
     obs_mask: torch.Tensor,
     cond: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    *,
+    return_x0_pred: bool = False,
+    return_t: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     One-step training loss:
     - sample t ~ Uniform(0, T-1)
@@ -68,6 +71,10 @@ def diffusion_loss(
     - keep observed entries fixed
     - predict noise epsilon
     - compute MSE on missing entries only
+
+    Optionally return:
+      - x0_pred: reconstructed x0 from (x_t, eps_hat, t) (with observed entries re-imposed)
+      - t: diffusion timestep tensor (B,)
     """
     device = x0.device
     B = x0.shape[0]
@@ -79,7 +86,27 @@ def diffusion_loss(
 
     eps_hat = model(x_t, obs_mask, t, cond)
     missing_mask = 1.0 - obs_mask
-    return masked_mse(eps_hat, noise, missing_mask)
+    loss = masked_mse(eps_hat, noise, missing_mask)
+
+    if (not return_x0_pred) and (not return_t):
+        return loss
+
+    # x0 reconstruction: x0_hat = (x_t - sqrt(1-a_bar)*eps_hat) / sqrt(a_bar)
+    ab = schedule.alpha_bar[t].view(-1, 1, 1)
+    sqrt_ab = torch.sqrt(ab).clamp_min(1e-8)
+    sqrt_omab = torch.sqrt(1.0 - ab).clamp_min(1e-8)
+    x0_pred = (x_t - sqrt_omab * eps_hat) / sqrt_ab
+
+    # re-impose observed (avoid drift on conditioned entries)
+    x0_pred = x0_pred * (1.0 - obs_mask) + x0 * obs_mask
+
+    outs = [loss]
+    if return_x0_pred:
+        outs.append(x0_pred)
+    if return_t:
+        outs.append(t)
+
+    return tuple(outs)
 
 
 @torch.no_grad()

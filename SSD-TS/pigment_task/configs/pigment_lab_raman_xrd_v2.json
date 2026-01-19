@@ -65,5 +65,19 @@
   "ab_scale": 0.25,
   "ab_rotate_deg": 25.0,
   "noise_std": 1.2
-  }
+  },
+  "physics": {
+  "enable": true,
+  "lambda_cycle": 0.2,
+  "warmup_steps": 2000,
+  "t_max": 30,
+  "exclude_t0": true,
+
+  "cond_dependent": true,
+  "cond_hidden": 128,
+
+  "per_channel_k": true,
+  "learn_c_inf": true,
+  "init_k": 1.0
+  } 
 }

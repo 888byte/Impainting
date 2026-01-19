@@ -35,6 +35,7 @@ from pigment_task.models.color_encoder import ColorEncoder, ColorEncoderConfig
 from pigment_task.models.cond_predictor import ColorToSpecPredictor, CondPredictorConfig
 from pigment_task.models.pigment_denoiser import DenoiserConfig, MambaDenoiser
 from pigment_task.models.spectral_encoder import ConditionerConfig, MultimodalConditioner
+from pigment_task.physics import PhysicsCfg, FadingForwardModelLab, warmup_weight
 
 
 # ------------------------------ utils ------------------------------
@@ -348,6 +349,7 @@ def _save_ckpt(
     conditioner: nn.Module,
     color_encoder: Optional[nn.Module],
     cond_predictor: Optional[nn.Module],
+    fading_model: Optional[nn.Module] = None,
 ) -> None:
     ckpt = {
         "cfg": cfg,
@@ -361,6 +363,8 @@ def _save_ckpt(
         ckpt["color_encoder"] = color_encoder.state_dict()
     if cond_predictor is not None:
         ckpt["cond_predictor"] = cond_predictor.state_dict()
+    if fading_model is not None:
+        ckpt["fading_model"] = fading_model.state_dict()
     torch.save(ckpt, path)
 
 
@@ -488,12 +492,37 @@ def main() -> None:
             conditioner.load_state_dict(sd, strict=False)
         print(f"[INFO] Loaded pretrained conditioner from {ckpt_path}")
 
+    # physics cfg / model (optional)
+    phys_raw = cfg.get("physics", {}) or {}
+    phys_cfg = PhysicsCfg(
+        enable=bool(phys_raw.get("enable", False)),
+        lambda_cycle=float(phys_raw.get("lambda_cycle", 0.2)),
+        warmup_steps=int(phys_raw.get("warmup_steps", 2000)),
+        t_max=int(phys_raw.get("t_max", 30)),
+        exclude_t0=bool(phys_raw.get("exclude_t0", True)),
+        cond_dependent=bool(phys_raw.get("cond_dependent", True)),
+        cond_hidden=int(phys_raw.get("cond_hidden", 128)),
+        per_channel_k=bool(phys_raw.get("per_channel_k", True)),
+        learn_c_inf=bool(phys_raw.get("learn_c_inf", True)),
+        init_k=float(phys_raw.get("init_k", 1.0)),
+    )
+    fading_model: Optional[nn.Module] = None
+    if phys_cfg.enable:
+        fading_model = FadingForwardModelLab(cond_dim=int(getattr(conditioner, "cond_dim", 0)), cfg=phys_cfg).to(device)
+        print(
+            f"[INFO] physics.enable=True | lambda_cycle={phys_cfg.lambda_cycle} warmup_steps={phys_cfg.warmup_steps} "
+            f"t_max={phys_cfg.t_max} cond_dim={int(getattr(conditioner,'cond_dim',0))}"
+        )
+
+
     # optimizer
     params = list(denoiser.parameters()) + list(conditioner.parameters())
     if color_encoder is not None:
         params += list(color_encoder.parameters())
     if cond_predictor is not None:
         params += list(cond_predictor.parameters())
+    if fading_model is not None:
+        params += list(fading_model.parameters())
 
     opt = torch.optim.AdamW(
         params,
@@ -637,8 +666,24 @@ def main() -> None:
             # color augmentation (only pred-cond samples by default)
             x0_use = _apply_color_aug_selected(x0, selected=use_pred, cfg=color_aug_cfg)
 
-            # diffusion loss
-            loss = diffusion_loss(denoiser, schedule, x0=x0_use, obs_mask=mask, cond=cond_in)
+            # diffusion loss (+ optional physics cycle consistency)
+            loss_phys = torch.tensor(0.0, device=device)
+            w_phys = 0.0
+            if fading_model is not None and phys_cfg.enable:
+                loss, x0_pred, t = diffusion_loss(
+                    denoiser,
+                    schedule,
+                    x0=x0_use,
+                    obs_mask=mask,
+                    cond=cond_in,
+                    return_x0_pred=True,
+                    return_t=True,
+                )
+                loss_phys = fading_model.cycle_loss(x0_pred=x0_pred, x0_true=x0_use, mask=mask, cond=cond_in, t=t)
+                w_phys = float(phys_cfg.lambda_cycle) * warmup_weight(int(global_step), int(phys_cfg.warmup_steps))
+                loss = loss + float(w_phys) * loss_phys
+            else:
+                loss = diffusion_loss(denoiser, schedule, x0=x0_use, obs_mask=mask, cond=cond_in)
 
             # predicted-embedding supervision
             loss_pred = torch.tensor(0.0, device=device)
@@ -686,6 +731,8 @@ def main() -> None:
                 msg = f"[ep {ep:03d} step {global_step:06d}] loss={loss.item():.6f}"
                 if mm_cfg.enable and conditioner.cond_dim > 0:
                     msg += f"  pred_mse={loss_pred.item():.6f}"
+                if fading_model is not None and phys_cfg.enable:
+                    msg += f"  phys={loss_phys.item():.6f}  w_phys={float(w_phys):.3f}"
                 msg += f"  use_pred={use_pred.float().mean().item():.2f}"
                 msg += f"  drop_eff={float(drop_eff):.2f}"
                 print(msg)
@@ -714,13 +761,13 @@ def main() -> None:
             if val_loss_true < best_true - early_stopping_min_delta:
                 best_true = float(val_loss_true)
                 path = os.path.join(save_dir, "best_true_model.pt")
-                _save_ckpt(path, cfg, ep, global_step, best_true, denoiser, conditioner, color_encoder, cond_predictor)
+                _save_ckpt(path, cfg, ep, global_step, best_true, denoiser, conditioner, color_encoder, cond_predictor, fading_model)
                 print(f"[SAVE BEST TRUE] {path}  val_loss_true={best_true:.6f}")
 
             if val_loss_pred is not None and val_loss_pred < best_pred - early_stopping_min_delta:
                 best_pred = float(val_loss_pred)
                 path = os.path.join(save_dir, "best_pred_model.pt")
-                _save_ckpt(path, cfg, ep, global_step, best_pred, denoiser, conditioner, color_encoder, cond_predictor)
+                _save_ckpt(path, cfg, ep, global_step, best_pred, denoiser, conditioner, color_encoder, cond_predictor, fading_model)
                 print(f"[SAVE BEST PRED] {path}  val_loss_pred={best_pred:.6f}")
 
             # monitor value for best_model / early stopping
@@ -730,7 +777,7 @@ def main() -> None:
                 best_monitor = float(monitor_val)
                 no_improve_count = 0
                 best_path = os.path.join(save_dir, "best_model.pt")
-                _save_ckpt(best_path, cfg, ep, global_step, best_monitor, denoiser, conditioner, color_encoder, cond_predictor)
+                _save_ckpt(best_path, cfg, ep, global_step, best_monitor, denoiser, conditioner, color_encoder, cond_predictor, fading_model)
                 print(f"[SAVE BEST] {best_path}  monitor({monitor_metric})={best_monitor:.6f}")
             else:
                 no_improve_count += 1
@@ -775,6 +822,8 @@ def main() -> None:
                 ckpt["color_encoder"] = color_encoder.state_dict()
             if cond_predictor is not None:
                 ckpt["cond_predictor"] = cond_predictor.state_dict()
+            if fading_model is not None:
+                ckpt["fading_model"] = fading_model.state_dict()
             out_path = os.path.join(save_dir, f"ckpt_ep{ep}.pt")
             torch.save(ckpt, out_path)
             print(f"[SAVE] {out_path}")
