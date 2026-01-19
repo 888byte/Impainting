@@ -1,0 +1,87 @@
+25-12-25 09:55:42.028 - INFO:   name: ir-sde
+  suffix: None
+  model: denoising
+  distortion: derain
+  gpu_ids: [0]
+  sde:[
+    max_sigma: 30
+    T: 400
+    schedule: cosine
+    eps: 0.005
+  ]
+  degradation:[
+    mask_root: /home/lab610/Impainting/dataset/裁剪的图片/test1/output_masks
+  ]
+  datasets:[
+    test1:[
+      name: Val_Dataset
+      mode: GT
+      dataroot_GT: /home/lab610/Impainting/dataset/裁剪的图片/test1/cropped_images
+      phase: test1
+      scale: 1
+      data_type: img
+    ]
+  ]
+  network_G:[
+    which_model_G: ConditionalUNet
+    setting:[
+      in_nc: 3
+      out_nc: 3
+      nf: 64
+      depth: 4
+    ]
+  ]
+  network_Gs:[
+    which_model_G: ConditionalUNets
+    setting:[
+      in_nc: 1
+      out_nc: 1
+      nf: 64
+      depth: 4
+    ]
+  ]
+  path:[
+    pretrain_model_G: /home/lab610/Impainting/StrDiffusion/test/texture/texture.pth
+    pretrain_model_Gs: /home/lab610/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+    pretrain_model_D: /home/lab610/Impainting/StrDiffusion/test/discriminator.pth
+    root: /home/lab610/Impainting/StrDiffusion/test
+    results_root: /home/lab610/Impainting/StrDiffusion/test/results/inpainting/ir-sde
+    log: /home/lab610/Impainting/StrDiffusion/test/results/inpainting/ir-sde
+  ]
+  is_train: False
+
+25-12-25 09:55:42.058 - INFO: Dataset [GTDataset - Val_Dataset] is created.
+25-12-25 09:55:42.059 - INFO: Number of test images in [Val_Dataset]: 15
+25-12-25 09:56:21.607 - INFO: Loading model for G [/home/lab610/Impainting/StrDiffusion/test/texture/texture.pth] ...
+25-12-25 09:56:22.853 - INFO: Model [DenoisingModel] is created.
+25-12-25 09:56:22.873 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 09:57:14.217 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 09:58:05.698 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 09:58:56.892 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 09:59:48.507 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:00:37.088 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:01:25.932 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:02:18.511 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:03:12.246 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:04:03.730 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:04:54.498 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:05:44.597 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:06:35.714 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:07:24.322 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:08:14.857 - INFO: 
+Testing [Val_Dataset]...
+25-12-25 10:09:07.338 - INFO: [Test] Avg time per image: 50.912s, min=48.534s, max=53.683s

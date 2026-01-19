@@ -1,0 +1,24 @@
+{
+  "test_systems": [
+    "铅丹+朱砂"
+  ],
+  "val_systems": [
+    "铅丹+铅白",
+    "铅白"
+  ],
+  "val_mean_ΔE76": 8.314200171618722,
+  "test_mean_ΔE76": 17.142706680111587,
+  "conformal_q": 0.9,
+  "conformal_q_marginal_rawLab": [
+    10.107810974121094,
+    4.515875816345215,
+    10.819976806640625
+  ],
+  "conformal_q_joint_rawLab": 10.82602310180664,
+  "coverage_conformal_joint": 0.0390625,
+  "coverage_conformal_marginal": [
+    0.5,
+    0.52734375,
+    0.0390625
+  ]
+}

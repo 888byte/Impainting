@@ -1,0 +1,29 @@
+{
+  "test_systems": [
+    "铅丹+朱砂"
+  ],
+  "val_systems": [
+    "铅丹+铅白",
+    "铅白"
+  ],
+  "alpha_vec_from_val(norm_space)": [
+    2.270676612854004,
+    1.6090238094329834,
+    2.3603529930114746
+  ],
+  "mean_ΔE76": 13.117043397389352,
+  "mean_nll": 2.9552138075232506,
+  "mean_nll_calibrated": -6.044912427663803,
+  "coverage_90_joint": 0.0,
+  "coverage_90_joint_calibrated": 0.109375,
+  "coverage_90_marginal": [
+    0.4501953125,
+    0.40625,
+    0.0390625
+  ],
+  "coverage_90_marginal_calibrated": [
+    0.541015625,
+    0.568359375,
+    0.6796875
+  ]
+}

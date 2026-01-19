@@ -1,0 +1,66 @@
+# ===== MVP config: Lab(t) + Raman(sparse-coef) -> Mamba -> predict Lab(t0) =====
+raw_dir: data/raw
+processed_dir: data/processed
+
+# Map the two color logs to humidity settings (env codes) used in your Raman/XRD sheets.
+# Left log humidity ~62-63; Right log humidity ~76.
+color_logs:
+  66: 12.19-12.23.txt
+  76: 12.19-12.23_Right.txt
+
+raman_exp: 拉曼.xlsx
+raman_library: 拉曼汇总.xlsx
+
+# IMPORTANT:
+# This mapping ties NO.1..NO.9 in the RGB logs to pigment system names used in Raman sheets.
+# If your experimental mounting order differs, edit this mapping only (nothing else).
+no_to_system:
+  66:
+    1: 铅丹+密陀僧
+    2: 铅丹+铅白
+    3: 铅丹+朱砂
+    4: 铅丹+朱砂+铁红
+    5: 铅丹+铁红
+    6: 密陀僧
+    7: 铅白+密陀僧
+    8: 铅白
+    9: 铅丹
+  76:
+    1: 铅丹+密陀僧
+    2: 铅丹+铅白
+    3: 铅丹+朱砂
+    4: 铅丹+朱砂+铁红
+    5: 铅丹+铁红
+    6: 密陀僧
+    7: 铅白+密陀僧
+    8: 铅白
+    9: 铅丹
+
+# Sparse coding for Raman (non-negative lasso via FISTA)
+sparse_lam: 0.005
+fista_iters: 250
+
+# Color log cleanup
+drop_first_color_record: true  # first record is a calibration-like outlier (huge jump to record 2)
+
+# Training
+seed: 42
+d_model: 128
+n_layers: 4
+d_state: 16
+d_conv: 4
+expand: 2
+lr: 0.0003
+weight_decay: 0.01
+batch_size: 32
+steps: 2500
+slices_per_seq_per_epoch: 64   # data augmentation; effective batch = sequences * this
+t_obs_min: 1                   # suffix start (>=1), because t0 is label
+use_last_n_at_train: 0         # 0 means use full suffix; if >0, randomly crop suffix length <= use_last_n
+
+# Uncertainty head
+min_sigma: 1e-3
+
+
+lambda_mse: 0.5
+conformal_q: 0.9

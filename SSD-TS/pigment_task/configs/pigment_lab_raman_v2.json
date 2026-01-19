@@ -1,0 +1,57 @@
+{
+  "data": {
+    "train_npz": "/home/610-wws/Impainting/SSD-TS/data/pigment_npz/train.npz",
+    "val_npz": "/home/610-wws/Impainting/SSD-TS/data/pigment_npz/val.npz"
+  },
+  "modality": {
+    "use_raman": true,
+    "use_xrd": false,
+    "raman_len": 1024,
+    "spec_d_model": 128,
+    "spec_n_layers": 4,
+    "spec_dropout": 0.0,
+    "raman_peak_dim": 0,
+    "use_fuse": true
+  },
+  "model": {
+    "in_channels": 3,
+    "hidden_dim": 128,
+    "n_layers": 4,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 200,
+    "beta_start": 0.0001,
+    "beta_end": 0.02
+  },
+  "missing_modality": {
+    "enable": true,
+    "drop_prob": 0.3,
+    "lambda_pred": 0.1,
+    "color_d_model": 128,
+    "color_hidden_dim": 256,
+    "color_n_layers": 2,
+    "pred_hidden_dim": 256,
+    "pred_n_layers": 2,
+    "freeze_conditioner": false,
+    "freeze_color_encoder": false
+  },
+  "pretrained": {
+    "alignment_ckpt": "data/standard_alignment/alignment_ckpt.pt"
+  },
+  "train": {
+    "device": "cuda",
+    "seed": 42,
+    "batch_size": 64,
+    "eval_batch_size": 128,
+    "epochs": 250,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "log_every": 50,
+    "eval_every": 1,
+    "eval_num_batches": 2,
+    "save_every": 10,
+    "save_dir": "ckpt/pigment_lab_raman_v2"
+  }
+}

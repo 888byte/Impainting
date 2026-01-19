@@ -1,0 +1,43 @@
+{
+  "data": {
+    "train_npz": "/mnt/data/pigment_npz_test/train.npz",
+    "val_npz": "/mnt/data/pigment_npz_test/val.npz"
+  },
+  "modality": {
+    "use_raman": false,
+    "use_xrd": false,
+    "raman_len": 1024,
+    "xrd_len": 2048,
+    "spec_d_model": 128,
+    "spec_n_layers": 4,
+    "spec_dropout": 0.0
+  },
+  "model": {
+    "in_channels": 3,
+    "hidden_dim": 128,
+    "n_layers": 4,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 20,
+    "beta_0": 0.0001,
+    "beta_T": 0.02
+  },
+  "train": {
+    "epochs": 1,
+    "batch_size": 64,
+    "eval_batch_size": 64,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "seed": 42,
+    "device": "cpu",
+    "log_every": 50,
+    "eval_every": 1,
+    "eval_num_batches": 2,
+    "save_every": 1,
+    "save_dir": "/mnt/data/ssdts_pigment_patch/ckpt_test2",
+    "eval_use_sampling": false
+  },
+  "pretrained": {}
+}

@@ -1,0 +1,14 @@
+{
+  "test_systems": [
+    "铅白"
+  ],
+  "num_models": 5,
+  "mean_ΔE76_per_model": {
+    "runs/ens/seed0/best.pt": 9.127185821533203,
+    "runs/ens/seed1/best.pt": 6.637730598449707,
+    "runs/ens/seed2/best.pt": 1.166576862335205,
+    "runs/ens/seed3/best.pt": 1.0979011058807373,
+    "runs/ens/seed4/best.pt": 1.2276259660720825
+  },
+  "mean_ΔE76_ensemble": 2.831481456756592
+}

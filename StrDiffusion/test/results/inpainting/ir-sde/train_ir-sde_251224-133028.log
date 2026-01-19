@@ -1,0 +1,124 @@
+25-12-24 13:30:28.864 - INFO:   name: ir-sde
+  suffix: None
+  model: denoising
+  distortion: derain
+  gpu_ids: [4]
+  sde:[
+    max_sigma: 30
+    T: 400
+    schedule: cosine
+    eps: 0.005
+  ]
+  degradation:[
+    mask_root: /home/lab610/Impainting/dataset/裁剪的图片/test/output_masks
+  ]
+  datasets:[
+    test1:[
+      name: Val_Dataset
+      mode: GT
+      dataroot_GT: /home/lab610/Impainting/dataset/裁剪的图片/test/cropped_images
+      phase: test1
+      scale: 1
+      data_type: img
+    ]
+  ]
+  network_G:[
+    which_model_G: ConditionalUNet
+    setting:[
+      in_nc: 3
+      out_nc: 3
+      nf: 64
+      depth: 4
+    ]
+  ]
+  network_Gs:[
+    which_model_G: ConditionalUNets
+    setting:[
+      in_nc: 1
+      out_nc: 1
+      nf: 64
+      depth: 4
+    ]
+  ]
+  path:[
+    pretrain_model_G: /home/lab610/Impainting/StrDiffusion/test/texture.pth
+    pretrain_model_Gs: /home/lab610/Impainting/StrDiffusion/test/structure.pth
+    pretrain_model_D: /home/lab610/Impainting/StrDiffusion/test/discriminator.pth
+    root: /home/lab610/Impainting/StrDiffusion/test
+    results_root: /home/lab610/Impainting/StrDiffusion/test/results/inpainting/ir-sde
+    log: /home/lab610/Impainting/StrDiffusion/test/results/inpainting/ir-sde
+  ]
+  is_train: False
+
+25-12-24 13:30:28.892 - INFO: Dataset [GTDataset - Val_Dataset] is created.
+25-12-24 13:30:28.893 - INFO: Number of test images in [Val_Dataset]: 250
+25-12-24 13:30:32.123 - INFO: Loading model for G [/home/lab610/Impainting/StrDiffusion/test/texture.pth] ...
+25-12-24 13:30:33.407 - INFO: Model [DenoisingModel] is created.
+25-12-24 13:30:33.436 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:32:06.466 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:33:35.060 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:35:06.438 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:36:41.661 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:38:00.622 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:39:30.692 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:40:58.824 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:42:32.815 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:44:00.685 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:45:32.539 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:47:00.213 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:48:46.121 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:50:50.808 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:53:39.575 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:56:08.244 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 13:57:44.674 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:00:15.595 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:02:58.819 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:05:38.063 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:08:38.728 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:11:38.281 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:14:28.854 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:17:19.688 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:19:04.794 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:20:59.307 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:23:48.967 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:27:09.204 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:31:02.127 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:35:01.065 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:39:21.680 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:44:10.421 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:48:37.803 - INFO: 
+Testing [Val_Dataset]...
+25-12-24 14:52:20.650 - INFO: 
+Testing [Val_Dataset]...

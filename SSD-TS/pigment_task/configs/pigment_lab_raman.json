@@ -1,0 +1,44 @@
+{
+  "data": {
+    "train_npz": "data/pigment_npz/train.npz",
+    "val_npz": "data/pigment_npz/val.npz"
+  },
+  "modality": {
+    "use_raman": true,
+    "use_xrd": false,
+    "raman_len": 1024,
+    "xrd_len": 2048,
+    "spec_d_model": 128,
+    "spec_n_layers": 4,
+    "spec_dropout": 0.0
+  },
+  "model": {
+    "in_channels": 3,
+    "hidden_dim": 128,
+    "n_layers": 4,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 200,
+    "beta_0": 0.0001,
+    "beta_T": 0.02
+  },
+  "train": {
+    "epochs": 200,
+    "batch_size": 64,
+    "eval_batch_size": 64,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "seed": 42,
+    "device": "cuda",
+    "log_every": 50,
+    "eval_every": 1,
+    "eval_num_batches": 2,
+    "save_every": 10,
+    "save_dir": "ckpt/pigment_lab_raman",
+    "eval_use_sampling": false,
+    "eval_sampling_num_batches": 1
+  },
+  "pretrained": {}
+}

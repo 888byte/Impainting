@@ -1,0 +1,16 @@
+# 排除单个大文件（直接写文件名）
+large_model.pth
+big_dataset.zip
+
+# 排除整个目录（存放大文件的文件夹）
+train/experiments/
+train/texture/config/inpainting/log/
+train/structure/config/inpainting/log/
+train/discriminator/config/inpainting/log/
+
+# 排除指定后缀的大文件
+*.pth
+*.zip
+*.tar
+*.rar
+*.pyc

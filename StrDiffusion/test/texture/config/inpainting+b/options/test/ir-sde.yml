@@ -1,0 +1,53 @@
+#### general settings
+name: ir-sde
+suffix: ~  # add suffix to saved images
+model: denoising
+distortion: derain
+gpu_ids: [0]
+
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+
+degradation:
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test1/output_masks
+  
+  
+#### datasets
+datasets:
+  test1:
+    name: Val_Dataset
+    mode: GT
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test1/cropped_images
+
+#### network structures
+network_G:
+  which_model_G: ConditionalUNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+    use_pixel_brushnet: true
+  pixel_brushnet:
+    in_ch: 4
+    base_ch: 64              # 建议 = nf
+    ch_mult: [1, 2, 4, 8]    # 建议与 UNet 一致
+    num_blocks_per_level: 2
+    conditioning_scale: 1.0
+    
+network_Gs:
+  which_model_G: ConditionalUNets
+  setting:
+    in_nc: 1
+    out_nc: 1
+    nf: 64
+    depth: 4
+
+
+path:
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
