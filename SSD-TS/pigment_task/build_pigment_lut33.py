@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""pigment_lut_build_fixed.py
+"""pigment_lut_build.py
+
+python  pigment_task/build_pigment_lut33.py 
 
 Generate a 3D LUT (current RGB -> predicted original RGB/Lab + confidence) by
 calling `python -m pigment_task.infer_pigment` on a regular RGB grid.
