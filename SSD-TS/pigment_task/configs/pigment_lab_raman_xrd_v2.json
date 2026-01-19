@@ -68,9 +68,9 @@
   },
   "physics": {
   "enable": true,
-  "lambda_cycle": 0.2,
-  "warmup_steps": 2000,
-  "t_max": 30,
+  "lambda_cycle": 0.8,
+  "warmup_steps": 100,
+  "t_max": 80,
   "exclude_t0": true,
 
   "cond_dependent": true,
