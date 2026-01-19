@@ -47,5 +47,5 @@ def view_npz_file(npz_file_path):
 # ---------------------- 调用示例 ----------------------
 if __name__ == "__main__":
     # 替换为你的npz文件路径（相对路径或绝对路径均可）
-    YOUR_NPZ_FILE_PATH = "/home/610-wws/Impainting/SSD-TS/pigment_task/pigment_lut33_done.npy"
+    YOUR_NPZ_FILE_PATH = "pigment_lut33.npz"
     view_npz_file(YOUR_NPZ_FILE_PATH)
