@@ -1,55 +1,105 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Inference / evaluation script for pigment fading -> original color.
+"""pigment_task.infer_pigment
 
-Patch v2 additions:
-- Missing-modality inference:
-  When Raman/XRD are missing, infer a condition vector from RGB/Lab via:
-    (A) "pred"      : ColorEncoder + ColorToSpecPredictor (learned mapping)
-    (B) "retrieval" : use standard Raman library embeddings (40+ substances) to retrieve a plausible
-                      Raman embedding from RGB, then fuse with predicted XRD embedding (optional).
-- Uncertainty / confidence output:
-  - Diffusion sampling variance (multiple reverse-diffusion samples)
-  - Retrieval entropy / similarity-based confidence (optional)
+Inference / evaluation for pigment fading -> original color (t0).
+
+更新点（配合 方案A sequence 数据）：
+- 观测颜色不再固定取 x0[:,1]，而是取 **mask 最后一个观测点** 作为 x_curr，用于 pred/retrieval 条件生成。
+- 可选 Kalman RTS 平滑：把扩散输出的 t0 均值/方差当作观测，与 t1..tL-1 的观测序列一起做后向平滑，
+  让预测 t0 更符合时间序列的平滑先验（创新点之一，可开关）。
 
 Modes:
 1) Evaluate on a test NPZ:
-   python pigment_task/infer_pigment.py --ckpt ckpt/.../ckpt_ep200.pt --test_npz data/.../test.npz --cond_method true
-   python pigment_task/infer_pigment.py --ckpt ckpt/.../ckpt_ep200.pt --test_npz data/.../test.npz --cond_method pred
-   python pigment_task/infer_pigment.py --ckpt ckpt/.../ckpt_ep200.pt --test_npz data/.../test.npz --cond_method retrieval --library_npz data/standard/library_embeddings.npz
+   python pigment_task/infer_pigment.py --ckpt ckpt/.../best_model.pt --test_npz data/.../test.npz --cond_method true
+   python pigment_task/infer_pigment.py --ckpt ckpt/.../best_model.pt --test_npz data/.../test.npz --cond_method pred --num_samples 20
+   python pigment_task/infer_pigment.py --ckpt ckpt/.../best_model.pt --test_npz data/.../test.npz --cond_method retrieval --library_npz data/standard_alignment/library_embeddings.npz
 
-2) Predict one sample from RGB only:
-   python pigment_task/infer_pigment.py --ckpt ... --rgb "120,80,60" --cond_method retrieval --library_npz ...
+2) Predict one sample from RGB only (fallback L=2):
+   python pigment_task/infer_pigment.py --ckpt ... --rgb "120,80,60" --cond_method pred --num_samples 30
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from pigment_task.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
+from pigment_task.color_utils import LabNorm, rgb_to_lab, lab_to_rgb, delta_e2000
 from pigment_task.dataset_pigment import PigmentNPZDataset
-from pigment_task.diffusion import DiffusionSchedule, p_sample_loop
 from pigment_task.diffusion import DiffusionConfig, DiffusionSchedule, p_sample_loop
-#from pigment_task.metrics import deltaE2000
-from pigment_task.color_utils import LabNorm, delta_e2000
 from pigment_task.models.color_encoder import ColorEncoder, ColorEncoderConfig
 from pigment_task.models.cond_predictor import ColorToSpecPredictor, CondPredictorConfig
 from pigment_task.models.pigment_denoiser import DenoiserConfig, MambaDenoiser
 from pigment_task.models.spectral_encoder import ConditionerConfig, MultimodalConditioner
 
 
+# =========================
+# Small Kalman smoother (RTS) for random-walk model
+# =========================
+
+def _rts_smoother_random_walk(
+    y: np.ndarray,
+    R: np.ndarray,
+    Q: np.ndarray,
+) -> np.ndarray:
+    """RTS smoother for x_t = x_{t-1} + w, y_t = x_t + v.
+
+    y: (L,3) observed (Lab)
+    R: (L,3) measurement variance per dim
+    Q: (3,) process variance per dim
+
+    Returns x_smooth: (L,3)
+    """
+    y = np.asarray(y, dtype=np.float64)
+    R = np.asarray(R, dtype=np.float64)
+    Q = np.asarray(Q, dtype=np.float64).reshape(3,)
+
+    L = int(y.shape[0])
+    x_f = np.zeros((L, 3), dtype=np.float64)
+    P_f = np.zeros((L, 3), dtype=np.float64)
+
+    # init with y0
+    x = y[0].copy()
+    P = np.maximum(R[0].copy(), 1e-6)
+
+    for t in range(L):
+        if t > 0:
+            # predict
+            P = P + Q
+        # update
+        S = P + np.maximum(R[t], 1e-6)
+        K = P / S
+        x = x + K * (y[t] - x)
+        P = (1.0 - K) * P
+        x_f[t] = x
+        P_f[t] = P
+
+    x_s = x_f.copy()
+    P_s = P_f.copy()
+
+    for t in range(L - 2, -1, -1):
+        # random walk: F=I -> C = P_f[t] / (P_f[t] + Q)
+        denom = P_f[t] + Q
+        C = np.where(denom > 1e-12, P_f[t] / denom, 0.0)
+        x_s[t] = x_f[t] + C * (x_s[t + 1] - x_f[t])
+        P_s[t] = P_f[t] + C * (P_s[t + 1] - (P_f[t] + Q))
+
+    return x_s
+
+
+# =========================
+# Checkpoint loading
+# =========================
+
 def _load_ckpt(ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location="cpu")
     cfg = ckpt.get("cfg", {})
 
-    # Build conditioner + denoiser from cfg (fallback to ckpt shapes if missing)
     mod_cfg = cfg.get("modality", {}) if isinstance(cfg, dict) else {}
     cond_cfg = ConditionerConfig(
         use_raman=bool(mod_cfg.get("use_raman", False)),
@@ -83,9 +133,8 @@ def _load_ckpt(ckpt_path: str, device: torch.device):
         denoiser.load_state_dict(ckpt["denoiser"], strict=False)
     denoiser.eval()
 
-    # Optional missing-modality modules
-    color_encoder = None
-    cond_predictor = None
+    color_encoder: Optional[ColorEncoder] = None
+    cond_predictor: Optional[ColorToSpecPredictor] = None
     if "color_encoder" in ckpt and "cond_predictor" in ckpt:
         mm_cfg = cfg.get("missing_modality", {}) if isinstance(cfg, dict) else {}
         ce_cfg = ColorEncoderConfig(
@@ -112,17 +161,19 @@ def _load_ckpt(ckpt_path: str, device: torch.device):
         cond_predictor.load_state_dict(ckpt["cond_predictor"], strict=False)
         cond_predictor.eval()
 
-    # Diffusion schedule (read from cfg if present)
     diff_cfg = DiffusionConfig(
-        T=int(cfg["diffusion"].get("T", 200)),
-        beta_0=float(cfg["diffusion"].get("beta_0", 1e-4)),
-        beta_T=float(cfg["diffusion"].get("beta_T", 0.02)),
+        T=int(cfg.get("diffusion", {}).get("T", 200)),
+        beta_0=float(cfg.get("diffusion", {}).get("beta_0", 1e-4)),
+        beta_T=float(cfg.get("diffusion", {}).get("beta_T", 0.02)),
     )
     schedule = DiffusionSchedule(diff_cfg, device=device)
 
-
     return cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor
 
+
+# =========================
+# Condition building
+# =========================
 
 def _build_cond_from_pred_embeds(conditioner: MultimodalConditioner, embeds_pred: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
     if conditioner.cond_dim == 0:
@@ -154,8 +205,7 @@ def _predict_embeds_from_rgb(
 
 def _load_library_npz(path: str) -> Dict[str, np.ndarray]:
     lib = np.load(path, allow_pickle=True)
-    out = {k: lib[k] for k in lib.files}
-    return out
+    return {k: lib[k] for k in lib.files}
 
 
 def _retrieval_raman_embed(
@@ -164,16 +214,7 @@ def _retrieval_raman_embed(
     top_k: int = 5,
     temp: float = 0.07,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Cross-modal retrieval:
-      query = z_color (B,d)
-      keys  = lib_raman_emb (M,d)
-
-    returns:
-      raman_emb (B,d) : similarity-weighted average of top-k keys (in original (non-normalized) space)
-      weights  (B,k)
-      top_idx  (B,k)
-    """
+    """Cross-modal retrieval: query=z_color, keys=lib_raman_emb."""
     zq = F.normalize(z_color, dim=-1)
     zk = F.normalize(lib_raman_emb, dim=-1)
     sim = zq @ zk.T  # (B,M)
@@ -182,25 +223,22 @@ def _retrieval_raman_embed(
     topv, topi = torch.topk(sim, k=k, dim=-1)
     w = F.softmax(topv / float(temp), dim=-1)  # (B,k)
 
-    # gather and weighted sum
     gathered = lib_raman_emb[topi]  # (B,k,d)
     r = torch.sum(gathered * w.unsqueeze(-1), dim=1)  # (B,d)
     return r, w, topi
 
 
 def _retrieval_confidence(weights: torch.Tensor) -> torch.Tensor:
-    """
-    Confidence from retrieval weights:
-      - high when distribution is peaked (low entropy)
-      - low when weights are uniform (high entropy)
-    """
     eps = 1e-8
     w = torch.clamp(weights, eps, 1.0)
-    ent = -torch.sum(w * torch.log(w), dim=-1)  # (B,)
+    ent = -torch.sum(w * torch.log(w), dim=-1)
     ent_norm = ent / np.log(weights.size(-1) + eps)
-    conf = 1.0 - ent_norm
-    return conf.clamp(0.0, 1.0)
+    return (1.0 - ent_norm).clamp(0.0, 1.0)
 
+
+# =========================
+# Sampling + uncertainty
+# =========================
 
 @torch.no_grad()
 def _sample_with_confidence(
@@ -210,11 +248,11 @@ def _sample_with_confidence(
     mask: torch.Tensor,
     cond: Optional[torch.Tensor],
     num_samples: int = 20,
-) -> Tuple[np.ndarray, Dict[str, float]]:
-    """
-    Returns:
-      pred_mean_lab (B,3) in **denormalized Lab**
-      conf dict: includes diffusion_std and confidence proxy
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    """Return (pred_mean_lab0, pred_std_lab0, info).
+
+    pred_mean_lab0: (B,3) denormalized Lab
+    pred_std_lab0:  (B,3) denormalized Lab std (per channel)
     """
     device = x0_norm.device
     lab_norm = LabNorm()
@@ -231,10 +269,10 @@ def _sample_with_confidence(
     std_norm = np.std(arr, axis=0)
 
     mean_lab = lab_norm.denormalize(mean_norm)
-    # a scalar uncertainty proxy
-    std_scalar = float(np.mean(np.linalg.norm(std_norm, axis=-1)))
+    # denormalize std (linear scaling)
+    std_lab = std_norm * np.asarray([lab_norm.L_scale, lab_norm.ab_scale, lab_norm.ab_scale], dtype=np.float32)
 
-    # map uncertainty -> confidence (heuristic)
+    std_scalar = float(np.mean(np.linalg.norm(std_norm, axis=-1)))
     conf_diff = float(np.exp(-std_scalar))
 
     info = {
@@ -242,8 +280,27 @@ def _sample_with_confidence(
         "conf_diffusion": conf_diff,
         "num_samples": int(num_samples),
     }
-    return mean_lab, info
+    return mean_lab.astype(np.float32), std_lab.astype(np.float32), info
 
+
+def _last_observed_index(mask: torch.Tensor) -> torch.Tensor:
+    """mask: (B,L,3) -> (B,) last index where observed==1"""
+    B, L, _ = mask.shape
+    obs = (mask.mean(dim=-1) > 0.5).to(torch.long)  # (B,L)
+    idx_range = torch.arange(L, device=mask.device).view(1, L).expand(B, L)
+    idx = torch.max(idx_range * obs, dim=1).values
+    return idx
+
+
+def _gather_last_observed(x0: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    idx = _last_observed_index(mask)
+    B = x0.shape[0]
+    return x0[torch.arange(B, device=x0.device), idx]
+
+
+# =========================
+# Evaluation
+# =========================
 
 @torch.no_grad()
 def evaluate_test(
@@ -260,6 +317,9 @@ def evaluate_test(
     retrieval_temp: float = 0.07,
     num_samples: int = 1,
     max_batches: int = 50,
+    kalman_refine: bool = False,
+    kalman_meas_std_lab: float = 1.0,
+    kalman_process_std_lab: float = 2.0,
 ) -> Dict[str, float]:
     ds = PigmentNPZDataset(test_npz)
     dl = torch.utils.data.DataLoader(ds, batch_size=64, shuffle=False, num_workers=0, drop_last=False)
@@ -274,40 +334,39 @@ def evaluate_test(
         lib_raman = torch.from_numpy(lib["raman_emb"].astype(np.float32)).to(device)
 
     lab_norm = LabNorm()
+
     de_list = []
     conf_list = []
+
     for bi, batch in enumerate(dl):
         if bi >= int(max_batches):
             break
         x0 = batch["x0"].to(device)
         mask = batch["mask"].to(device)
-        x_curr = x0[:, 1, :]  # normalized Lab current
+        x_curr = _gather_last_observed(x0, mask)  # normalized Lab
 
         # build condition
+        conf_ret = None
         if conditioner.cond_dim == 0:
             cond = None
-            conf_ret = None
         elif cond_method == "true":
-            cond, _ = conditioner(
+            cond = conditioner(
                 batch.get("raman", None).to(device) if "raman" in batch else None,
                 batch.get("xrd", None).to(device) if "xrd" in batch else None,
                 raman_peaks=batch.get("raman_peaks", None).to(device) if "raman_peaks" in batch else None,
                 xrd_peaks=batch.get("xrd_peaks", None).to(device) if "xrd_peaks" in batch else None,
                 return_embeds=False,
-            ), None
-            conf_ret = None
+            )
         elif cond_method == "pred":
             if color_encoder is None or cond_predictor is None:
                 raise ValueError("cond_method=pred requires ckpt with color_encoder+cond_predictor")
             embeds_pred = _predict_embeds_from_rgb(x_curr, conditioner, color_encoder, cond_predictor)
             cond = _build_cond_from_pred_embeds(conditioner, embeds_pred)
-            conf_ret = None
         elif cond_method == "retrieval":
             if color_encoder is None or lib_raman is None:
-                raise ValueError("cond_method=retrieval requires ckpt color_encoder and library_npz with raman_emb")
+                raise ValueError("cond_method=retrieval requires ckpt color_encoder and library_npz")
             zc = color_encoder(x_curr)
             raman_emb, w, _ = _retrieval_raman_embed(zc, lib_raman, top_k=int(retrieval_k), temp=float(retrieval_temp))
-            # xrd from predictor if available; else zeros
             embeds_pred: Dict[str, torch.Tensor] = {}
             if conditioner.raman_enc is not None:
                 embeds_pred["raman"] = raman_emb
@@ -323,20 +382,45 @@ def evaluate_test(
             raise ValueError(f"Unknown cond_method: {cond_method}")
 
         if int(num_samples) <= 1:
-            # single sample
             x_obs = x0 * mask
             x_sample = p_sample_loop(denoiser, schedule, x_obs=x_obs, obs_mask=mask, cond=cond)
             pred0 = lab_norm.denormalize(x_sample[:, 0, :].detach().cpu().numpy())
             gt0 = lab_norm.denormalize(x0[:, 0, :].detach().cpu().numpy())
-            for p, g in zip(pred0, gt0):
-                de_list.append(float(delta_e2000(p, g)))
         else:
-            pred_mean_lab, info = _sample_with_confidence(denoiser, schedule, x0, mask, cond, num_samples=int(num_samples))
+            pred0, std0, info = _sample_with_confidence(denoiser, schedule, x0, mask, cond, num_samples=int(num_samples))
             gt0 = lab_norm.denormalize(x0[:, 0, :].detach().cpu().numpy())
-            for p, g in zip(pred_mean_lab, gt0):
-                de_list.append(float(delta_e2000(p, g)))
-            # store diffusion confidence proxy
-            conf_list.extend([info["conf_diffusion"]] * pred_mean_lab.shape[0])
+
+            if kalman_refine:
+                # Build y sequence: [pred0] + observed labs from input (denormalized)
+                x0_den = lab_norm.denormalize(x0.detach().cpu().numpy())  # (B,L,3)
+                mask_np = mask.detach().cpu().numpy()
+                B, L, _ = x0_den.shape
+                meas_std = float(kalman_meas_std_lab)
+                proc_std = float(kalman_process_std_lab)
+                Q = np.asarray([proc_std**2, proc_std**2, proc_std**2], dtype=np.float64)
+
+                refined = []
+                for i in range(B):
+                    y = x0_den[i].copy()
+                    # replace t0 with predicted
+                    y[0] = pred0[i]
+
+                    # R: t0 use model variance, observed steps use meas_std^2
+                    R = np.ones((L, 3), dtype=np.float64) * (meas_std**2)
+                    R[0] = np.maximum(std0[i] ** 2, 1e-6)
+                    # if some steps are unobserved (rare), increase R
+                    unobs = (mask_np[i].mean(axis=-1) < 0.5)
+                    R[unobs] = 1e6
+
+                    xs = _rts_smoother_random_walk(y, R, Q)
+                    refined.append(xs[0])
+                pred0 = np.stack(refined, axis=0).astype(np.float32)
+
+            conf_list.extend([info["conf_diffusion"]] * pred0.shape[0])
+
+        # deltaE
+        for p, g in zip(pred0, gt0):
+            de_list.append(float(delta_e2000(p, g)))
 
         if conf_ret is not None:
             conf_list.extend(list(conf_ret))
@@ -350,6 +434,10 @@ def evaluate_test(
         out["confidence_std"] = float(np.std(conf_list))
     return out
 
+
+# =========================
+# CLI
+# =========================
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -365,12 +453,18 @@ def main() -> None:
 
     # missing-modality inference
     ap.add_argument("--cond_method", type=str, default="true", choices=["true", "pred", "retrieval"])
-    ap.add_argument("--library_npz", type=str, default="", help="NPZ with standard Raman library embeddings (from pretrain script)")
+    ap.add_argument("--library_npz", type=str, default="", help="NPZ with standard Raman library embeddings")
     ap.add_argument("--retrieval_k", type=int, default=5)
     ap.add_argument("--retrieval_temp", type=float, default=0.07)
 
     # uncertainty
     ap.add_argument("--num_samples", type=int, default=1, help="Diffusion samples per query (>=2 enables diffusion uncertainty proxy)")
+
+    # optional Kalman RTS refinement
+    ap.add_argument("--kalman_refine", action="store_true", help="Refine predicted t0 using RTS smoother over full sequence")
+    ap.add_argument("--kalman_rts", action="store_true", help="Alias of --kalman_refine (backward compatible)")
+    ap.add_argument("--kalman_meas_std_lab", type=float, default=1.0, help="Measurement std (Lab units) for observed steps when using kalman_refine")
+    ap.add_argument("--kalman_process_std_lab", type=float, default=2.0, help="Process std (Lab units) for random-walk dynamics when using kalman_refine")
 
     args = ap.parse_args()
 
@@ -379,7 +473,9 @@ def main() -> None:
 
     if args.test_npz:
         stats = evaluate_test(
-            denoiser, conditioner, schedule,
+            denoiser,
+            conditioner,
+            schedule,
             test_npz=args.test_npz,
             device=device,
             cond_method=args.cond_method,
@@ -390,6 +486,9 @@ def main() -> None:
             retrieval_temp=float(args.retrieval_temp),
             num_samples=int(args.num_samples),
             max_batches=int(args.max_batches),
+            kalman_refine=bool(args.kalman_refine or args.kalman_rts),
+            kalman_meas_std_lab=float(args.kalman_meas_std_lab),
+            kalman_process_std_lab=float(args.kalman_process_std_lab),
         )
         print(json.dumps(stats, ensure_ascii=False, indent=2))
         return
@@ -398,12 +497,13 @@ def main() -> None:
         rgb = np.array([float(x) for x in args.rgb.split(",")], dtype=np.float32)
         if rgb.size != 3:
             raise ValueError("--rgb must be 'R,G,B'")
-        lab = rgb_to_lab(rgb[None, :])[0]  # (3,)
+
+        lab = rgb_to_lab(rgb[None, :])[0]
         lab_norm = LabNorm()
         x_curr = lab_norm.normalize(lab[None, :]).astype(np.float32)  # (1,3)
 
-        # build dummy sequence L=2: first step unknown, second observed
-        x0 = np.stack([lab, lab], axis=0)[None, :, :]  # use lab as placeholder for t0; will be ignored by mask for t0
+        # Dummy L=2 sample
+        x0 = np.stack([lab, lab], axis=0)[None, :, :]
         x0n = lab_norm.normalize(x0).astype(np.float32)
         mask = np.array([[[0, 0, 0], [1, 1, 1]]], dtype=np.float32)
 
@@ -412,9 +512,9 @@ def main() -> None:
         x_curr_t = torch.from_numpy(x_curr).to(device)
 
         # cond
+        conf_ret = None
         if conditioner.cond_dim == 0:
             cond = None
-            conf_ret = None
         elif args.cond_method == "true":
             raise ValueError("Single RGB mode does not have spectra; use --cond_method pred or retrieval")
         elif args.cond_method == "pred":
@@ -422,7 +522,6 @@ def main() -> None:
                 raise ValueError("cond_method=pred requires ckpt with color_encoder+cond_predictor")
             embeds_pred = _predict_embeds_from_rgb(x_curr_t, conditioner, color_encoder, cond_predictor)
             cond = _build_cond_from_pred_embeds(conditioner, embeds_pred)
-            conf_ret = None
         else:  # retrieval
             if not args.library_npz:
                 raise ValueError("cond_method=retrieval requires --library_npz")
@@ -431,7 +530,7 @@ def main() -> None:
             lib = _load_library_npz(args.library_npz)
             lib_raman = torch.from_numpy(lib["raman_emb"].astype(np.float32)).to(device)
             zc = color_encoder(x_curr_t)
-            raman_emb, w, topi = _retrieval_raman_embed(zc, lib_raman, top_k=int(args.retrieval_k), temp=float(args.retrieval_temp))
+            raman_emb, w, _ = _retrieval_raman_embed(zc, lib_raman, top_k=int(args.retrieval_k), temp=float(args.retrieval_temp))
             embeds_pred: Dict[str, torch.Tensor] = {}
             if conditioner.raman_enc is not None:
                 embeds_pred["raman"] = raman_emb
@@ -449,16 +548,20 @@ def main() -> None:
             x_obs = x0_t * mask_t
             x_s = p_sample_loop(denoiser, schedule, x_obs=x_obs, obs_mask=mask_t, cond=cond)
             pred_lab0 = lab_norm.denormalize(x_s[:, 0, :].detach().cpu().numpy())[0]
-            info = {"num_samples": 1, "conf_diffusion": None}
+            std_lab0 = None
+            info = {"num_samples": 1, "conf_diffusion": None, "diffusion_std_norm_meanL2": None}
         else:
-            pred_lab0, info = _sample_with_confidence(denoiser, schedule, x0_t, mask_t, cond, num_samples=int(args.num_samples))
-            pred_lab0 = pred_lab0[0]
+            pred_lab0_b, std_lab0_b, info = _sample_with_confidence(denoiser, schedule, x0_t, mask_t, cond, num_samples=int(args.num_samples))
+            pred_lab0 = pred_lab0_b[0]
+            std_lab0 = std_lab0_b[0]
 
         pred_rgb0 = lab_to_rgb(pred_lab0[None, :])[0]
+
         out = {
             "input_rgb_current": rgb.tolist(),
             "pred_lab_original": pred_lab0.tolist(),
             "pred_rgb_original": pred_rgb0.tolist(),
+            "pred_lab_std": std_lab0.tolist() if std_lab0 is not None else None,
             "confidence_diffusion": info.get("conf_diffusion", None),
             "diffusion_std_norm_meanL2": info.get("diffusion_std_norm_meanL2", None),
             "confidence_retrieval": conf_ret,

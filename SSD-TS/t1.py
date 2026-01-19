@@ -5,7 +5,7 @@
 
 示例：
 python t1.py \
-  --ckpt ckpt/pigment_lab_raman_xrd_v2/best_model.pt \
+  --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
   --cond_method pred \
   --num_samples 30 \
   --palette hsv_fps \
@@ -13,7 +13,7 @@ python t1.py \
   --output_image batch_test_pred_96.png
 
 
-python t1.py --ckpt ckpt/pigment_lab_raman_xrd_v2/best_model.pt \
+python t1.py --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
   --cond_method pred --num_samples 30 \
   --palette hsv_fps --n_test_colors 144 --min_lab_dist 10 \
   --output_image batch_test_144.png
@@ -331,7 +331,7 @@ def plot_results(names, inputs, outputs, confidences, output_file, max_cols=6):
 # ==============================================================================
 def main():
     parser = argparse.ArgumentParser(description="Batch Visualize Pigment Restoration (More Colors)")
-    parser.add_argument('--ckpt', type=str, default="ckpt/pigment_lab_raman_xrd_v2/best_model.pt")
+    parser.add_argument('--ckpt', type=str, default="ckpt/pigment_lab_raman_xrd/best_model.pt")
     parser.add_argument('--library_npz', type=str, default='data/standard_alignment/library_embeddings.npz')
     parser.add_argument('--cond_method', type=str, default='retrieval', choices=['retrieval', 'pred'])
     parser.add_argument('--num_samples', type=int, default=30, help="Diffusion samples per color (higher=stable)")

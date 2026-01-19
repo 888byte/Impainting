@@ -3,7 +3,7 @@
 """
 整图颜色替换
 python t2.py \
-  --ckpt ckpt/pigment_lab_raman_xrd_v2/best_model.pt \
+  --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
   --input_image /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images/42-0-1_bottom.jpg \
   --output_image test_restored_block.png \
   --n_colors 32 \

@@ -11,7 +11,7 @@ METHOD: "Keep the Texture, Force-Swap the Color"
  python t3.py \
   --img_path /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images/42-0-1_bottom.jpg \
   --mask_path /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks/42-0-1_bottom_mask.png \
-  --ckpt ckpt/pigment_lab_raman_xrd_v2/best_model.pt  \
+  --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt  \
   --n_colors 64 \
   --cond_method pred
 """
@@ -81,10 +81,17 @@ def batch_inference_with_conf(rgb_centers, model_components, args, device, lib_r
         embeds_pred = _predict_embeds_from_rgb(x_curr_t, conditioner, color_encoder, cond_predictor)
         cond = _build_cond_from_pred_embeds(conditioner, embeds_pred)
 
-    # Sampling
-    pred_lab0_batch, model_conf_ret, _ = _sample_with_confidence(
+    # Sampling - 修改这里以适配实际返回值数量
+    result = _sample_with_confidence(
         denoiser, schedule, x0_t, mask_t, cond, num_samples=args.num_samples
     )
+    
+    # 根据实际返回值数量处理
+    if isinstance(result, tuple) and len(result) >= 2:
+        pred_lab0_batch, model_conf_ret = result[0], result[1]
+    else:
+        # 如果返回值不符合预期，抛出错误
+        raise ValueError(f"_sample_with_confidence returned unexpected format: {result}")
     
     # Extract Confidence Safely
     conf_vals = None
@@ -218,6 +225,12 @@ def main():
         h, w = img.shape[:2]
         spatial_conf = get_spatial_confidence(mask)
         color_conf_map = np.ones((h, w), dtype=np.float32)
+        
+        # 修复：确保hole_confidences是一维数组，形状与hole_indices[0]相同
+        if hole_confidences.ndim > 1:
+            # 如果是多维数组，取第一个值或平均值
+            hole_confidences = np.mean(hole_confidences, axis=-1) if hole_confidences.ndim > 1 else hole_confidences.flatten()
+        
         color_conf_map[hole_indices] = hole_confidences
         final_conf = spatial_conf * color_conf_map
     else:
