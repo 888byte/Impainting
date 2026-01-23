@@ -419,10 +419,24 @@ class MuralInpaintingDataset(Dataset):
             confidence.astype(np.float32)
         ).unsqueeze(0)                                             # [1, H, W]
         
+        # 生成灰度图和边缘图（与原训练代码兼容）
+        gt_gray = cv2.cvtColor(gt, cv2.COLOR_RGB2GRAY)
+        gt_gray_tensor = torch.from_numpy(
+            gt_gray.astype(np.float32) / 255.0
+        ).unsqueeze(0)                                             # [1, H, W]
+        
+        # 边缘检测 (Canny)
+        gt_edge = cv2.Canny(gt, 50, 150)
+        gt_edge_tensor = torch.from_numpy(
+            gt_edge.astype(np.float32) / 255.0
+        ).unsqueeze(0)                                             # [1, H, W]
+        
         return {
             'degraded': degraded_tensor,
             'GT': gt_tensor,  # 与原数据集兼容
             'gt': gt_tensor,
+            'GT_gray': gt_gray_tensor,   # 灰度图（与原训练代码兼容）
+            'GT_edge': gt_edge_tensor,   # 边缘图（与原训练代码兼容）
             'mask': mask_tensor,
             'color_prior': color_prior_tensor,
             'confidence': confidence_tensor,
