@@ -14,7 +14,28 @@ def define_G(opt):
     opt_net = opt["network_G"]
     which_model = opt_net["which_model_G"]
     setting = opt_net["setting"]
-    netG = getattr(M, which_model)(**setting)
+    
+    # ============================================================
+    # BrushNet集成模型支持（新增）
+    # ============================================================
+    if which_model == "ConditionalUNetWithBrushNet":
+        # 从brushnet_wrapper导入
+        from models.brushnet_wrapper import ConditionalUNetWithBrushNet
+        # 获取BrushNet配置
+        brushnet_opt = opt.get("brushnet", {})
+        netG = ConditionalUNetWithBrushNet(
+            in_nc=setting.get("in_nc", 3),
+            out_nc=setting.get("out_nc", 3),
+            nf=setting.get("nf", 64),
+            depth=setting.get("depth", 4),
+            brushnet_in_nc=brushnet_opt.get("in_nc", 8),
+            brushnet_enabled=brushnet_opt.get("enabled", True),
+            brushnet_lite=brushnet_opt.get("lite", False)
+        )
+    else:
+        # 原有逻辑
+        netG = getattr(M, which_model)(**setting)
+    
     Dis = Discriminator(nc = 4, ngf = 32, t_emb_dim = 256,act=nn.LeakyReLU(0.2))
     return netG, Dis
   

@@ -35,7 +35,14 @@ import numpy as np
 from typing import Dict, Optional, Tuple
 
 # 导入LUT处理器
-from .lut_processor import LUTProcessor
+import sys
+import os
+# 添加当前目录到路径以支持相对导入
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
+
+from lut_processor import LUTProcessor
 
 
 class ColorPriorGenerator:
