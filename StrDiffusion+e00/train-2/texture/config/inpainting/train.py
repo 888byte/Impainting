@@ -318,31 +318,60 @@ def main():
             if current_step > total_iters:
                 break
 
-            Y_GT, X_GT, X_LQ = train_data["GT"], train_data["GT_gray"], train_data["GT_edge"]  ##completed grayscale and edge images
-
-            ## load mask information
-            try:
-                mask = next(mask_iterator)
-            except StopIteration:
-                mask_iterator = iter(train_loader_mask)
-                mask = next(mask_iterator)
-
-            # ============ BrushNet: 生成颜色先验和置信度 ============
-            color_prior = None
-            confidence = None
+            # ============ 区分数据集模式 ============
+            is_mural_mode = 'degraded' in train_data  # mural_inpainting 数据集特有
             
-            if color_prior_gen is not None:
-                # 生成颜色先验和置信度（在 CPU 上处理）
-                color_prior, confidence = color_prior_gen.generate_tensor(
-                    Y_GT,  # 使用原始图像
-                    1 - mask,  # ColorPriorGenerator 期望 1=缺失
-                    device=device
-                )
-            # ============ BrushNet 颜色先验完成 ============
-
-            timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)  ###timestep>2
-            model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ, 
-                           color_prior=color_prior, confidence=confidence)  # 添加颜色先验参数
+            if is_mural_mode:
+                # Mural Inpainting 模式：使用数据集提供的完整数据
+                Y_degraded = train_data["degraded"]  # 褪色图像（输入）
+                Y_GT = train_data["GT"]              # LUT变换后的GT（目标）
+                X_GT = train_data["GT_gray"]         # 灰度图
+                X_LQ = train_data["GT_edge"]         # 边缘图
+                mask = train_data["mask"]            # 使用数据集的mask
+                color_prior = train_data["color_prior"]
+                confidence = train_data["confidence"]
+            else:
+                # 原始模式：兼容旧数据集
+                Y_GT, X_GT, X_LQ = train_data["GT"], train_data["GT_gray"], train_data["GT_edge"]
+                Y_degraded = Y_GT  # 原始模式下 degraded = GT
+                
+                # 从外部加载mask
+                try:
+                    mask = next(mask_iterator)
+                except StopIteration:
+                    mask_iterator = iter(train_loader_mask)
+                    mask = next(mask_iterator)
+                
+                # 使用 ColorPriorGenerator 生成先验
+                color_prior = None
+                confidence = None
+                if color_prior_gen is not None:
+                    color_prior, confidence = color_prior_gen.generate_tensor(
+                        Y_GT, 1 - mask, device=device
+                    )
+            
+            # 确保数据在正确设备上
+            Y_degraded = Y_degraded.to(device)
+            Y_GT = Y_GT.to(device)
+            X_GT = X_GT.to(device)
+            X_LQ = X_LQ.to(device)
+            mask = mask.to(device)
+            if color_prior is not None:
+                color_prior = color_prior.to(device)
+            if confidence is not None:
+                confidence = confidence.to(device)
+            
+            # ============ SDE训练 ============
+            # 注意：mask约定为 1=已知, 0=缺失
+            # 对于mural数据集，mask来自数据集（1=缺失），需要取反
+            if is_mural_mode:
+                mask_for_sde = 1 - mask  # 转换为 1=已知, 0=缺失
+            else:
+                mask_for_sde = mask  # 原始数据集的mask已经是 1=已知
+            
+            timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_degraded*mask_for_sde)
+            model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
+                           color_prior=color_prior, confidence=confidence)
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]
@@ -352,11 +381,11 @@ def main():
             if debug_logger is not None and debug_logger.should_save(current_step):
                 debug_logger.save_training_state(
                     step=current_step,
-                    input_image=Y_GT,
-                    gt=Y_GT,  # 目前GT与原图相同，后续可改为LUT变换后的GT
-                    color_prior=color_prior if color_prior is not None else Y_GT,
+                    input_image=Y_degraded,  # 褪色图像（输入）
+                    gt=Y_GT,                  # LUT变换后的GT（目标）
+                    color_prior=color_prior if color_prior is not None else Y_degraded,
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
-                    mask=1 - mask  # 调试时使用 1=缺失 的约定
+                    mask=mask if is_mural_mode else (1 - mask)  # 统一为 1=缺失
                 )
             # ============ 调试保存完成 ============
 

@@ -33,7 +33,7 @@ datasets:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
     dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images # 修改为实际图像目录
-    dataroot_mask: ~ # 可选，不提供则动态生成
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks # 可选，不提供则动态生成
     
     # GT生成模式选项:
     # - full: 全图LUT映射（模型学习恢复整张图的颜色）
