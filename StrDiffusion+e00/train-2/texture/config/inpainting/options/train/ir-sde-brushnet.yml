@@ -1,0 +1,119 @@
+#### 壁画修复 BrushNet 训练配置
+# 本配置文件用于集成 BrushNet 的 StrDiffusion 训练
+# 独立于原始 ir-sde.yml，不影响原有代码
+
+name: ir-sde-brushnet
+use_tb_logger: true
+model: denoising
+distortion: inpainting
+gpu_ids: [0]
+
+#### SDE配置
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+
+#### 退化配置
+degradation:
+  mask_root: /path/to/your/mask/directory  # 修改为实际掩码目录
+
+#### LUT配置
+lut:
+  # LUT文件路径（占位符，请修改为实际路径）
+  path: ./pigment_lut33.npz
+  # 置信度融合权重
+  alpha: 0.7  # LUT置信度权重
+  beta: 0.3   # 修复置信度权重
+  # 修复方法: telea 或 ns
+  inpaint_method: telea
+
+#### BrushNet配置
+brushnet:
+  enabled: true        # 是否启用BrushNet
+  in_nc: 8             # 输入通道数 (3+1+3+1)
+  nf: 64               # 基础特征通道数（与主UNet对齐）
+  depth: 4             # 下采样深度（与主UNet对齐）
+  lite: false          # 是否使用轻量版
+
+#### 数据集配置
+datasets:
+  train:
+    name: MuralInpainting_Dataset
+    mode: mural_inpainting
+    dataroot_GT: /path/to/your/image/directory  # 修改为实际图像目录
+    dataroot_mask: /path/to/your/mask/directory  # 可选，不提供则动态生成
+    
+    # GT生成模式选项:
+    # - full: 全图LUT映射（模型学习恢复整张图的颜色）
+    # - partial: 仅Mask区域LUT映射（保留背景，修复局部）
+    # - mixed: 训练时随机选择 full 或 partial（各50%概率）
+    gt_mode: mixed
+    
+    use_shuffle: true
+    n_workers: 8
+    batch_size: 16
+    GT_size: 256
+    use_flip: true
+    use_rot: true
+    color: RGB
+
+#### 网络结构
+network_G:
+  which_model_G: ConditionalUNetWithBrushNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+
+#### 路径配置
+path:
+  # 预训练模型（可选）
+  pretrain_model_G: ~
+  strict_load: false
+  # 恢复训练状态（可选）
+  resume_state: ~
+
+#### 训练设置
+train:
+  optimizer: Adam
+  lr_G: !!float 1e-4
+  lr_scheme: MultiStepLR
+  beta1: 0.9
+  beta2: 0.999
+  niter: 150000
+  warmup_iter: 5000
+  lr_steps: [40000, 80000, 110000]
+  lr_gamma: 0.5
+  eta_min: !!float 1e-7
+
+  # 损失函数
+  is_weighted: False
+  loss_type: l1
+  weight: 1.0
+
+  manual_seed: 0
+
+#### Debug配置
+debug:
+  # 是否开启调试模式
+  enabled: false
+  # 调试输出目录
+  log_dir: debug_logs/
+  # 保存频率（每N个iteration保存一次）
+  save_freq: 500
+  # 保存的内容：input_image, transformed_gt, generated_prior, confidence_map, masked_input
+  save_items:
+    - input_image
+    - transformed_gt
+    - generated_prior
+    - confidence_map
+    - masked_input
+
+#### 日志配置
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  use_tb_logger: true
