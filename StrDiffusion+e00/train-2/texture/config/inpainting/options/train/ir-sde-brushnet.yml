@@ -99,7 +99,7 @@ train:
 #### Debug配置
 debug:
   # 是否开启调试模式
-  enabled: false
+  enabled: true
   # 调试输出目录
   log_dir: debug_logs/
   # 保存频率（每N个iteration保存一次）

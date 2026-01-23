@@ -41,6 +41,7 @@ MuralDH/
 **/*.pyc
 **/__pycache__/
 **/log/
+**/debug_logs/
 
 **/Val_Dataset/
 
