@@ -12,14 +12,32 @@ sde:
   eps: 0.005
 
 degradation:
-  mask_root: /home/lab610/Impainting/dataset/裁剪的图片/train/output_masks
-  
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+
+#### 第一阶段配置
+debug_mode: true
+debug_dir: debug_logs
+
+lut:
+  lut_path: assets/pigment_lut33.npz
+  stage1:
+    inpaint_backend: auto
+    inpaint_method: telea
+    inpaint_radius: 3
+    large_mask_ratio: 0.30
+    large_mask_downsample: 0.5
+    alpha: 0.7
+    beta: 0.3
+    inpaint_base_conf: 0.15
+    inpaint_decay_strength: 1.0
+
+
 #### datasets
 datasets:
   train:
     name: Train_Dataset
     mode: GT
-    dataroot_GT: /home/lab610/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
 
     use_shuffle: true
     n_workers: 8
@@ -32,18 +50,30 @@ datasets:
 
 #### network structures
 network_G:
-  which_model_G: ConditionalUNet
+  # which_model_G: ConditionalUNet
+  # setting:
+  #   in_nc: 3
+  #   out_nc: 3
+  #   nf: 64
+  #   depth: 4
+  which_model_G: ConditionalUNetWithBrush
   setting:
     in_nc: 3
     out_nc: 3
     nf: 64
     depth: 4
+    guide_dim: 64
+    use_conf_gate: true
+    brush_setting:
+      in_nc: 8
+      nf: 64
+      depth: 4
 
 #### path
 path:
-  pretrain_model_G: /home/lab610/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
   strict_load: false
-  resume_state: /home/lab610/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/training_state/best.state
+  resume_state: ~
 
 #### training settings: learning rate scheme, loss
 train:

@@ -212,7 +212,16 @@ class DenoisingModel(BaseModel):
         # Get noise and score
         S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
         S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
-        noise,_ = sde.noise_fn(self.state, timesteps.squeeze(),S_optimum)
+        #noise,_ = sde.noise_fn(self.state, timesteps.squeeze(),S_optimum)
+
+        # 需要先在 feed_data 里生成 self.color_prior / self.conf_map（用 ColorPriorGenerator）
+        noise, g_score = sde.noise_fn(
+            self.state, timesteps.squeeze(), S_optimum,
+            mask=self.mask,
+            color_prior=self.color_prior,
+            conf_map=self.conf_map
+        )
+
         score = sde.get_score_from_noise(noise, timesteps)
         yt_1_expection = sde.reverse_sde_step_mean(self.state, score, timesteps)
         
