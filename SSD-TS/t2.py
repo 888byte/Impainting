@@ -10,6 +10,15 @@ python t2.py \
   --cond_method pred\
   --library_npz data/standard_alignment/library_embeddings.npz \
   --num_samples 30
+
+  python t2.py \
+  --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
+  --input_image /home/610-wws/Impainting/SSD-TS/1.png \
+  --output_image test_restored_block.png \
+  --n_colors 32 \
+  --cond_method pred\
+  --library_npz data/standard_alignment/library_embeddings.npz \
+  --num_samples 30
 """
 import argparse
 import os
@@ -115,7 +124,7 @@ def batch_inference(rgb_centers, model_components, args, device, lib_raman, lab_
     # 3. Parallel Sampling
     # _sample_with_confidence runs the diffusion loop `num_samples` times.
     # Inside each loop, it processes the entire batch of K items.
-    pred_lab0_batch, _ = _sample_with_confidence(
+    pred_lab0_batch, _, _ = _sample_with_confidence(
         denoiser, schedule, x0_t, mask_t, cond, num_samples=args.num_samples
     )
     # pred_lab0_batch shape: (K, 3), denormalized

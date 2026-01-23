@@ -11,6 +11,7 @@
 **/temp/
 **/ckpt/
 **/experiments/
+**/debug_color_guidance/
 
 dataset/
 MuralDH/
@@ -37,6 +38,9 @@ MuralDH/
 **/*.exe
 **/*.pyc
 **/__pycache__/
+
+**.state
+**.log
 
 # ------------- 可选：排除所有子项目自身的.git目录（避免主仓库嵌套Git）-------------
 # 若你不想把每个子项目的Git历史上传到主仓库，添加此条

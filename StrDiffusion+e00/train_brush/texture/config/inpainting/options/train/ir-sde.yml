@@ -12,14 +12,14 @@ sde:
   eps: 0.005
 
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+  mask_root: /home/lab610/Impainting/dataset/裁剪的图片/train/output_masks
   
 #### datasets
 datasets:
   train:
     name: Train_Dataset
     mode: GT
-    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_GT: /home/lab610/Impainting/dataset/裁剪的图片/train/cropped_images
 
     use_shuffle: true
     n_workers: 8
@@ -39,31 +39,12 @@ network_G:
     nf: 64
     depth: 4
 
-    color_guidance:
-      enable: true            # true 开启
-      lut_npz: "/home/610-wws/Impainting/SSD-TS/pigment_lut33.npz"
-      use_conf: true
-      conf_gamma: 1.0
-      base_channels: 32
-      inject:
-        down: true
-        mid: true
-        up: false
-        multi_scale: true
-        bottleneck_only: false
-        alpha: 1.0
-      debug:
-        save: true
-        every_n: 10
-        out_dir: "./debug_color_guidance"
-
-    
-
 #### path
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_G: /home/lab610/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
   strict_load: false
-  resume_state: ~
+  resume_state: /home/lab610/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/training_state/best.state
+
 #### training settings: learning rate scheme, loss
 train:
   optimizer: Adam

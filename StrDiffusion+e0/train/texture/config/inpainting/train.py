@@ -25,7 +25,6 @@ from data.util import bgr2ycbcr
 import str_utils as str_util
 
 import os.path as osp
-import os
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np

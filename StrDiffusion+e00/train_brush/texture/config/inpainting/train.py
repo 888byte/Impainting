@@ -25,6 +25,7 @@ from data.util import bgr2ycbcr
 import str_utils as str_util
 
 import os.path as osp
+import os
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
@@ -110,12 +111,8 @@ def main():
                     and "resume" not in key
                 )
             )
-            if os.path.islink("./log") or os.path.isdir("./log"):  # 检查这一行是否存在
-                os.system("rm ./log")  # 修改这一行，确保正确使用 os 模块
+            os.system("rm ./log")
             os.symlink(os.path.join(opt["path"]["experiments_root"], ".."), "./log")
-
-        # 确保日志目录存在
-        os.makedirs(opt["path"]["log"], exist_ok=True)
 
         # config loggers. Before it, the log will not work
         util.setup_logger(
@@ -281,54 +278,8 @@ def main():
                 mask_iterator = iter(train_loader_mask)
                 mask = next(mask_iterator)
 
-            # timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)  ###timestep>2
-            # model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ)  # xt, mu, x0, mask
-
-            # ---- Color guidance: build LUT prior + conf on-the-fly (no disk I/O) ----
-            if hasattr(model, "build_color_guidance") and getattr(model, "use_color_guidance", False):
-                prior_blend, conf_map, edit_mask = model.build_color_guidance(Y_GT, mask)
-                Y_target = prior_blend
-
-                timesteps, states = sde.generate_random_states(x0=Y_target, mu=Y_GT*mask)
-                model.feed_data(
-                    states, Y_GT*mask, Y_target, mask, S_sde, X_GT, X_LQ,
-                    color_prior=prior_blend, color_conf=conf_map, color_mask=edit_mask, GT_original=Y_GT
-                )
-                
-                # ---- Debug: save intermediate results if enabled ----
-                if getattr(model, "cg_debug_save", False) and (current_step % getattr(model, "cg_debug_every_n", 200) == 0):
-                    from torchvision.utils import save_image
-                    debug_out_dir = getattr(model, "cg_debug_out_dir", "./debug_color_guidance")
-                    os.makedirs(debug_out_dir, exist_ok=True)
-                    
-                    # 确保所有张量都在同一设备上
-                    device = Y_GT.device  # 获取主要张量的设备
-                    prior_blend = prior_blend.to(device)
-                    conf_map = conf_map.to(device)
-                    mask = mask.to(device)
-                    
-                    # 生成仅在mask区域应用颜色变换的图像
-                    color_prior_in_mask = prior_blend * mask + Y_GT * (1 - mask)
-                    
-                    # 保存当前批次的图像用于调试
-                    # 顺序：原图、mask区域内变色的原图、mask图、颜色先验图、置信度图
-                    save_image(
-                        torch.cat([
-                            Y_GT,  # 原始图像
-                            color_prior_in_mask,  # mask区域内变色的原图（仅在mask区域内变色）
-                            mask.repeat(1,3,1,1), # mask图（复制到3通道以显示）
-                            prior_blend,  # 颜色先验图（整个图都变了色，但实际只有mask区域有效）
-                            conf_map.repeat(1,3,1,1),  # 置信度图（复制到3通道以显示）
-                        ], dim=0),
-                        os.path.join(debug_out_dir, f"debug_step_{current_step}.png"),
-                        nrow=Y_GT.size(0),
-                        normalize=True,
-                        value_range=(0, 1)
-                    )
-            else:
-                timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)
-                model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ)
-
+            timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)  ###timestep>2
+            model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ)  # xt, mu, x0, mask
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]
@@ -371,9 +322,7 @@ def main():
                     best_loss = ema_loss
                     logger.info(f"[best] iter={current_step} best_ema_loss={best_loss:.6e}. Saving best model/state.")
                     model.save("best")
-                    
-                    # 只有在最佳损失更新时才保存最佳模型的训练状态，避免保存过多state文件
-                    model.save_training_state(epoch, "best")
+                    model.save_training_state(epoch, current_step)
             #———————————————————检查点保存—————————————————————————
             #———————————————————检查点保存—————————————————————————
 
@@ -446,6 +395,8 @@ class Datasetset_mask(Dataset):
 
 
 if __name__ == "__main__":
+    import os
+
     cuda_home = os.getenv("CUDA_HOME")
 
     if cuda_home is None:
@@ -453,4 +404,5 @@ if __name__ == "__main__":
     else:
         print("CUDA_HOME:", cuda_home)
 
+    
     main()

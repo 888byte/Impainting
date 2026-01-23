@@ -2,9 +2,8 @@ import logging
 from collections import OrderedDict
 import os
 import numpy as np
-import cv2
-from sklearn.cluster import KMeans
-from scipy.spatial.distance import cdist
+
+import math
 import torch
 import torch.nn as nn
 from torch.nn.parallel import DataParallel, DistributedDataParallel
@@ -31,8 +30,6 @@ from torchvision import transforms
 
 from skimage.feature import canny
 from skimage.color import gray2rgb, rgb2gray
-
-from str_utils.lut3d import Lut3D
 
 
 def tensor_to_image():
@@ -108,27 +105,6 @@ class DenoisingModel(BaseModel):
         self.model, self.dis = networks.define_G(opt)
         self.model = self.model.to(self.device)
         self.dis = self.dis.to(self.device)
-
-        # ---- Color guidance (3D LUT prior + confidence) ----
-        self.color_cfg = opt.get("network_G", {}).get("setting", {}).get("color_guidance", {}) or {}
-        self.use_color_guidance = bool(self.color_cfg.get("enable", False))
-        self.lut3d = None
-        if self.use_color_guidance:
-            lut_npz = self.color_cfg.get("lut_npz", None)
-            if lut_npz is None:
-                raise ValueError("color_guidance.enable=True but `lut_npz` is not set in options yml")
-            self.lut3d = Lut3D(lut_npz, device=self.device)
-
-        debug_cfg = self.color_cfg.get("debug", {}) if isinstance(self.color_cfg.get("debug", {}), dict) else {}
-        self.cg_debug_save = bool(debug_cfg.get("save", False))
-        self.cg_debug_every_n = int(debug_cfg.get("every_n", 200))
-        self.cg_debug_out_dir = str(debug_cfg.get("out_dir", "./debug_color_guidance"))
-
-        self.color_prior = None
-        self.color_conf = None
-        self.color_mask = None
-        self.GT_original = None
-
         
         #必改
         gpu_ids = opt.get('gpu_ids', None)
@@ -215,142 +191,16 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ,
-              color_prior=None, color_conf=None, color_mask=None, GT_original=None):
-
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ):
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)  # LQ
         #if GT is not None: 
         self.state_0 = GT.to(self.device)  # GT
         self.mask = mask.to(self.device) # mask
-
-        # ---- Store / build color guidance (optional) ----
-        self.GT_original = GT_original.to(self.device) if (GT_original is not None) else None
-
-        if getattr(self, 'use_color_guidance', False):
-            if color_prior is None or color_conf is None or color_mask is None:
-                base = self.GT_original if (self.GT_original is not None) else self.state_0
-                prior_blend, conf_map, edit_mask = self.build_color_guidance(base, self.mask)
-                self.color_prior, self.color_conf, self.color_mask = prior_blend, conf_map, edit_mask
-            else:
-                self.color_prior = color_prior.to(self.device)
-                self.color_conf = color_conf.to(self.device)
-                self.color_mask = color_mask.to(self.device)
-        else:
-            self.color_prior, self.color_conf, self.color_mask = None, None, None
-
-
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
 
-
-    @torch.no_grad()
-    def build_color_guidance(self, img: torch.Tensor, mask: torch.Tensor):
-        if (not getattr(self, "use_color_guidance", False)) or (self.lut3d is None):
-            edit_mask = (1.0 - mask).clamp(0.0, 1.0)
-            conf = torch.zeros_like(edit_mask)
-            return img, conf, edit_mask
-
-        img = img.to(self.device)
-        mask = mask.to(self.device).float()
-        edit_mask = (1.0 - mask).clamp(0.0, 1.0)  # 1 in the hole, 0 in the context
-
-        # Convert tensors to numpy for processing similar to t5.py
-        img_np = img.cpu().numpy().transpose(0, 2, 3, 1)  # (B, H, W, 3)
-        mask_np = mask.cpu().numpy().transpose(0, 2, 3, 1)  # (B, H, W, 1)
-
-        batch_results = []
-        batch_confs = []
-
-        for i in range(img_np.shape[0]):
-            curr_img = (img_np[i] * 255).astype(np.uint8)  # Convert to uint8
-            curr_mask = (mask_np[i, :, :, 0] * 255).astype(np.uint8)  # Convert to uint8
-
-            # Extract context pixels (outside the mask)
-            context_pixels = curr_img[curr_mask == 0]  # Pixels in the context region
-
-            if context_pixels.size == 0:
-                # If no context pixels, return original
-                batch_results.append(img[i:i+1])
-                batch_confs.append(torch.zeros_like(mask[i:i+1]))
-                continue
-
-            # Perform clustering on context pixels to get "faded" palette
-            n_colors = min(32, len(context_pixels))  # Number of clusters
-            if n_colors <= 0:
-                batch_results.append(img[i:i+1])
-                batch_confs.append(torch.zeros_like(mask[i:i+1]))
-                continue
-
-            # Use K-means to cluster context pixels
-            kmeans = KMeans(n_clusters=n_colors, random_state=0, n_init=10)
-            labels = kmeans.fit_predict(context_pixels)
-            faded_palette = kmeans.cluster_centers_.astype(np.float32)
-
-            # Apply LUT to the faded palette to get restored colors
-            # First convert to tensor format for LUT processing
-            palette_tensor = torch.from_numpy(faded_palette / 255.0).unsqueeze(0).permute(0, 2, 1).unsqueeze(-1).to(self.device)
-            restored_palette_tensor, _ = self.lut3d.apply(palette_tensor)
-            restored_palette = restored_palette_tensor.squeeze().permute(1, 0).cpu().numpy() * 255.0
-            restored_palette = np.clip(restored_palette, 0, 255).astype(np.uint8)
-
-            # Create the result image - only modify the masked region
-            result_img = img_np[i] * 255  # Start with original image
-
-            # Find hole pixels (inside the mask)
-            hole_coords = np.where(curr_mask == 255)
-            if len(hole_coords[0]) > 0:
-                hole_pixels = curr_img[hole_coords]
-
-                # Find nearest neighbor for each hole pixel in the faded palette
-                distances = cdist(hole_pixels.reshape(-1, 3), faded_palette, 'euclidean')
-                nearest_indices = np.argmin(distances, axis=1)
-
-                # Replace hole pixels with corresponding restored colors
-                restored_hole_pixels = np.array([restored_palette[idx] for idx in nearest_indices])
-                result_img[hole_coords] = restored_hole_pixels
-
-                # Calculate confidence based on spatial and color factors
-                # Spatial confidence
-                hole_mask_binary = np.zeros_like(curr_mask)
-                hole_mask_binary[hole_coords] = 255
-                dist_map = cv2.distanceTransform(255 - hole_mask_binary, cv2.DIST_L2, 5)
-                max_dist = float(dist_map.max()) + 1e-8
-                norm_dist = dist_map / max_dist
-                spatial_conf = 1.0 - norm_dist
-                spatial_conf = np.clip(spatial_conf, 0.1, 1.0)
-                spatial_conf[hole_mask_binary == 0] = 1.0
-
-                # Color confidence - use the minimum distance as a proxy
-                min_distances = np.min(distances, axis=1)
-                max_possible_dist = np.sqrt(3 * (255**2))  # Max RGB distance
-                color_conf_values = 1.0 - (min_distances / max_possible_dist)
-                color_conf_map = np.zeros_like(curr_mask, dtype=np.float32)
-                color_conf_map[hole_coords] = color_conf_values
-
-                # Combine confidences
-                combined_conf_map = spatial_conf * color_conf_map
-            else:
-                # No hole pixels
-                combined_conf_map = np.zeros_like(curr_mask, dtype=np.float32)
-
-            # Convert result back to tensor format
-            result_tensor = torch.from_numpy(result_img.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            conf_tensor = torch.from_numpy(combined_conf_map).unsqueeze(0).unsqueeze(0).to(self.device)
-
-            batch_results.append(result_tensor)
-            batch_confs.append(conf_tensor)
-
-        # Stack batch results
-        if batch_results:
-            prior_blend = torch.cat(batch_results, dim=0)
-            final_conf = torch.cat(batch_confs, dim=0)
-        else:
-            prior_blend = img
-            final_conf = torch.zeros_like(mask)
-
-        return prior_blend, final_conf, edit_mask
 
 
     def optimize_parameters(self, step, timesteps, sde=None):
@@ -362,14 +212,7 @@ class DenoisingModel(BaseModel):
         # Get noise and score
         S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
         S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
-        #noise,_ = sde.noise_fn(self.state, timesteps.squeeze(),S_optimum)
-
-        if getattr(self, 'use_color_guidance', False) and (self.color_prior is not None):
-            noise,_ = sde.noise_fn(self.state, timesteps.squeeze(), S=S_optimum,
-                                color_prior=self.color_prior, color_conf=self.color_conf, color_mask=self.color_mask)
-        else:
-            noise,_ = sde.noise_fn(self.state, timesteps.squeeze(), S=S_optimum)
-
+        noise,_ = sde.noise_fn(self.state, timesteps.squeeze(),S_optimum)
         score = sde.get_score_from_noise(noise, timesteps)
         yt_1_expection = sde.reverse_sde_step_mean(self.state, score, timesteps)
         

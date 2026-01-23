@@ -16,64 +16,6 @@ from .module_util import (
     PreNorm, Residual)
 
 from torch.nn import init
-
-# -------------------------
-# Color guidance adapter
-# -------------------------
-
-class ZeroConv2d(nn.Conv2d):
-    """1x1 conv initialized to zeros (like ControlNet / T2I-Adapter)."""
-    def __init__(self, in_ch: int, out_ch: int):
-        super().__init__(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=True)
-        nn.init.zeros_(self.weight)
-        if self.bias is not None:
-            nn.init.zeros_(self.bias)
-
-
-class ColorGuidanceEncoder(nn.Module):
-    """
-    Lightweight CNN encoder that produces multi-scale features from
-    (color_prior, conf, mask) input.
-
-    Output: list length = depth
-      feats[i] corresponds to UNet down stage i resolution.
-    """
-    def __init__(self, in_ch: int = 5, base_ch: int = 32, depth: int = 4, max_ch: int = 256):
-        super().__init__()
-        self.depth = depth
-
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_ch, base_ch, 3, 1, 1),
-            nn.SiLU(inplace=True),
-        )
-
-        self.blocks = nn.ModuleList()
-        self.out_channels = []
-
-        ch = base_ch
-        for i in range(depth):
-            out_ch = min(max_ch, base_ch * (2 ** (i + 1)))
-            stride = 2 if i < depth - 1 else 1
-            blk = nn.Sequential(
-                nn.Conv2d(ch, out_ch, 3, stride, 1),
-                nn.SiLU(inplace=True),
-                nn.Conv2d(out_ch, out_ch, 3, 1, 1),
-                nn.SiLU(inplace=True),
-            )
-            self.blocks.append(blk)
-            self.out_channels.append(out_ch)
-            ch = out_ch
-
-    def forward(self, x):
-        x = self.stem(x)
-        feats = []
-        for blk in self.blocks:
-            x = blk(x)
-            feats.append(x)
-        return feats
-# -------------------------
-
-
 class BaseNetwork(nn.Module):
     def __init__(self):
         super(BaseNetwork, self).__init__()
@@ -239,42 +181,9 @@ class SPADEBlock(BaseNetwork):
     def actvn(self, x):
         return F.leaky_relu(x, 2e-1)
 class ConditionalUNet(nn.Module):
-    def __init__(self, in_nc, out_nc, nf, depth=4, upscale=1, color_guidance=None):
+    def __init__(self, in_nc, out_nc, nf, depth=4, upscale=1):
         super().__init__()
         self.depth = depth
-
-        # ---- Color guidance config (optional) ----
-        self.cg_cfg = color_guidance or {}
-        self.cg_enable = bool(self.cg_cfg.get('enable', False))
-        if self.cg_enable:
-            base_ch = int(self.cg_cfg.get('base_channels', 32))
-            self.cg_use_conf = bool(self.cg_cfg.get('use_conf', True))
-            self.cg_conf_gamma = float(self.cg_cfg.get('conf_gamma', 1.0))
-            inject = self.cg_cfg.get('inject', {}) if isinstance(self.cg_cfg.get('inject', {}), dict) else {}
-            self.cg_alpha = float(inject.get('alpha', 1.0))
-            self.cg_bottleneck_only = bool(inject.get('bottleneck_only', False))
-            self.cg_inject_down = bool(inject.get('down', True))
-            self.cg_inject_mid = bool(inject.get('mid', True))
-            self.cg_inject_up = bool(inject.get('up', False))
-            self.cg_multi_scale = bool(inject.get('multi_scale', True))
-
-            self.cg_encoder = ColorGuidanceEncoder(in_ch=5, base_ch=base_ch, depth=depth)
-
-            down_out_ch = [nf * (2 ** (i + 1)) for i in range(depth)]
-            self.cg_down_proj = nn.ModuleList([
-                ZeroConv2d(self.cg_encoder.out_channels[i], down_out_ch[i]) for i in range(depth)
-            ])
-
-            # If multi_scale disabled -> use deepest feature for all stages (upsample)
-            self.cg_down_proj_single = nn.ModuleList([
-                ZeroConv2d(self.cg_encoder.out_channels[-1], down_out_ch[i]) for i in range(depth)
-            ])
-
-            mid_dim = down_out_ch[-1]
-            self.cg_mid_proj = ZeroConv2d(self.cg_encoder.out_channels[-1], mid_dim)
-
-        
-
         self.upscale = upscale # not used
 
         block_class = functools.partial(ResBlock, conv=default_conv, act=NonLinearity())
@@ -339,7 +248,7 @@ class ConditionalUNet(nn.Module):
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
-    def forward(self, xt, cond, time=-1, S = None, color_prior=None, color_conf=None, color_mask=None):
+    def forward(self, xt, cond, time=-1, S = None):
         if isinstance(time, int) or isinstance(time, float):
             time = torch.tensor([time]).to(xt.device)
         
@@ -349,43 +258,12 @@ class ConditionalUNet(nn.Module):
         H, W = x.shape[2:]
         x = self.check_image_size(x, H, W)
 
-        # ---- Color guidance prep ----
-        cg_feats = None
-        cg_gate_base = None
-        if getattr(self, "cg_enable", False) and (color_prior is not None):
-            if color_prior.shape[-2:] != (H, W):
-                color_prior = F.interpolate(color_prior, size=(H, W), mode="bilinear", align_corners=False)
-
-            if color_conf is None:
-                color_conf = torch.ones((color_prior.shape[0], 1, H, W), device=color_prior.device, dtype=color_prior.dtype)
-            elif color_conf.shape[-2:] != (H, W):
-                color_conf = F.interpolate(color_conf, size=(H, W), mode="bilinear", align_corners=False)
-
-            if color_mask is None:
-                color_mask = torch.ones((color_prior.shape[0], 1, H, W), device=color_prior.device, dtype=color_prior.dtype)
-            elif color_mask.shape[-2:] != (H, W):
-                color_mask = F.interpolate(color_mask, size=(H, W), mode="nearest")
-
-            cg_in = torch.cat([color_prior, color_conf, color_mask], dim=1)
-            cg_in = self.check_image_size(cg_in, H, W)
-            cg_feats = self.cg_encoder(cg_in)
-
-            mask_map = cg_in[:, 4:5, :, :]
-            conf_map = cg_in[:, 3:4, :, :].clamp(0.0, 1.0)
-            if getattr(self, "cg_use_conf", True):
-                cg_gate_base = mask_map * (conf_map ** getattr(self, "cg_conf_gamma", 1.0))
-            else:
-                cg_gate_base = mask_map
-
-
-
         x = self.init_conv(x)
         x_ = x.clone()
         t = self.time_mlp(time)
 
         h = [] 
         #lstm_xt = []
-        cg_i = 0
 
         
         for b1, b2, attn, downsample, guide in self.downs:#, guide
@@ -399,31 +277,11 @@ class ConditionalUNet(nn.Module):
             x = downsample(x)
             
             x = guide(x, S)
-
-            # ---- Color guidance injection (down) ----
-            if cg_feats is not None:
-                if (not getattr(self, "cg_bottleneck_only", False)) and getattr(self, "cg_inject_down", True):
-                    gate = F.interpolate(cg_gate_base, size=x.shape[-2:], mode="bilinear", align_corners=False)
-                    if getattr(self, "cg_multi_scale", True):
-                        x = x + self.cg_down_proj[cg_i](cg_feats[cg_i]) * getattr(self, "cg_alpha", 1.0) * gate
-                    else:
-                        deep = cg_feats[-1]
-                        if deep.shape[-2:] != x.shape[-2:]:
-                            deep = F.interpolate(deep, size=x.shape[-2:], mode="bilinear", align_corners=False)
-                        x = x + self.cg_down_proj_single[cg_i](deep) * getattr(self, "cg_alpha", 1.0) * gate
-                cg_i += 1
             
         
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
-
-        # ---- Color guidance injection (mid / bottleneck) ----
-        if (cg_feats is not None) and getattr(self, "cg_inject_mid", True):
-            gate = F.interpolate(cg_gate_base, size=x.shape[-2:], mode="bilinear", align_corners=False)
-            x = x + self.cg_mid_proj(cg_feats[-1]) * getattr(self, "cg_alpha", 1.0) * gate
-
-
         
         for b1, b2, attn, upsample in self.ups:
             x = torch.cat([x, h.pop()], dim=1)

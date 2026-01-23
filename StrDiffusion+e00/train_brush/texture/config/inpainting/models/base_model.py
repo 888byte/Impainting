@@ -127,10 +127,6 @@ class BaseModel:
             self.schedulers
         ), "Wrong lengths of schedulers"
         for i, o in enumerate(resume_optimizers):
-            try:
-                self.optimizers[i].load_state_dict(o)
-            except ValueError as e:
-                print(f"Warning: Failed to load optimizer state for optimizer {i}: {e}")
-                print("This may be due to model architecture changes. Continuing training with fresh optimizer.")
+            self.optimizers[i].load_state_dict(o)
         for i, s in enumerate(resume_schedulers):
             self.schedulers[i].load_state_dict(s)

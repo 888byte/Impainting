@@ -159,7 +159,7 @@ def main():
                         help='Restore palette using lut_lab or lut_rgb.')
 
     # Luminance
-    g = parser.add_mutually_exclusive_group()
+    g = parser.add_argument_group('Luminance options')
     g.add_argument('--keep_luminance', dest='keep_luminance', action='store_true',
                    help='Keep L from inpainted image, only swap (a,b). (default)')
     g.add_argument('--no_keep_luminance', dest='keep_luminance', action='store_false',
@@ -258,6 +258,7 @@ def main():
         hole_restored_rgb = lab_to_rgb(new_lab)
         hole_conf = palette_conf[nn_idx]
 
+        # 创建颜色先验图，只在mask区域应用颜色变换
         color_prior_map = inpainted_rgb.copy()
         color_prior_map[hole_indices] = hole_restored_rgb
 
