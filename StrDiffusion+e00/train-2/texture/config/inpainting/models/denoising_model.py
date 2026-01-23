@@ -191,7 +191,21 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ):
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, color_prior=None, confidence=None):
+        """
+        加载训练数据
+        
+        Args:
+            state: 噪声状态
+            LQ: 低质量输入（条件）
+            GT: Ground Truth
+            mask: 掩码
+            S_sde: 结构SDE
+            S_GT: 结构GT
+            S_LQ: 结构LQ
+            color_prior: [可选] 颜色先验图，用于BrushNet
+            confidence: [可选] 置信度图，用于BrushNet
+        """
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)  # LQ
         #if GT is not None: 
@@ -200,6 +214,17 @@ class DenoisingModel(BaseModel):
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
+        
+        # BrushNet条件（新增）
+        if color_prior is not None:
+            self.color_prior = color_prior.to(self.device)
+        else:
+            self.color_prior = None
+            
+        if confidence is not None:
+            self.confidence = confidence.to(self.device)
+        else:
+            self.confidence = None
 
 
 

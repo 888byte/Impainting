@@ -56,6 +56,21 @@ def create_dataset(dataset_opt):
     elif mode == 'BokehLQ':
         from data.BokehLQ_dataset import BokehLQDataset as D
         dataset = D(dataset_opt)
+    # ============================================================
+    # 壁画修复数据集（新增，不影响原有代码）
+    # ============================================================
+    elif mode == 'mural_inpainting':
+        from data.mural_inpainting_dataset import MuralInpaintingDataset as D
+        # 获取LUT路径和GT模式
+        lut_path = dataset_opt.get('lut_path', './pigment_lut33.npz')
+        gt_mode = dataset_opt.get('gt_mode', 'mixed')
+        debug_mode = dataset_opt.get('debug_mode', False)
+        dataset = D(
+            opt=dataset_opt,
+            lut_path=lut_path,
+            gt_mode=gt_mode,
+            debug_mode=debug_mode
+        )
     else:
         raise NotImplementedError("Dataset [{:s}] is not recognized.".format(mode))
 

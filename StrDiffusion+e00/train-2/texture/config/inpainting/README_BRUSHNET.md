@@ -68,11 +68,19 @@ brushnet:
 
 ## 🚀 训练启动
 
-### 使用新配置训练
+### 使用BrushNet配置训练（推荐）
 
 ```bash
 cd d:\code\ky\bihua\Impainting\StrDiffusion+e00\train-2\texture\config\inpainting
-python train.py -opt options/train/ir-sde-brushnet.yml
+python train_brushnet.py -opt options/train/ir-sde-brushnet.yml
+```
+
+### 使用原始train.py（需要GT数据集模式）
+
+如果使用原始 `train.py`，需要保持 `mode: GT`：
+
+```bash
+python train.py -opt options/train/ir-sde.yml
 ```
 
 ### 开启Debug模式
