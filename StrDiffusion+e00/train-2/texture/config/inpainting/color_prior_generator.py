@@ -293,9 +293,24 @@ class ColorPriorGenerator:
         # ============================================================
         # Step 4: 融合置信度
         # ============================================================
-        # 对于已知区域，使用LUT置信度
-        # 对于修复区域，进一步降低置信度
-        confidence = self.alpha * conf_lut + self.beta * conf_inpaint
+        # 关键修正：mask区域应该使用均匀的低置信度，而不是LUT置信度
+        # 因为在缺失区域，我们不知道真实的颜色，所以置信度应该是均匀的低值
+        # 只有已知区域才使用LUT置信度（带纹理信息）
+        
+        # 已知区域：使用 α * conf_lut + β * conf_inpaint
+        # 缺失区域：使用均匀的 inpaint_conf_inpainted 值
+        confidence = np.zeros_like(conf_lut)
+        mask_bool = mask > 127
+        
+        # 已知区域：使用融合置信度
+        confidence[~mask_bool] = (
+            self.alpha * conf_lut[~mask_bool] + 
+            self.beta * self.inpaint_conf_known
+        )
+        
+        # 缺失区域：使用均匀的低置信度（不带纹理！）
+        confidence[mask_bool] = self.inpaint_conf_inpainted
+        
         confidence = np.clip(confidence, 0, 1)
         
         # ============================================================

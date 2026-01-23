@@ -33,6 +33,24 @@ import numpy as np
 from torch.utils.data import DataLoader
 from itertools import cycle
 
+# ============ BrushNet 支持 ============
+# 颜色先验生成器 (按需导入)
+try:
+    from color_prior_generator import ColorPriorGenerator
+    HAS_COLOR_PRIOR = True
+except ImportError:
+    HAS_COLOR_PRIOR = False
+    print("[Warning] ColorPriorGenerator 未找到，BrushNet模式不可用")
+
+# 调试工具
+try:
+    from debug_utils import DebugLogger
+    HAS_DEBUG_UTILS = True
+except ImportError:
+    HAS_DEBUG_UTILS = False
+    print("[Warning] DebugLogger 未找到，调试模式不可用")
+# ============ BrushNet 支持 ============
+
 
 def init_dist(backend="nccl", **kwargs):
     """ initialization for distributed training"""
@@ -167,6 +185,36 @@ def main():
     #———————————————————检查点保存—————————————————————————
     #———————————————————检查点保存—————————————————————————
 
+    # ============ BrushNet 初始化 ============
+    use_brushnet = opt.get('brushnet', {}).get('enabled', False)
+    color_prior_gen = None
+    debug_logger = None
+    
+    if use_brushnet and HAS_COLOR_PRIOR:
+        lut_cfg = opt.get('lut', {})
+        lut_path = lut_cfg.get('path', None)
+        if lut_path and os.path.exists(lut_path):
+            color_prior_gen = ColorPriorGenerator(
+                lut_path=lut_path,
+                alpha=lut_cfg.get('alpha', 0.7),
+                beta=lut_cfg.get('beta', 0.3),
+                inpaint_method=lut_cfg.get('inpaint_method', 'telea')
+            )
+            logger.info(f"[BrushNet] ColorPriorGenerator 已初始化: {lut_path}")
+        else:
+            logger.warning(f"[BrushNet] LUT文件未找到: {lut_path}")
+    
+    # 调试模式
+    debug_cfg = opt.get('debug', {})
+    if debug_cfg.get('enabled', False) and HAS_DEBUG_UTILS:
+        debug_logger = DebugLogger(
+            log_dir=debug_cfg.get('log_dir', './debug_logs'),
+            enabled=True,
+            save_freq=debug_cfg.get('save_freq', 500)
+        )
+        logger.info(f"[Debug] 调试模式已启用，保存频率: {debug_cfg.get('save_freq', 500)}")
+    # ============ BrushNet 初始化 ============
+
     mask_root = opt['degradation']['mask_root']
     train_set_mask = Datasetset_mask(mask_root)
 
@@ -278,12 +326,38 @@ def main():
                 mask_iterator = iter(train_loader_mask)
                 mask = next(mask_iterator)
 
+            # ============ BrushNet: 生成颜色先验和置信度 ============
+            color_prior = None
+            confidence = None
+            
+            if color_prior_gen is not None:
+                # 生成颜色先验和置信度（在 CPU 上处理）
+                color_prior, confidence = color_prior_gen.generate_tensor(
+                    Y_GT,  # 使用原始图像
+                    1 - mask,  # ColorPriorGenerator 期望 1=缺失
+                    device=device
+                )
+            # ============ BrushNet 颜色先验完成 ============
+
             timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)  ###timestep>2
-            model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ)  # xt, mu, x0, mask
+            model.feed_data(states, Y_GT*mask, Y_GT, mask, S_sde, X_GT, X_LQ, 
+                           color_prior=color_prior, confidence=confidence)  # 添加颜色先验参数
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]
             )
+            
+            # ============ 调试保存 ============
+            if debug_logger is not None and debug_logger.should_save(current_step):
+                debug_logger.save_training_state(
+                    step=current_step,
+                    input_image=Y_GT,
+                    gt=Y_GT,  # 目前GT与原图相同，后续可改为LUT变换后的GT
+                    color_prior=color_prior if color_prior is not None else Y_GT,
+                    confidence=confidence if confidence is not None else torch.zeros_like(mask),
+                    mask=1 - mask  # 调试时使用 1=缺失 的约定
+                )
+            # ============ 调试保存完成 ============
 
             #———————————————————检查点保存—————————————————————————
             #———————————————————检查点保存—————————————————————————
