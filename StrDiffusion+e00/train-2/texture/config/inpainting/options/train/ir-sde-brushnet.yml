@@ -19,16 +19,6 @@ sde:
 degradation:
   mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks  # 修改为实际掩码目录
 
-#### LUT配置
-lut:
-  # LUT文件路径
-  path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
-  # 置信度融合权重
-  alpha: 0.7  # LUT置信度权重
-  beta: 0.3   # 修复置信度权重
-  # 修复方法: telea 或 ns
-  inpaint_method: telea
-
 #### BrushNet配置
 brushnet:
   enabled: true        # 是否启用BrushNet
@@ -51,6 +41,15 @@ datasets:
     # - mixed: 训练时随机选择 full 或 partial（各50%概率）
     gt_mode: partial
     
+    # LUT配置（放在这里便于数据集直接读取）
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
+    lut_alpha: 0.7            # LUT置信度权重
+    lut_beta: 0.3             # 修复置信度权重
+    lut_inpaint_method: telea # 修复方法: telea 或 ns
+    
+    # 调试模式（数据集级别）
+    debug_mode: false
+    
     use_shuffle: true
     n_workers: 8
     batch_size: 16
@@ -58,6 +57,7 @@ datasets:
     use_flip: true
     use_rot: true
     color: RGB
+
 
 #### 网络结构
 network_G:

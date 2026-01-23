@@ -70,7 +70,10 @@ class MuralInpaintingDataset(Dataset):
         lut_path: str,
         gt_mode: str = 'mixed',
         debug_mode: bool = False,
-        debug_dir: str = './debug_logs'
+        debug_dir: str = './debug_logs',
+        lut_alpha: float = 0.7,
+        lut_beta: float = 0.3,
+        lut_inpaint_method: str = 'telea'
     ):
         """
         初始化数据集
@@ -86,6 +89,9 @@ class MuralInpaintingDataset(Dataset):
             gt_mode: GT生成模式 ('full', 'partial', 'mixed')
             debug_mode: 是否开启调试模式
             debug_dir: 调试输出目录
+            lut_alpha: LUT置信度权重
+            lut_beta: 修复置信度权重
+            lut_inpaint_method: 修复方法 ('telea' 或 'ns')
         """
         super().__init__()
         
@@ -99,12 +105,12 @@ class MuralInpaintingDataset(Dataset):
         if self.gt_mode not in valid_modes:
             raise ValueError(f"gt_mode必须是 {valid_modes} 之一，实际为 {self.gt_mode}")
         
-        # 初始化颜色先验生成器
+        # 初始化颜色先验生成器（使用直接传入的参数）
         self.color_prior_gen = ColorPriorGenerator(
             lut_path=lut_path,
-            alpha=opt.get('lut', {}).get('alpha', 0.7),
-            beta=opt.get('lut', {}).get('beta', 0.3),
-            inpaint_method=opt.get('lut', {}).get('inpaint_method', 'telea')
+            alpha=lut_alpha,
+            beta=lut_beta,
+            inpaint_method=lut_inpaint_method
         )
         
         # 获取图像尺寸

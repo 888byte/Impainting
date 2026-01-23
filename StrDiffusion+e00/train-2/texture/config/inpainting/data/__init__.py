@@ -61,15 +61,22 @@ def create_dataset(dataset_opt):
     # ============================================================
     elif mode == 'mural_inpainting':
         from data.mural_inpainting_dataset import MuralInpaintingDataset as D
-        # 获取LUT路径和GT模式
+        # 从 dataset_opt 中读取配置（配置现在在 datasets.train 下）
         lut_path = dataset_opt.get('lut_path', './pigment_lut33.npz')
         gt_mode = dataset_opt.get('gt_mode', 'mixed')
         debug_mode = dataset_opt.get('debug_mode', False)
+        lut_alpha = dataset_opt.get('lut_alpha', 0.7)
+        lut_beta = dataset_opt.get('lut_beta', 0.3)
+        lut_inpaint_method = dataset_opt.get('lut_inpaint_method', 'telea')
+        
         dataset = D(
             opt=dataset_opt,
             lut_path=lut_path,
             gt_mode=gt_mode,
-            debug_mode=debug_mode
+            debug_mode=debug_mode,
+            lut_alpha=lut_alpha,
+            lut_beta=lut_beta,
+            lut_inpaint_method=lut_inpaint_method
         )
     else:
         raise NotImplementedError("Dataset [{:s}] is not recognized.".format(mode))

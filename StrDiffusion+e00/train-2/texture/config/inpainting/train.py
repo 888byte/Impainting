@@ -191,14 +191,15 @@ def main():
     debug_logger = None
     
     if use_brushnet and HAS_COLOR_PRIOR:
-        lut_cfg = opt.get('lut', {})
-        lut_path = lut_cfg.get('path', None)
+        # LUT配置现在在 datasets.train 下
+        train_opt = opt.get('datasets', {}).get('train', {})
+        lut_path = train_opt.get('lut_path', None)
         if lut_path and os.path.exists(lut_path):
             color_prior_gen = ColorPriorGenerator(
                 lut_path=lut_path,
-                alpha=lut_cfg.get('alpha', 0.7),
-                beta=lut_cfg.get('beta', 0.3),
-                inpaint_method=lut_cfg.get('inpaint_method', 'telea')
+                alpha=train_opt.get('lut_alpha', 0.7),
+                beta=train_opt.get('lut_beta', 0.3),
+                inpaint_method=train_opt.get('lut_inpaint_method', 'telea')
             )
             logger.info(f"[BrushNet] ColorPriorGenerator 已初始化: {lut_path}")
         else:
