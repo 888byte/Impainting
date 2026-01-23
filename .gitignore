@@ -40,6 +40,7 @@ MuralDH/
 **/*.exe
 **/*.pyc
 **/__pycache__/
+**/log/
 
 **/Val_Dataset/
 
