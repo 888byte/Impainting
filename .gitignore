@@ -1,8 +1,8 @@
 # ------------- 批量排除所有子项目中的「大文件夹」（无论子项目在第几层）-------------
 # 匹配所有子项目中的 data/ 文件夹（存放数据集，多数量/大体积）
 **/data/
-!*/inpainting/data/*
-!*/inpainting/data/
+!**/inpainting/data/*
+!**/inpainting/data/
 # 匹配所有子项目中的 checkpoints/ 文件夹（存放权重文件）
 **/checkpoints/
 # 匹配所有子项目中的 logs/ 文件夹（存放大量日志）
