@@ -35,7 +35,7 @@ import numpy as np
 from typing import Dict, Optional, Tuple
 
 # 导入LUT处理器
-from .lut_processor import LUTProcessor
+from lut_processor import LUTProcessor
 
 
 class ColorPriorGenerator:

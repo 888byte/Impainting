@@ -51,16 +51,16 @@ class ModifiedBrushNet(nn.Module):
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
             self.downs.append(nn.ModuleList([
-                ResBlock(default_conv, dim_in, dim_in, time_emb_dim=time_dim, groups=8),
-                ResBlock(default_conv, dim_in, dim_in, time_emb_dim=time_dim, groups=8),
+                ResBlock(default_conv, dim_in, dim_in, time_emb_dim=time_dim),
+                ResBlock(default_conv, dim_in, dim_in, time_emb_dim=time_dim),
                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
                 Downsample(dim_in, dim_out) if not is_last else default_conv(dim_in, dim_out),
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = ResBlock(default_conv, mid_dim, mid_dim, time_emb_dim=time_dim, groups=8)
+        self.mid_block1 = ResBlock(default_conv, mid_dim, mid_dim, time_emb_dim=time_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
-        self.mid_block2 = ResBlock(default_conv, mid_dim, mid_dim, time_emb_dim=time_dim, groups=8)
+        self.mid_block2 = ResBlock(default_conv, mid_dim, mid_dim, time_emb_dim=time_dim)
 
     def forward(self, x: torch.Tensor, time: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
         if time.dim() == 2 and time.shape[1] == 1:
@@ -91,7 +91,8 @@ class ConditionalUNetWithBrush(nn.Module):
         use_conf_gate: bool = True,
     ) -> None:
         super().__init__()
-        self.unet = ConditionalUNet(in_nc=in_nc, out_nc=out_nc, nf=nf, depth=depth, guide_dim=guide_dim)
+        # 注意：ConditionalUNet 构造函数不接受 guide_dim 参数，因此不将其传递
+        self.unet = ConditionalUNet(in_nc=in_nc, out_nc=out_nc, nf=nf, depth=depth, upscale=1)
 
         bs = brush_setting or {}
         self.brush = ModifiedBrushNet(

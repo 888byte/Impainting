@@ -31,11 +31,11 @@ import torch.nn.functional as F
 from typing import List, Tuple, Optional, Dict, Union
 
 # 导入BrushNet
-from .pixel_brushnet import PixelBrushNet, PixelBrushNetLite
-from .zero_conv import ZeroConv2d
+from pixel_brushnet import PixelBrushNet, PixelBrushNetLite
+from zero_conv import ZeroConv2d
 
 # 导入原始UNet模块
-from .modules.module_util import (
+from modules.module_util import (
     SinusoidalPosEmb,
     NonLinearity,
     Upsample, Downsample,

@@ -47,3 +47,4 @@ MuralDH/
 # ------------- 可选：排除所有子项目自身的.git目录（避免主仓库嵌套Git）-------------
 # 若你不想把每个子项目的Git历史上传到主仓库，添加此条
 **/.git/
+StrDiffusion+e00/train_brush/texture/config/inpainting/log

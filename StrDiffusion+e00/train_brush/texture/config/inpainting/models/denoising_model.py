@@ -191,7 +191,7 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ):
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, color_prior=None, conf_map=None):
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)  # LQ
         #if GT is not None: 
@@ -200,8 +200,10 @@ class DenoisingModel(BaseModel):
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
-
-
+        
+        # 初始化color_prior和conf_map
+        self.color_prior = color_prior.to(self.device) if color_prior is not None else None
+        self.conf_map = conf_map.to(self.device) if conf_map is not None else None
 
     def optimize_parameters(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)

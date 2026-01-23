@@ -38,10 +38,10 @@ import torch.nn.functional as F
 from typing import List, Tuple, Optional, Dict
 
 # 导入Zero-Convolution
-from .zero_conv import ZeroConv2d, make_zero_conv
+from zero_conv import ZeroConv2d, make_zero_conv
 
 # 导入StrDiffusion的模块（复用现有组件）
-from .modules.module_util import (
+from modules.module_util import (
     SinusoidalPosEmb,
     NonLinearity,
     Upsample, Downsample,

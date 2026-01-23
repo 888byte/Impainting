@@ -17,12 +17,12 @@ sde:
 
 #### 退化配置
 degradation:
-  mask_root: /path/to/your/mask/directory  # 修改为实际掩码目录
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks  # 修改为实际掩码目录
 
 #### LUT配置
 lut:
-  # LUT文件路径（占位符，请修改为实际路径）
-  path: ./pigment_lut33.npz
+  # LUT文件路径
+  path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
   # 置信度融合权重
   alpha: 0.7  # LUT置信度权重
   beta: 0.3   # 修复置信度权重
@@ -42,14 +42,14 @@ datasets:
   train:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
-    dataroot_GT: /path/to/your/image/directory  # 修改为实际图像目录
-    dataroot_mask: /path/to/your/mask/directory  # 可选，不提供则动态生成
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images # 修改为实际图像目录
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks # 可选，不提供则动态生成
     
     # GT生成模式选项:
     # - full: 全图LUT映射（模型学习恢复整张图的颜色）
     # - partial: 仅Mask区域LUT映射（保留背景，修复局部）
     # - mixed: 训练时随机选择 full 或 partial（各50%概率）
-    gt_mode: mixed
+    gt_mode: partial
     
     use_shuffle: true
     n_workers: 8
@@ -71,7 +71,7 @@ network_G:
 #### 路径配置
 path:
   # 预训练模型（可选）
-  pretrain_model_G: ~
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/experiments/inpainting/ir-sde/models/best_G.pth
   strict_load: false
   # 恢复训练状态（可选）
   resume_state: ~
@@ -103,7 +103,7 @@ debug:
   # 调试输出目录
   log_dir: debug_logs/
   # 保存频率（每N个iteration保存一次）
-  save_freq: 500
+  save_freq: 10
   # 保存的内容：input_image, transformed_gt, generated_prior, confidence_map, masked_input
   save_items:
     - input_image
