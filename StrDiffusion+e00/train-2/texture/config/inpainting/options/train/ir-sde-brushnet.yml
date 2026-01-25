@@ -53,11 +53,11 @@ datasets:
     prior_method: fast
     
     # 调试模式（数据集级别）
-    debug_mode: true
+    debug_mode: false
     
     use_shuffle: true
-    n_workers: 8
-    batch_size: 16
+    n_workers: 32
+    batch_size: 32
     GT_size: 256
     use_flip: true
     use_rot: true
@@ -104,7 +104,7 @@ train:
 #### Debug配置
 debug:
   # 是否开启调试模式
-  enabled: true
+  enabled: false
   # 调试输出目录
   log_dir: debug_logs/
   # 保存频率（每N个iteration保存一次）
