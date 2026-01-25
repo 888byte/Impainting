@@ -64,6 +64,7 @@ def create_dataset(dataset_opt):
         # 从 dataset_opt 中读取配置（配置现在在 datasets.train 下）
         lut_path = dataset_opt.get('lut_path', './pigment_lut33.npz')
         gt_mode = dataset_opt.get('gt_mode', 'mixed')
+        prior_method = dataset_opt.get('prior_method', 'fast')  # 新增：prior方法选择
         debug_mode = dataset_opt.get('debug_mode', False)
         lut_alpha = dataset_opt.get('lut_alpha', 0.7)
         lut_beta = dataset_opt.get('lut_beta', 0.3)
@@ -73,6 +74,7 @@ def create_dataset(dataset_opt):
             opt=dataset_opt,
             lut_path=lut_path,
             gt_mode=gt_mode,
+            prior_method=prior_method,  # 新增参数
             debug_mode=debug_mode,
             lut_alpha=lut_alpha,
             lut_beta=lut_beta,

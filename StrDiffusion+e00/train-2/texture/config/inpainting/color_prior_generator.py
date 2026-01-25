@@ -216,25 +216,99 @@ class ColorPriorGenerator:
                 flags=self.inpaint_method
             )
     
+    def get_spatial_confidence(self, mask: np.ndarray) -> np.ndarray:
+        """
+        计算空间置信度（基于距离变换）
+        
+        边界区域置信度高，中心区域置信度低
+        
+        Args:
+            mask: [H, W] uint8 掩码 (255=缺失, 0=已知)
+            
+        Returns:
+            spatial_conf: [H, W] float32 空间置信度 (0.1 ~ 1.0)
+        """
+        # 距离变换：计算每个像素到最近边界的距离
+        dist_map = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        max_dist = float(dist_map.max()) + 1e-8
+        
+        # 归一化距离
+        norm_dist = dist_map / max_dist
+        
+        # 置信度 = 1 - 归一化距离（边界高，中心低）
+        spatial_conf = 1.0 - norm_dist
+        spatial_conf = np.clip(spatial_conf, 0.1, 1.0)  # 最小0.1
+        
+        # 已知区域置信度 = 1.0
+        spatial_conf[mask == 0] = 1.0
+        
+        return spatial_conf.astype(np.float32)
+    
+    def smooth_delta_bilateral(
+        self, 
+        delta: np.ndarray, 
+        sigma_color: float = 10.0,
+        sigma_space: float = 8.0
+    ) -> np.ndarray:
+        """
+        对色差进行双边滤波平滑
+        
+        Args:
+            delta: [H, W] float32 色差图
+            sigma_color: 颜色空间标准差
+            sigma_space: 坐标空间标准差
+            
+        Returns:
+            smoothed: [H, W] float32 平滑后的色差
+        """
+        delta = delta.astype(np.float32)
+        return cv2.bilateralFilter(delta, d=-1, sigmaColor=sigma_color, sigmaSpace=sigma_space)
+    
+    def smooth_delta_multiscale(
+        self, 
+        delta: np.ndarray, 
+        down: int = 1, 
+        sigma: float = 2.0
+    ) -> np.ndarray:
+        """
+        多尺度平滑（参考t6.py/t7.py）
+        
+        Args:
+            delta: [H, W] float32 色差图
+            down: 下采样层数
+            sigma: 高斯模糊标准差
+            
+        Returns:
+            smoothed: [H, W] float32 平滑后的色差
+        """
+        x = delta.astype(np.float32)
+        for _ in range(max(0, down)):
+            x = cv2.pyrDown(x)
+        x = cv2.GaussianBlur(x, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        for _ in range(max(0, down)):
+            x = cv2.pyrUp(x)
+        
+        # 确保尺寸匹配
+        H, W = delta.shape[:2]
+        x = x[:H, :W]
+        return x
+    
     def generate(
         self, 
         image: np.ndarray, 
         mask: np.ndarray,
+        method: str = 'fast',
         debug: bool = False
     ) -> Dict[str, np.ndarray]:
         """
         生成颜色先验和置信度图
         
-        处理流程：
-        ---------
-        1. 对整张图像应用LUT映射，获得初始颜色先验和LUT置信度
-        2. 对mask区域使用多尺度修复填充颜色先验
-        3. 构建修复置信度图（mask区域置信度较低）
-        4. 融合两种置信度：Conf_final = α * Conf_LUT + β * Conf_Inpaint
-        
         Args:
             image: [H, W, 3] uint8 输入RGB图像 (0-255)
             mask: [H, W] uint8 掩码 (255=缺失需要修复, 0=已知)
+            method: 生成方法
+                - 'fast': 快速版（训练用）- 双边滤波平滑
+                - 'quality': 高质量版（推理用）- 多尺度+导向滤波
             debug: 是否返回调试信息
             
         Returns:
@@ -243,98 +317,226 @@ class ColorPriorGenerator:
                 - 'confidence': [H, W] float32 融合置信度图 (0-1)
                 - 'conf_lut': [H, W] float32 LUT原始置信度 (0-1)
                 - 'conf_inpaint': [H, W] float32 修复区域置信度 (0-1)
-                
-        Tensor Shape 变化：
-        ------------------
-        输入图像: [H, W, 3] uint8
-        LUT映射后: [H, W, 3] float32
-        修复填充后: [H, W, 3] float32
-        最终颜色先验: [H, W, 3] float32
-        最终置信度: [H, W] float32
+        """
+        if method == 'fast':
+            return self.generate_fast(image, mask, debug)
+        elif method == 'quality':
+            return self.generate_quality(image, mask, debug)
+        else:
+            raise ValueError(f"未知的生成方法: {method}，请使用 'fast' 或 'quality'")
+    
+    def generate_fast(
+        self, 
+        image: np.ndarray, 
+        mask: np.ndarray,
+        debug: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        快速版颜色先验生成（训练用）
+        
+        特点：
+        - Lab 空间处理，保持原图亮度 L
+        - 双边滤波平滑色差 delta(a,b)
+        - 空间置信度（边界高，中心低）
+        - cv2.inpaint 填充 mask 区域
         """
         # 验证输入
-        assert image.ndim == 3 and image.shape[2] == 3, \
-            f"输入图像形状应为 [H, W, 3]，实际为 {image.shape}"
-        assert mask.ndim == 2, \
-            f"掩码形状应为 [H, W]，实际为 {mask.shape}"
-        assert image.shape[:2] == mask.shape, \
-            f"图像和掩码尺寸不匹配: {image.shape[:2]} vs {mask.shape}"
+        assert image.ndim == 3 and image.shape[2] == 3
+        assert mask.ndim == 2
+        assert image.shape[:2] == mask.shape
         
         H, W = image.shape[:2]
+        mask_bool = mask > 127
         
         # ============================================================
-        # Step 1: 对整张图像应用LUT映射
+        # Step 1: RGB 转 Lab
+        # ============================================================
+        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        orig_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        L_orig = orig_lab[..., 0]
+        
+        # ============================================================
+        # Step 2: LUT 映射
         # ============================================================
         color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image)
-        # color_prior_lut: [H, W, 3] float32, 范围 0-255
-        # conf_lut: [H, W] float32, 范围 0-1
+        
+        # 转换到 Lab 空间
+        lut_bgr = cv2.cvtColor(np.clip(color_prior_lut, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        mapped_lab = cv2.cvtColor(lut_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        
+        # 保持原图亮度
+        mapped_lab[..., 0] = L_orig
         
         # ============================================================
-        # Step 2: 对mask区域进行多尺度修复填充
+        # Step 3: 计算色差 delta(a, b) 并平滑
         # ============================================================
-        # 将颜色先验转为uint8用于修复
-        color_prior_uint8 = np.clip(color_prior_lut, 0, 255).astype(np.uint8)
+        da = mapped_lab[..., 1] - orig_lab[..., 1]
+        db = mapped_lab[..., 2] - orig_lab[..., 2]
         
-        # 多尺度修复
+        # 双边滤波平滑
+        da_smooth = self.smooth_delta_bilateral(da, sigma_color=10.0, sigma_space=8.0)
+        db_smooth = self.smooth_delta_bilateral(db, sigma_color=10.0, sigma_space=8.0)
+        
+        # ============================================================
+        # Step 4: 应用平滑后的色差生成新的 Lab 图像
+        # ============================================================
+        new_lab = orig_lab.copy()
+        new_lab[..., 1] = orig_lab[..., 1] + da_smooth
+        new_lab[..., 2] = orig_lab[..., 2] + db_smooth
+        
+        # 转回 RGB
+        new_bgr = cv2.cvtColor(new_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        color_prior_full = cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        
+        # ============================================================
+        # Step 5: 对 mask 区域进行修复填充
+        # ============================================================
+        color_prior_uint8 = np.clip(color_prior_full, 0, 255).astype(np.uint8)
         color_prior_inpainted = self.multi_scale_inpaint(color_prior_uint8, mask)
         color_prior_inpainted = color_prior_inpainted.astype(np.float32)
         
-        # ============================================================
-        # Step 3: 构建修复置信度图
-        # ============================================================
-        # 已知区域置信度高，修复区域置信度低
-        mask_normalized = mask.astype(np.float32) / 255.0  # [H, W], 0=已知, 1=缺失
-        
-        conf_inpaint = (
-            (1 - mask_normalized) * self.inpaint_conf_known +  # 已知区域置信度
-            mask_normalized * self.inpaint_conf_inpainted       # 修复区域置信度
-        )  # [H, W] float32, 范围 0-1
+        # 组合：已知区域用 LUT 结果，mask 区域用修复结果
+        color_prior = color_prior_full.copy()
+        color_prior[mask_bool] = color_prior_inpainted[mask_bool]
         
         # ============================================================
-        # Step 4: 融合置信度
+        # Step 6: 计算置信度（空间置信度 × LUT置信度加权）
         # ============================================================
-        # 用户要求的逻辑：
-        # - 已知区域（mask外）：完全确定 = 1.0（白色）
-        # - 缺失区域（mask内）：α * conf_lut + β * inpaint_conf（加权，有纹理）
-        #   其中 conf_lut 是对修复后图像做LUT插值得到的置信度
-        #   inpaint_conf 是cv2.inpaint的低置信度
+        spatial_conf = self.get_spatial_confidence(mask)
         
         confidence = np.zeros_like(conf_lut)
-        mask_bool = mask > 127
         
-        # 已知区域：置信度 = 1.0（完全确定）
+        # 已知区域：置信度 = 1.0
         confidence[~mask_bool] = 1.0
         
-        # 缺失区域：使用加权置信度
-        # conf_lut 在缺失区域是对 inpainted 图像的 LUT 置信度
-        # 这个值反映了颜色推理的不确定性
-        confidence[mask_bool] = (
+        # 缺失区域：空间置信度 × (α * LUT置信度 + β * inpaint置信度)
+        confidence[mask_bool] = spatial_conf[mask_bool] * (
             self.alpha * conf_lut[mask_bool] + 
             self.beta * self.inpaint_conf_inpainted
         )
         
         confidence = np.clip(confidence, 0, 1)
         
-        # ============================================================
-        # Step 5: 组装最终颜色先验
-        # ============================================================
-        # 已知区域使用LUT映射结果，修复区域使用inpaint结果
-        color_prior = color_prior_lut.copy()
-        mask_bool = mask > 127
-        color_prior[mask_bool] = color_prior_inpainted[mask_bool]
-        
         # 构建返回结果
         result = {
-            'color_prior': color_prior,      # [H, W, 3] float32, 0-255
-            'confidence': confidence,         # [H, W] float32, 0-1
-            'conf_lut': conf_lut,             # [H, W] float32, 0-1
-            'conf_inpaint': conf_inpaint      # [H, W] float32, 0-1
+            'color_prior': color_prior,
+            'confidence': confidence,
+            'conf_lut': conf_lut,
+            'conf_inpaint': spatial_conf
         }
         
         if debug:
             result['color_prior_lut'] = color_prior_lut
             result['color_prior_inpainted'] = color_prior_inpainted
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
+            result['spatial_conf'] = spatial_conf
+        
+        return result
+    
+    def generate_quality(
+        self, 
+        image: np.ndarray, 
+        mask: np.ndarray,
+        debug: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        高质量版颜色先验生成（推理用）
+        
+        特点：
+        - Lab 空间处理，保持原图亮度 L
+        - 多尺度预平滑 + 导向滤波（如果可用）
+        - 空间置信度（边界高，中心低）
+        - KMeans 调色板软分配（可选扩展，当前使用 inpaint）
+        """
+        # 验证输入
+        assert image.ndim == 3 and image.shape[2] == 3
+        assert mask.ndim == 2
+        assert image.shape[:2] == mask.shape
+        
+        H, W = image.shape[:2]
+        mask_bool = mask > 127
+        mask_01 = (mask / 255.0).astype(np.float32)
+        
+        # ============================================================
+        # Step 1: RGB 转 Lab
+        # ============================================================
+        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        orig_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        L_orig = orig_lab[..., 0]
+        guide = (L_orig / (L_orig.max() + 1e-6)).astype(np.float32)
+        
+        # ============================================================
+        # Step 2: LUT 映射
+        # ============================================================
+        color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image)
+        
+        lut_bgr = cv2.cvtColor(np.clip(color_prior_lut, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        mapped_lab = cv2.cvtColor(lut_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+        mapped_lab[..., 0] = L_orig
+        
+        # ============================================================
+        # Step 3: 计算色差并进行多尺度 + 边缘感知平滑
+        # ============================================================
+        da = mapped_lab[..., 1] - orig_lab[..., 1]
+        db = mapped_lab[..., 2] - orig_lab[..., 2]
+        
+        # 多尺度预平滑
+        da = self.smooth_delta_multiscale(da, down=1, sigma=2.0)
+        db = self.smooth_delta_multiscale(db, down=1, sigma=2.0)
+        
+        # 边缘感知平滑（导向滤波或双边滤波）
+        if hasattr(cv2, 'ximgproc') and hasattr(cv2.ximgproc, 'guidedFilter'):
+            da_smooth = cv2.ximgproc.guidedFilter(guide=guide, src=da, radius=16, eps=0.01, dDepth=-1)
+            db_smooth = cv2.ximgproc.guidedFilter(guide=guide, src=db, radius=16, eps=0.01, dDepth=-1)
+        else:
+            da_smooth = self.smooth_delta_bilateral(da, sigma_color=10.0, sigma_space=16.0)
+            db_smooth = self.smooth_delta_bilateral(db, sigma_color=10.0, sigma_space=16.0)
+        
+        # ============================================================
+        # Step 4: 应用平滑后的色差
+        # ============================================================
+        new_lab = orig_lab.copy()
+        new_lab[..., 1] = orig_lab[..., 1] + da_smooth
+        new_lab[..., 2] = orig_lab[..., 2] + db_smooth
+        
+        new_bgr = cv2.cvtColor(new_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        color_prior_full = cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        
+        # ============================================================
+        # Step 5: 对 mask 区域进行修复填充
+        # ============================================================
+        color_prior_uint8 = np.clip(color_prior_full, 0, 255).astype(np.uint8)
+        color_prior_inpainted = self.multi_scale_inpaint(color_prior_uint8, mask)
+        color_prior_inpainted = color_prior_inpainted.astype(np.float32)
+        
+        color_prior = color_prior_full.copy()
+        color_prior[mask_bool] = color_prior_inpainted[mask_bool]
+        
+        # ============================================================
+        # Step 6: 计算置信度
+        # ============================================================
+        spatial_conf = self.get_spatial_confidence(mask)
+        
+        confidence = np.zeros_like(conf_lut)
+        confidence[~mask_bool] = 1.0
+        confidence[mask_bool] = spatial_conf[mask_bool] * (
+            self.alpha * conf_lut[mask_bool] + 
+            self.beta * self.inpaint_conf_inpainted
+        )
+        confidence = np.clip(confidence, 0, 1)
+        
+        result = {
+            'color_prior': color_prior,
+            'confidence': confidence,
+            'conf_lut': conf_lut,
+            'conf_inpaint': spatial_conf
+        }
+        
+        if debug:
+            result['color_prior_lut'] = color_prior_lut
+            result['color_prior_inpainted'] = color_prior_inpainted
+            result['mask_ratio'] = self._calculate_mask_ratio(mask)
+            result['spatial_conf'] = spatial_conf
         
         return result
     

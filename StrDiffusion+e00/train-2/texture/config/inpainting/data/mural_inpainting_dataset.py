@@ -69,6 +69,7 @@ class MuralInpaintingDataset(Dataset):
         opt: dict,
         lut_path: str,
         gt_mode: str = 'mixed',
+        prior_method: str = 'fast',
         debug_mode: bool = False,
         debug_dir: str = './debug_logs',
         lut_alpha: float = 0.7,
@@ -92,11 +93,13 @@ class MuralInpaintingDataset(Dataset):
             lut_alpha: LUT置信度权重
             lut_beta: 修复置信度权重
             lut_inpaint_method: 修复方法 ('telea' 或 'ns')
+            prior_method: 先验生成方法 ('fast' 或 'quality')
         """
         super().__init__()
         
         self.opt = opt
         self.gt_mode = gt_mode.lower()
+        self.prior_method = prior_method.lower()
         self.debug_mode = debug_mode
         self.debug_dir = debug_dir
         
@@ -404,7 +407,7 @@ class MuralInpaintingDataset(Dataset):
         # Step 4: 生成颜色先验和置信度（遵循 gt_mode）
         # ============================================================
         # 获取LUT映射结果
-        prior_result = self.color_prior_gen.generate(degraded_img, mask)
+        prior_result = self.color_prior_gen.generate(degraded_img, mask, method=self.prior_method)
         lut_mapped = prior_result['color_prior']     # [H, W, 3] float32 - 全图LUT+修复
         confidence = prior_result['confidence']       # [H, W] float32
         
