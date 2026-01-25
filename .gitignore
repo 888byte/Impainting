@@ -52,3 +52,9 @@ MuralDH/
 # 若你不想把每个子项目的Git历史上传到主仓库，添加此条
 **/.git/
 StrDiffusion+e00/train_brush/texture/config/inpainting/log
+StrDiffusion+e00/train-2/texture/config/inpainting/log
+SSD-TS/1.png
+SSD-TS/test_restored_block.png
+
+SSD-TS/results/color_prior_full_replace128.png
+SSD-TS/test_restored_block.png
