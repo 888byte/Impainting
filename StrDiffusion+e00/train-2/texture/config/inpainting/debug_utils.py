@@ -191,7 +191,13 @@ class DebugLogger:
         for tensor, label in zip(tensors, labels):
             try:
                 is_mask = (label == 'Mask')
-                img = self._tensor_to_image(tensor, normalize=True, is_mask=is_mask)
+                # Confidence 不要归一化，直接显示实际值（0.3会显示为灰色）
+                is_confidence = (label == 'Confidence')
+                if is_confidence:
+                    # 不归一化，直接 * 255 显示
+                    img = self._tensor_to_image(tensor, normalize=False, is_mask=False)
+                else:
+                    img = self._tensor_to_image(tensor, normalize=True, is_mask=is_mask)
                 img = self._add_label(img, label)
                 images.append(img)
             except Exception as e:

@@ -267,6 +267,35 @@ class MuralInpaintingDataset(Dataset):
         
         return img, mask, color_prior, gt
     
+    def _augment_with_confidence(
+        self, 
+        img: np.ndarray, 
+        mask: np.ndarray,
+        color_prior: np.ndarray,
+        gt: np.ndarray,
+        confidence: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """数据增强（包含 confidence）"""
+        # 水平翻转
+        if self.use_flip and random.random() > 0.5:
+            img = np.fliplr(img).copy()
+            mask = np.fliplr(mask).copy()
+            color_prior = np.fliplr(color_prior).copy()
+            gt = np.fliplr(gt).copy()
+            confidence = np.fliplr(confidence).copy()
+        
+        # 旋转 (0, 90, 180, 270度)
+        if self.use_rot:
+            k = random.randint(0, 3)
+            if k > 0:
+                img = np.rot90(img, k).copy()
+                mask = np.rot90(mask, k).copy()
+                color_prior = np.rot90(color_prior, k).copy()
+                gt = np.rot90(gt, k).copy()
+                confidence = np.rot90(confidence, k).copy()
+        
+        return img, mask, color_prior, gt, confidence
+    
     def _generate_gt(
         self, 
         degraded_img: np.ndarray,
@@ -372,11 +401,22 @@ class MuralInpaintingDataset(Dataset):
             current_mode = self.gt_mode
         
         # ============================================================
-        # Step 4: 生成颜色先验和置信度
+        # Step 4: 生成颜色先验和置信度（遵循 gt_mode）
         # ============================================================
+        # 获取LUT映射结果
         prior_result = self.color_prior_gen.generate(degraded_img, mask)
-        color_prior = prior_result['color_prior']  # [H, W, 3] float32
-        confidence = prior_result['confidence']     # [H, W] float32
+        lut_mapped = prior_result['color_prior']     # [H, W, 3] float32 - 全图LUT+修复
+        confidence = prior_result['confidence']       # [H, W] float32
+        
+        # 根据 current_mode 决定 color_prior 的内容
+        if current_mode == 'full':
+            # Full 模式: Prior 全图使用LUT映射结果
+            color_prior = lut_mapped
+        else:
+            # Partial 模式: Prior 只在mask区域使用LUT，已知区域保持原图
+            color_prior = degraded_img.astype(np.float32).copy()
+            mask_bool = mask > 127
+            color_prior[mask_bool] = lut_mapped[mask_bool]
         
         # ============================================================
         # Step 5: 生成GT
@@ -384,10 +424,10 @@ class MuralInpaintingDataset(Dataset):
         gt = self._generate_gt(degraded_img, mask, current_mode)
         
         # ============================================================
-        # Step 6: 数据增强
+        # Step 6: 数据增强（同时增强 confidence）
         # ============================================================
-        degraded_img, mask, color_prior, gt = self._augment(
-            degraded_img, mask, color_prior, gt
+        degraded_img, mask, color_prior, gt, confidence = self._augment_with_confidence(
+            degraded_img, mask, color_prior, gt, confidence
         )
         
         # ============================================================
