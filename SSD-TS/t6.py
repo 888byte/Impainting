@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-全图颜色替换
 Full-Image Replacement (NO mask, NO confidence)
 
 Pipeline:
@@ -13,7 +12,7 @@ Pipeline:
 5) Save recolored full image.
 
 Example:
-  python t6.py --img_path /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images/42-0-1_bottom.jpg  --lut_npz pigment_lut33.npz \
+  python t6.py --img_path 1.png --lut_npz pigment_lut33.npz \
   --use_lut lab --keep_luminance \
   --delta_smooth guided --gf_radius 16 --gf_eps 0.01 \
   --ms_down 1 --ms_sigma 2.0
@@ -120,12 +119,18 @@ def smooth_delta_multiscale(delta: np.ndarray, down: int = 1, ksize: int = 0, si
     For murals, this helps unify large regions without killing texture.
     delta: (H,W) float32
     """
+    orig_shape = delta.shape
     x = delta
     for _ in range(max(0, down)):
         x = cv2.pyrDown(x)
     x = cv2.GaussianBlur(x, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
     for _ in range(max(0, down)):
         x = cv2.pyrUp(x)
+    
+    # Ensure the output shape matches the input shape
+    if x.shape != orig_shape:
+        x = cv2.resize(x, (orig_shape[1], orig_shape[0]), interpolation=cv2.INTER_LINEAR)
+    
     return x
 
 
