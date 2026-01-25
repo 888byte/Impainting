@@ -58,3 +58,7 @@ SSD-TS/test_restored_block.png
 
 SSD-TS/results/color_prior_full_replace128.png
 SSD-TS/test_restored_block.png
+SSD-TS/results/01_structure.png
+SSD-TS/results/color_prior_lut_mural_opt.png
+SSD-TS/results/confidence_heatmap.png
+SSD-TS/results/confidence_map.png
