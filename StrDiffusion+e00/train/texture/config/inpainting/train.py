@@ -310,19 +310,22 @@ def main():
 
             # 仅rank0保存，避免多卡写冲突
             if rank <= 0:
-                # 每 save_freq 次保存一次（权重+state）
+                # 每 save_freq 次保存一次（权重+state）- 使用相同标签
                 if save_freq > 0 and (current_step % save_freq == 0):
                     logger.info(f"[ckpt] iter={current_step} Saving models and training states.")
-                    # 用iter命名，避免覆盖
+                    # 使用iter作为标签，确保权重和state文件对应
+                    # 生成: {iter}_G.pth, {iter}_D.pth, {iter}.state
                     model.save(str(current_step))
-                    model.save_training_state(epoch, current_step)
+                    model.save_training_state(epoch, current_step, label=str(current_step))
 
-                # 保存loss最低(best)（用EMA判定更稳）
+                # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
                 if ema_loss < best_loss:
                     best_loss = ema_loss
                     logger.info(f"[best] iter={current_step} best_ema_loss={best_loss:.6e}. Saving best model/state.")
+                    # 使用 "best" 标签，确保只保留一个best文件
+                    # 生成: best_G.pth, best_D.pth, best.state
                     model.save("best")
-                    model.save_training_state(epoch, current_step)
+                    model.save_training_state(epoch, current_step, label="best")
             #———————————————————检查点保存—————————————————————————
             #———————————————————检查点保存—————————————————————————
 
@@ -356,7 +359,9 @@ def main():
         #———————————————————检查点保存—————————————————————————
         #———————————————————检查点保存—————————————————————————
         try:
-            model.save_training_state(total_epochs, "latest")
+            # 使用 "latest" 标签，与 model.save("latest") 对应
+            # 生成: latest_G.pth, latest_D.pth, latest.state
+            model.save_training_state(total_epochs, current_step, label="latest")
         except Exception as e:
             logger.info(f"[warn] save_training_state(latest) failed: {e}")
         #———————————————————检查点保存—————————————————————————
