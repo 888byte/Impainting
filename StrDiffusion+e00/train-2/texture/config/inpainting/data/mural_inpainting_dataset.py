@@ -244,6 +244,48 @@ class MuralInpaintingDataset(Dataset):
         
         return img[y:y+crop_size, x:x+crop_size], mask[y:y+crop_size, x:x+crop_size]
     
+    def _feather_blend(
+        self,
+        original: np.ndarray,
+        transformed: np.ndarray,
+        mask: np.ndarray,
+        feather_radius: int = 7
+    ) -> np.ndarray:
+        """
+        使用羽化融合将 transformed 区域平滑混合到 original
+        
+        参考 t7.py 的实现，使用高斯模糊创建软边缘
+        
+        Args:
+            original: [H, W, 3] 原始图像
+            transformed: [H, W, 3] 变换后的图像
+            mask: [H, W] uint8 掩码 (255=需要替换)
+            feather_radius: 羽化半径（像素）
+            
+        Returns:
+            blended: [H, W, 3] 融合后的图像
+        """
+        # 将 mask 转换为 0-1 浮点数
+        mask_float = (mask.astype(np.float32) / 255.0)
+        
+        # 使用高斯模糊进行羽化
+        if feather_radius > 0:
+            k = 2 * feather_radius + 1
+            mask_float = cv2.GaussianBlur(mask_float, (k, k), sigmaX=0, sigmaY=0)
+        
+        mask_float = np.clip(mask_float, 0.0, 1.0)
+        
+        # 扩展为3通道用于融合
+        mask_3ch = mask_float[:, :, np.newaxis]
+        
+        # 软融合: result = original * (1 - mask) + transformed * mask
+        original_f = original.astype(np.float32)
+        transformed_f = transformed.astype(np.float32)
+        
+        blended = original_f * (1.0 - mask_3ch) + transformed_f * mask_3ch
+        
+        return np.clip(blended, 0, 255).astype(np.uint8)
+    
     def _augment(
         self, 
         img: np.ndarray, 
@@ -322,11 +364,17 @@ class MuralInpaintingDataset(Dataset):
             gt = np.clip(color_prior, 0, 255).astype(np.uint8)
             
         elif mode == 'partial':
-            # Mode B: 仅Mask区域LUT映射
-            gt = degraded_img.copy()
+            # Mode B: 仅Mask区域LUT映射（使用羽化融合避免硬边界）
             color_prior, _ = self.color_prior_gen.lut.trilinear_interpolate(degraded_img)
-            mask_bool = mask > 127
-            gt[mask_bool] = np.clip(color_prior[mask_bool], 0, 255).astype(np.uint8)
+            lut_transformed = np.clip(color_prior, 0, 255).astype(np.uint8)
+            
+            # 使用羽化融合创建平滑过渡
+            gt = self._feather_blend(
+                original=degraded_img,
+                transformed=lut_transformed,
+                mask=mask,
+                feather_radius=7  # 羽化半径
+            )
             
         else:
             raise ValueError(f"未知的GT模式: {mode}")
@@ -416,10 +464,15 @@ class MuralInpaintingDataset(Dataset):
             # Full 模式: Prior 全图使用LUT映射结果
             color_prior = lut_mapped
         else:
-            # Partial 模式: Prior 只在mask区域使用LUT，已知区域保持原图
-            color_prior = degraded_img.astype(np.float32).copy()
-            mask_bool = mask > 127
-            color_prior[mask_bool] = lut_mapped[mask_bool]
+            # Partial 模式: Prior 只在mask区域使用LUT（使用羽化融合）
+            lut_mapped_uint8 = np.clip(lut_mapped, 0, 255).astype(np.uint8)
+            color_prior_blended = self._feather_blend(
+                original=degraded_img,
+                transformed=lut_mapped_uint8,
+                mask=mask,
+                feather_radius=7
+            )
+            color_prior = color_prior_blended.astype(np.float32)
         
         # ============================================================
         # Step 5: 生成GT
