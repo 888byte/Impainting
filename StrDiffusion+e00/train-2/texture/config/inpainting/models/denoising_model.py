@@ -240,13 +240,20 @@ class DenoisingModel(BaseModel):
         
         # ============ 传递BrushNet条件（新增）============
         # 将color_prior, confidence, mask传递给网络
+        # 
+        # 注意：mask约定问题！
+        # - self.mask 是 SDE 约定: 1=已知, 0=缺失
+        # - BrushNet 期望约定: 1=需要修复, 0=已知
+        # 因此需要取反！
+        #
         brushnet_kwargs = {}
         if self.color_prior is not None:
             brushnet_kwargs['color_prior'] = self.color_prior
         if self.confidence is not None:
             brushnet_kwargs['confidence'] = self.confidence
         if hasattr(self, 'mask') and self.mask is not None:
-            brushnet_kwargs['mask'] = self.mask
+            # 关键修复：取反mask给BrushNet（1=需要修复）
+            brushnet_kwargs['mask'] = 1 - self.mask
         
         noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
         # ============ 传递BrushNet条件完成 ============
