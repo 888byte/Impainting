@@ -182,22 +182,27 @@ class ConditionalUNetWithBrushNet(nn.Module):
         xt: torch.Tensor,
         cond: torch.Tensor,
         time: Union[int, float, torch.Tensor],
+        S: Optional[torch.Tensor] = None,  # 第4位置参数：结构引导（与sde.noise_fn调用对齐）
         mask: Optional[torch.Tensor] = None,
         color_prior: Optional[torch.Tensor] = None,
-        confidence: Optional[torch.Tensor] = None,
-        S: Optional[torch.Tensor] = None
+        confidence: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
+        
+        注意：参数顺序经过调整！
+        ------
+        sde.noise_fn 调用: self.model(x, self.mu, t, S, **kwargs)
+        因此 S 必须是第4个位置参数，否则会与 mask 冲突！
         
         Args:
             xt: [B, 3, H, W] 当前噪声状态
             cond: [B, 3, H, W] 条件输入
             time: 时间步
-            mask: [B, 1, H, W] 修复区域掩码 (可选)
+            S: 结构引导图 (第4位置参数，与sde.noise_fn调用对齐)
+            mask: [B, 1, H, W] 修复区域掩码 (可选，关键字参数)
             color_prior: [B, 3, H, W] 颜色先验图 (可选)
             confidence: [B, 1, H, W] 置信度图 (可选)
-            S: 结构引导图 (与原ConditionalUNet兼容，这里忽略)
             
         Returns:
             output: [B, 3, H, W] 去噪预测
