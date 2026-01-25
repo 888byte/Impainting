@@ -237,7 +237,20 @@ class DenoisingModel(BaseModel):
         # Get noise and score
         S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
         S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
-        noise,_ = sde.noise_fn(self.state, timesteps.squeeze(),S_optimum)
+        
+        # ============ 传递BrushNet条件（新增）============
+        # 将color_prior, confidence, mask传递给网络
+        brushnet_kwargs = {}
+        if self.color_prior is not None:
+            brushnet_kwargs['color_prior'] = self.color_prior
+        if self.confidence is not None:
+            brushnet_kwargs['confidence'] = self.confidence
+        if hasattr(self, 'mask') and self.mask is not None:
+            brushnet_kwargs['mask'] = self.mask
+        
+        noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
+        # ============ 传递BrushNet条件完成 ============
+        
         score = sde.get_score_from_noise(noise, timesteps)
         yt_1_expection = sde.reverse_sde_step_mean(self.state, score, timesteps)
         
