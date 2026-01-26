@@ -30,13 +30,6 @@ network_G:
     out_nc: 3
     nf: 64
     depth: 4
-    use_pixel_brushnet: true
-  pixel_brushnet:
-    in_ch: 4
-    base_ch: 64              # 建议 = nf
-    ch_mult: [1, 2, 4, 8]    # 建议与 UNet 一致
-    num_blocks_per_level: 2
-    conditioning_scale: 1.0
     
 network_Gs:
   which_model_G: ConditionalUNets

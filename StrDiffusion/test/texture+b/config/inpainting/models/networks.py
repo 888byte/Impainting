@@ -6,8 +6,6 @@ import numpy as np
 
 from models import modules as M
 
-from .pixel_brushnet import PixelBrushNetConfig
-
 logger = logging.getLogger("base")
 
 # Generator
@@ -17,19 +15,7 @@ def define_G(opt):
     which_model = opt_net["which_model_G"]
     setting = opt_net["setting"]
     netG = getattr(M, which_model)(**setting)
-
-    use_pb = opt['network_G'].get('use_pixel_brushnet', False)
-    if use_pb:
-        pb = opt['network_G'].get('pixel_brushnet', {})
-        cfg = PixelBrushNetConfig(
-            in_ch=pb.get('in_ch', 4),  # 3(color_prior)+1(confidence)
-            base_ch=pb.get('base_ch', opt['network_G']['nf']),
-            ch_mult=tuple(pb.get('ch_mult', [1, 2, 4, 8])),
-            num_blocks_per_level=pb.get('num_blocks_per_level', 2),
-            conditioning_scale=pb.get('conditioning_scale', 1.0),
-        )
-        netG.enable_pixel_brushnet(cfg)
-
+    
     opt_net = opt["network_Gs"]
     which_model = opt_net["which_model_G"]
     setting = opt_net["setting"]

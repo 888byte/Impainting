@@ -150,7 +150,7 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, color_prior=None, confidence=None):
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ):
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)  # LQ
         #if GT is not None: 
@@ -159,10 +159,6 @@ class DenoisingModel(BaseModel):
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
-        
-        # ✅ 新增：BrushNet 需要的两个输入（允许 None）
-        self.color_prior = None if color_prior is None else color_prior.to(self.device)
-        self.confidence  = None if confidence  is None else confidence.to(self.device)
 
     def optimize_parameters_sigle(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)

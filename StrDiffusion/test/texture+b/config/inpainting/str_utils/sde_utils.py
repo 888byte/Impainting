@@ -188,17 +188,9 @@ class IRSDE(SDE):
         noise = self.model(x, self.mu, t, **kwargs)
         return self.get_score_from_noise(noise, t)
     
-    def noise_fn(self, x, t, S, **kwargs):
-        """
-        ✅ 推理/训练通用：
-        - 透传 kwargs（color_prior/confidence）
-        - 兼容模型返回 (pred, aux) 的情况（取第一个）
-        """
-        out = self.model(x, self.mu, t, S, **kwargs)
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        return out, None
-
+    def noise_fn(self, x, t, **kwargs):
+        # need to pre-set mu and score_model
+        return self.model(x, self.mu, t, **kwargs)
 
     # optimum x_{t-1}
     def reverse_optimum_step(self, xt, x0, t):
