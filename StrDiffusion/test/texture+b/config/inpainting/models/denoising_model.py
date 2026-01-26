@@ -150,7 +150,21 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ):
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, color_prior=None, confidence=None):
+        """
+        加载测试数据
+        
+        Args:
+            state: 噪声状态
+            LQ: 低质量输入（条件）
+            GT: Ground Truth
+            mask: 掩码
+            S_sde: 结构SDE
+            S_GT: 结构GT
+            S_LQ: 结构LQ
+            color_prior: [可选] 颜色先验图，用于BrushNet
+            confidence: [可选] 置信度图，用于BrushNet
+        """
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)  # LQ
         #if GT is not None: 
@@ -159,6 +173,17 @@ class DenoisingModel(BaseModel):
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
+        
+        # BrushNet条件（新增）
+        if color_prior is not None:
+            self.color_prior = color_prior.to(self.device)
+        else:
+            self.color_prior = None
+            
+        if confidence is not None:
+            self.confidence = confidence.to(self.device)
+        else:
+            self.confidence = None
 
     def optimize_parameters_sigle(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)
@@ -213,13 +238,59 @@ class DenoisingModel(BaseModel):
         return sde.begin(noisy_states,S_sde,X_GT,mask)
     
     
-    def test(self, sde=None, save_states=False, save_dir='save_dir', GT = None, mask = None, S_sde = None, S_GT = None, S_LQ = None,dis = None):
+    def test(self, sde=None, save_states=False, save_dir='save_dir', GT = None, mask = None, S_sde = None, S_GT = None, S_LQ = None, dis = None, color_prior=None, confidence=None):
+        """
+        测试/推理
+        
+        Args:
+            sde: SDE实例
+            save_states: 是否保存中间状态
+            save_dir: 保存目录
+            GT: Ground Truth
+            mask: 掩码
+            S_sde: 结构SDE
+            S_GT: 结构GT
+            S_LQ: 结构LQ
+            dis: 判别器
+            color_prior: [可选] 颜色先验图，用于BrushNet
+            confidence: [可选] 置信度图，用于BrushNet
+        """
         sde.set_mu(self.condition)
         S_sde.set_mu(self.S_LQ)
         self.model.eval()
         self.models.eval()
+        
+        # 使用存储的color_prior和confidence（如果没有传入参数）
+        if color_prior is None and hasattr(self, 'color_prior'):
+            color_prior = self.color_prior
+        if confidence is None and hasattr(self, 'confidence'):
+            confidence = self.confidence
+        
+        # 构建BrushNet参数
+        brushnet_kwargs = {}
+        if color_prior is not None:
+            brushnet_kwargs['color_prior'] = color_prior
+        if confidence is not None:
+            brushnet_kwargs['confidence'] = confidence
+        if mask is not None:
+            # BrushNet期望 mask=1表示需要修复，而SDE的mask=1表示已知
+            # 在测试时，mask通常是1=已知，需要取反给BrushNet
+            brushnet_kwargs['mask'] = 1 - mask.to(self.device)
+        
         with torch.no_grad():
-            self.output = sde.reverse_sde(self.state, save_states=save_states, save_dir=save_dir, GT = GT, mask = mask, S_sde = S_sde, S_GT = S_GT, S_LQ = S_LQ, dis = dis, S_LQs = self.S_LQ)
+            self.output = sde.reverse_sde(
+                self.state, 
+                save_states=save_states, 
+                save_dir=save_dir, 
+                GT=GT, 
+                mask=mask, 
+                S_sde=S_sde, 
+                S_GT=S_GT, 
+                S_LQ=S_LQ, 
+                dis=dis, 
+                S_LQs=self.S_LQ,
+                **brushnet_kwargs
+            )
 
         self.model.train()
 
