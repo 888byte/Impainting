@@ -13,7 +13,7 @@ sde:
   eps: 0.005
 
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test1/output_masks
 
 #### BrushNet配置
 brushnet:
@@ -36,7 +36,7 @@ datasets:
   test1:
     name: Val_Dataset
     mode: GT
-    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test1/cropped_images
 
 #### 网络结构
 network_G:
