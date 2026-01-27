@@ -30,6 +30,11 @@ lut:
   beta: 0.3            # 修复置信度权重
   inpaint_method: telea
   prior_method: quality  # 推理时使用高质量版
+  
+  # 推理模式选项:
+  # - full: 全图LUT映射（恢复整张图的颜色，即全局褪色修复）
+  # - partial: 仅Mask区域LUT映射（保留背景，修复局部褪色区域）
+  gt_mode: partial
 
 #### 数据集配置
 datasets:

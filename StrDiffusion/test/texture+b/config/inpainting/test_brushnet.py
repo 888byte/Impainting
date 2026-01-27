@@ -67,6 +67,40 @@ class MaskDataset(Dataset):
         return 1 - mask  # 0=masked(需要修复), 1=unmasked(已知)
 
 
+def _feather_blend(original: np.ndarray, transformed: np.ndarray, 
+                   mask: np.ndarray, feather_radius: int = 7) -> np.ndarray:
+    """
+    羽化融合：在mask边界进行平滑过渡
+    
+    Args:
+        original: [H, W, 3] uint8 原始图像
+        transformed: [H, W, 3] uint8 变换后的图像（如LUT映射）
+        mask: [H, W] uint8 掩码 (255=需要修复, 0=已知)
+        feather_radius: 羽化半径
+        
+    Returns:
+        blended: [H, W, 3] uint8 融合后的图像
+    """
+    # 创建羽化掩码
+    mask_float = mask.astype(np.float32) / 255.0
+    
+    # 高斯模糊实现羽化效果
+    if feather_radius > 0:
+        kernel_size = feather_radius * 2 + 1
+        mask_feathered = cv2.GaussianBlur(mask_float, (kernel_size, kernel_size), 0)
+    else:
+        mask_feathered = mask_float
+    
+    # 扩展维度用于广播
+    mask_3ch = mask_feathered[:, :, np.newaxis]
+    
+    # 融合：mask区域使用transformed，非mask区域使用original
+    blended = (original.astype(np.float32) * (1 - mask_3ch) + 
+               transformed.astype(np.float32) * mask_3ch)
+    
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
 def main():
     # ============================================================
     # 解析配置
@@ -120,6 +154,8 @@ def main():
         logger.warning("[ColorPriorGenerator] LUT config not provided, using original mode")
 
     prior_method = lut_opt.get("prior_method", "quality") if lut_opt else "quality"
+    gt_mode = lut_opt.get("gt_mode", "partial") if lut_opt else "partial"  # full=全局褪色, partial=局部褪色
+    logger.info(f"[Config] gt_mode={gt_mode}, prior_method={prior_method}")
     
     # ============================================================
     # 加载数据集
@@ -195,10 +231,25 @@ def main():
             img_np = (Y_GT[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # [H, W, 3]
             mask_np = ((1 - mask[0, 0]).numpy() * 255).astype(np.uint8)  # [H, W], 255=需要修复
             
-            # 生成颜色先验
+            # 生成颜色先验（全图LUT映射）
             prior_result = color_prior_gen.generate(img_np, mask_np, method=prior_method)
-            color_prior_np = prior_result['color_prior']    # [H, W, 3] float32
-            confidence_np = prior_result['confidence']       # [H, W] float32
+            lut_mapped = prior_result['color_prior']    # [H, W, 3] float32 - 全图LUT+修复
+            confidence_np = prior_result['confidence']   # [H, W] float32
+            
+            # 根据 gt_mode 决定最终的 color_prior
+            if gt_mode == 'full':
+                # Full 模式: 全图使用LUT映射结果（全局褪色修复）
+                color_prior_np = lut_mapped
+            else:
+                # Partial 模式: 只在mask区域使用LUT（局部褪色修复）
+                # 使用羽化融合，避免边界突变
+                lut_mapped_uint8 = np.clip(lut_mapped, 0, 255).astype(np.uint8)
+                color_prior_np = _feather_blend(
+                    original=img_np,
+                    transformed=lut_mapped_uint8,
+                    mask=mask_np,
+                    feather_radius=7
+                ).astype(np.float32)
             
             # 转换为tensor
             color_prior = torch.from_numpy(
@@ -209,7 +260,7 @@ def main():
                 confidence_np.astype(np.float32)
             ).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
             
-            logger.info(f"[{img_name}] Generated color prior and confidence")
+            logger.info(f"[{img_name}] Generated color prior (mode={gt_mode}) and confidence")
 
         # ============================================================
         # 推理
