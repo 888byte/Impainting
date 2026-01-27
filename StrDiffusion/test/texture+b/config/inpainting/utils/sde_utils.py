@@ -189,12 +189,19 @@ class IRSDE(SDE):
     def score_fn(self, x, t, S, **kwargs):
         # need to pre-set mu and score_model
         noise = self.model(x, self.mu, t, S, **kwargs)
+        # 处理模型返回元组的情况（如BrushNet wrapper返回(output, output)）
+        if isinstance(noise, tuple):
+            noise = noise[0]
         return self.get_score_from_noise(noise, t)
     
 
     def noise_fn(self, x, t, S, **kwargs):
         # need to pre-set mu and score_model
-        return self.model(x, self.mu, t, S, **kwargs)
+        result = self.model(x, self.mu, t, S, **kwargs)
+        # 处理模型返回元组的情况（如BrushNet wrapper返回(output, output)）
+        if isinstance(result, tuple):
+            return result[0]
+        return result
 
     # optimum x_{t-1}
     def reverse_optimum_step(self, xt, x0, t):
