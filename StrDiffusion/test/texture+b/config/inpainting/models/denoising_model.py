@@ -266,7 +266,7 @@ class DenoisingModel(BaseModel):
         if confidence is None and hasattr(self, 'confidence'):
             confidence = self.confidence
         
-        # 构建BrushNet参数
+        # 构建BrushNet参数 - 注意使用不同的key避免与reverse_sde的mask参数冲突
         brushnet_kwargs = {}
         if color_prior is not None:
             brushnet_kwargs['color_prior'] = color_prior
@@ -275,7 +275,8 @@ class DenoisingModel(BaseModel):
         if mask is not None:
             # BrushNet期望 mask=1表示需要修复，而SDE的mask=1表示已知
             # 在测试时，mask通常是1=已知，需要取反给BrushNet
-            brushnet_kwargs['mask'] = 1 - mask.to(self.device)
+            # 使用 'brushnet_mask' 避免与 reverse_sde 的 mask 参数冲突
+            brushnet_kwargs['brushnet_mask'] = 1 - mask.to(self.device)
         
         with torch.no_grad():
             self.output = sde.reverse_sde(

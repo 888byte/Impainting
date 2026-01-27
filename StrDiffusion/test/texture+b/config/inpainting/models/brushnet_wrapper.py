@@ -183,9 +183,10 @@ class ConditionalUNetWithBrushNet(nn.Module):
         cond: torch.Tensor,
         time: Union[int, float, torch.Tensor],
         S: Optional[torch.Tensor] = None,  # 第4位置参数：结构引导（与sde.noise_fn调用对齐）
-        mask: Optional[torch.Tensor] = None,
+        brushnet_mask: Optional[torch.Tensor] = None,  # 重命名避免与reverse_sde的mask冲突
         color_prior: Optional[torch.Tensor] = None,
-        confidence: Optional[torch.Tensor] = None
+        confidence: Optional[torch.Tensor] = None,
+        **kwargs  # 接收其他参数（如reverse_sde传入的mask等）
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
@@ -200,9 +201,11 @@ class ConditionalUNetWithBrushNet(nn.Module):
             cond: [B, 3, H, W] 条件输入
             time: 时间步
             S: 结构引导图 (第4位置参数，与sde.noise_fn调用对齐)
-            mask: [B, 1, H, W] 修复区域掩码 (可选，关键字参数)
+            brushnet_mask: [B, 1, H, W] BrushNet修复区域掩码 (可选，关键字参数)
+                          注意：使用brushnet_mask而不是mask，避免与reverse_sde的mask参数冲突
             color_prior: [B, 3, H, W] 颜色先验图 (可选)
             confidence: [B, 1, H, W] 置信度图 (可选)
+            **kwargs: 其他参数（如reverse_sde传入的mask等，会被忽略）
             
         Returns:
             output: [B, 3, H, W] 去噪预测
@@ -210,7 +213,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         
         注意：
         -----
-        当 brushnet_enabled=True 且提供了 mask, color_prior, confidence 时，
+        当 brushnet_enabled=True 且提供了 brushnet_mask, color_prior, confidence 时，
         将使用BrushNet特征注入。否则退化为普通UNet。
         """
         # 处理时间步
@@ -234,15 +237,15 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_mid = None
         
         if (self.brushnet_enabled and self.brushnet is not None and 
-            mask is not None and color_prior is not None and confidence is not None):
+            brushnet_mask is not None and color_prior is not None and confidence is not None):
             
             # 调整条件输入尺寸
-            mask = self.check_image_size(mask, H, W)
+            brushnet_mask = self.check_image_size(brushnet_mask, H, W)
             color_prior = self.check_image_size(color_prior, H, W)
             confidence = self.check_image_size(confidence, H, W)
             
             # BrushNet前向传播
-            bn_output = self.brushnet(xt, mask, color_prior, confidence, time)
+            bn_output = self.brushnet(xt, brushnet_mask, color_prior, confidence, time)
             brushnet_features = bn_output['down_features']
             brushnet_mid = bn_output['mid_feature']
         
@@ -382,7 +385,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         output1, output2 = model(
             xt, cond, time,
-            mask=mask, color_prior=color_prior, confidence=confidence
+            brushnet_mask=mask, color_prior=color_prior, confidence=confidence
         )
     
     print(f"  输入形状: xt={xt.shape}, cond={cond.shape}")
