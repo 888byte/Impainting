@@ -384,29 +384,27 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
-                # 获取 ChromaRefiner 的调试信息（输入图像去噪）
-                refiner_debug = getattr(model, '_debug_refiner_info', None)
-                denoised_input = refiner_debug.get('denoised_input', None) if refiner_debug else None
-                original_gt = refiner_debug.get('original_gt', None) if refiner_debug else None
+                # 获取去噪调试信息（双边滤波去噪）
+                denoise_debug = getattr(model, '_debug_refiner_info', None)
+                denoised_input = denoise_debug.get('denoised_input', None) if denoise_debug else None
                 
                 debug_logger.save_training_state(
                     step=current_step,
-                    input_image=Y_degraded,  # 原始输入（可能有噪声）
-                    gt=original_gt if original_gt is not None else Y_GT,
+                    input_image=Y_degraded,  # 原始输入
+                    gt=Y_GT,
                     color_prior=color_prior if color_prior is not None else Y_degraded,
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
                     mask=mask if is_mural_mode else (1 - mask),
-                    # 去噪后的输入（显示去噪效果）
-                    refined_gt=denoised_input  # 复用 refined_gt 参数显示去噪结果
+                    # 去噪后的输入（双边滤波效果）
+                    refined_gt=denoised_input
                 )
                 
-                # 打印 ChromaRefiner 去噪效果统计
-                if refiner_debug is not None and 'denoised_input' in refiner_debug:
-                    orig = refiner_debug.get('original_input', Y_degraded)
-                    denoisd = refiner_debug['denoised_input']
-                    diff = (denoisd - orig).abs().mean().item()
-                    logger.info(f"[ChromaRefiner Debug] step={current_step}, "
-                               f"input_denoise_diff={diff:.6f}")
+                # 打印去噪效果统计
+                if denoise_debug is not None and 'denoised_input' in denoise_debug:
+                    orig = denoise_debug.get('original_input', Y_degraded)
+                    denoised = denoise_debug['denoised_input']
+                    diff = (denoised - orig).abs().mean().item()
+                    logger.info(f"[Denoise Debug] step={current_step}, diff={diff:.6f}")
             # ============ 调试保存完成 ============
 
             #———————————————————检查点保存—————————————————————————

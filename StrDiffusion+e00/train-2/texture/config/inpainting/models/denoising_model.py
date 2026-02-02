@@ -20,15 +20,6 @@ from models.modules.loss import MatchingLoss
 
 from .base_model import BaseModel
 
-# ============ ChromaRefiner 支持 ============
-try:
-    from .chroma_refiner import create_chroma_refiner
-    HAS_CHROMA_REFINER = True
-except ImportError:
-    HAS_CHROMA_REFINER = False
-    print("[Warning] ChromaRefiner 未找到，色度精炼功能不可用")
-# ============ ChromaRefiner 支持 ============
-
 logger = logging.getLogger("base")
 
 
@@ -123,17 +114,7 @@ class DenoisingModel(BaseModel):
 
         self.load()
         
-        # ============ ChromaRefiner 初始化 ============
-        self.chroma_refiner = None
-        self.refiner_opt = opt.get('chroma_refiner', {})
-        if HAS_CHROMA_REFINER and self.refiner_opt.get('enabled', False):
-            self.chroma_refiner = create_chroma_refiner(opt)
-            if self.chroma_refiner is not None:
-                self.chroma_refiner = self.chroma_refiner.to(self.device)
-                logger.info(f"[ChromaRefiner] 已初始化: in_ch={self.refiner_opt.get('in_channels', 6)}, "
-                           f"hidden_ch={self.refiner_opt.get('hidden_channels', 32)}, "
-                           f"num_blocks={self.refiner_opt.get('num_blocks', 1)}")
-        # ============ ChromaRefiner 初始化完成 ============
+        # 注意：去噪使用固定的双边滤波器（_denoise_image），不需要额外网络
         
         if self.is_train:
             self.model.train()
@@ -187,32 +168,7 @@ class DenoisingModel(BaseModel):
 
             self.optimizers.append(self.optimizer)
             
-            # ============ ChromaRefiner 优化器 ============
-            if self.chroma_refiner is not None:
-                refiner_lr = self.refiner_opt.get('lr', train_opt["lr_G"])
-                self.optimizer_refiner = torch.optim.Adam(
-                    self.chroma_refiner.parameters(),
-                    lr=refiner_lr,
-                    weight_decay=wd_G,
-                    betas=(train_opt["beta1"], train_opt["beta2"]),
-                )
-                self.optimizers.append(self.optimizer_refiner)
-                
-                # Refiner loss 权重配置
-                self.lambda_ref = self.refiner_opt.get('lambda_ref', 0.5)
-                
-                # 新版边缘感知去噪 loss 权重
-                self.lambda_fid = self.refiner_opt.get('lambda_fid', 1.0)
-                self.lambda_smooth = self.refiner_opt.get('lambda_smooth', 2.0)
-                
-                # 旧版兼容
-                self.lambda_keep = self.refiner_opt.get('lambda_keep', 0.5)
-                self.lambda_tv = self.refiner_opt.get('lambda_tv', 0.1)
-                
-                logger.info(f"[ChromaRefiner] 优化器已配置: lr={refiner_lr}, "
-                           f"lambda_ref={self.lambda_ref}, lambda_fid={self.lambda_fid}, "
-                           f"lambda_smooth={self.lambda_smooth}")
-            # ============ ChromaRefiner 优化器完成 ============
+            # 注意：去噪使用固定的双边滤波器，不需要训练
 
             # schedulers
             if train_opt["lr_scheme"] == "MultiStepLR":
@@ -289,29 +245,17 @@ class DenoisingModel(BaseModel):
     def optimize_parameters(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)
         
-        # ============ ChromaRefiner 去噪输入图像 ============
-        # 目的: 输入图像（退化图像）存在颜色噪声，去噪后用于生成更干净的 color_prior
-        # 训练时：使用边缘感知平滑 loss 进行自监督去噪
-        denoised_condition = self.condition  # 默认使用原始输入
-        loss_refiner = None
+        # ============ 边缘保持去噪 ============
+        # 对输入图像进行去噪，在平坦区域平滑颜色，边缘保持清晰
+        with torch.no_grad():
+            denoised_condition = self._denoise_image(self.condition)
         
-        if self.chroma_refiner is not None:
-            # 对输入图像进行去噪（使用 ChromaRefiner 作为固定滤波器，不训练）
-            # 暂时禁用训练，只使用去噪功能
-            with torch.no_grad():
-                denoised_condition = self._denoise_image(self.condition)
-            
-            # 不计算 loss_refiner，避免梯度损坏 ChromaRefiner 权重
-            # loss_refiner = self._compute_denoise_loss(...)
-            
-            # 保存调试信息
-            self._debug_refiner_info = {
-                'original_input': self.condition.detach(),
-                'denoised_input': denoised_condition.detach(),
-                'original_gt': self.state_0.detach(),
-                'refined_gt': self.state_0.detach(),  # 兼容旧接口
-            }
-        # ============ ChromaRefiner 去噪完成 ============
+        # 保存调试信息（用于可视化）
+        self._debug_refiner_info = {
+            'original_input': self.condition.detach(),
+            'denoised_input': denoised_condition.detach(),
+        }
+        # ============ 去噪完成 ============
         
         # 使用原始 GT 作为训练目标
         yt_1_optimum = sde.reverse_optimum_step(self.state, self.state_0, timesteps)
@@ -339,43 +283,18 @@ class DenoisingModel(BaseModel):
         
         # ============ 优化器更新 ============
         self.optimizer.zero_grad()
-        if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner'):
-            self.optimizer_refiner.zero_grad()
         
-        # 主损失 (使用原始 GT 作为目标)
-        loss_main = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
-        
-        # 检查 loss_refiner 是否有效（NaN 检查）
-        refiner_valid = False
-        if loss_refiner is not None:
-            if not torch.isnan(loss_refiner) and not torch.isinf(loss_refiner):
-                refiner_valid = True
-            else:
-                logger.warning("[optimize_parameters] loss_refiner is NaN/Inf, skipping refiner update")
-        
-        # 总损失 = 主损失 + (有效的) Refiner损失
-        loss = loss_main
-        if refiner_valid:
-            loss = loss + self.lambda_ref * loss_refiner
+        # 主损失
+        loss = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
         loss.backward()
         
-        # 梯度裁剪 - 主模型
+        # 梯度裁剪
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
-        
-        # ChromaRefiner 梯度裁剪和更新（只在 loss 有效时更新）
-        if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner') and refiner_valid:
-            # 关键：对 ChromaRefiner 进行梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(self.chroma_refiner.parameters(), max_norm=0.1)
-            self.optimizer_refiner.step()
-        
 
         # set log
         self.log_dict["loss"] = loss.item()
-        self.log_dict["loss_main"] = loss_main.item()
-        if loss_refiner is not None:
-            self.log_dict["loss_refiner"] = loss_refiner.item()
     
     def _denoise_image(self, image):
         """
@@ -431,221 +350,6 @@ class DenoisingModel(BaseModel):
         denoised = edge_weight * image + (1 - edge_weight) * smoothed
         
         return torch.clamp(denoised, 0.0, 1.0)
-    
-    def refine_gt(self, gt_image, mask_hole):
-        """
-        精炼 GT 图像 (Lab 空间去噪)
-        """
-        # Debug: 检查输入
-        if hasattr(self, '_refine_debug_count'):
-            self._refine_debug_count += 1
-        else:
-            self._refine_debug_count = 0
-        
-        debug_print = (self._refine_debug_count % 100 == 0)  # 每100次打印一次
-        
-        if debug_print:
-            logger.info(f"[refine_gt] gt_image: min={gt_image.min():.4f}, max={gt_image.max():.4f}, mean={gt_image.mean():.4f}")
-        
-        # Step 1: RGB → Lab
-        lab_gt = self._rgb_to_lab(gt_image)
-        
-        if debug_print:
-            L_ch = lab_gt[:, 0:1, :, :]
-            a_ch = lab_gt[:, 1:2, :, :]
-            b_ch = lab_gt[:, 2:3, :, :]
-            logger.info(f"[refine_gt] lab_gt L: min={L_ch.min():.2f}, max={L_ch.max():.2f}")
-            logger.info(f"[refine_gt] lab_gt a: min={a_ch.min():.2f}, max={a_ch.max():.2f}")
-            logger.info(f"[refine_gt] lab_gt b: min={b_ch.min():.2f}, max={b_ch.max():.2f}")
-        
-        # Step 2: 归一化
-        L_norm = lab_gt[:, 0:1, :, :] / 100.0
-        ab_gt_norm = lab_gt[:, 1:3, :, :] / 128.0
-        
-        # Step 3: 构造 Refiner 输入
-        delta_ab_zero = torch.zeros_like(ab_gt_norm)
-        conf = torch.ones_like(mask_hole) - mask_hole * 0.5
-        ref_in = torch.cat([delta_ab_zero, L_norm, conf, mask_hole, conf], dim=1)
-        
-        if debug_print:
-            logger.info(f"[refine_gt] ref_in shape: {ref_in.shape}, min={ref_in.min():.4f}, max={ref_in.max():.4f}")
-        
-        # Step 4: Refiner 前向
-        delta_update_norm = self.chroma_refiner(ref_in)
-        
-        if debug_print:
-            logger.info(f"[refine_gt] delta_update: min={delta_update_norm.min():.4f}, max={delta_update_norm.max():.4f}")
-        
-        # Step 5: 门控
-        gate = torch.ones_like(mask_hole)
-        
-        # Step 6: 应用更新
-        ab_refined_norm = ab_gt_norm + gate * delta_update_norm
-        
-        if debug_print:
-            logger.info(f"[refine_gt] ab_refined_norm: min={ab_refined_norm.min():.4f}, max={ab_refined_norm.max():.4f}")
-        
-        # Step 7: 合成 refined Lab
-        L_original = lab_gt[:, 0:1, :, :]
-        lab_refined = torch.cat([L_original, ab_refined_norm * 128.0], dim=1)
-        
-        if debug_print:
-            logger.info(f"[refine_gt] lab_refined: min={lab_refined.min():.2f}, max={lab_refined.max():.2f}")
-        
-        # Step 8: Lab → RGB
-        refined_gt = self._lab_to_rgb(lab_refined)
-        
-        # 关键保护：如果出现 NaN，回退到原始 GT
-        if torch.isnan(refined_gt).any() or torch.isinf(refined_gt).any():
-            logger.warning(f"[refine_gt] WARNING: refined_gt contains NaN/Inf! Falling back to original GT.")
-            refined_gt = gt_image.clone()
-            delta_update_norm = torch.zeros_like(delta_update_norm)
-        
-        if debug_print:
-            logger.info(f"[refine_gt] refined_gt (before clamp): min={refined_gt.min():.4f}, max={refined_gt.max():.4f}")
-        
-        refined_gt = torch.clamp(refined_gt, 0.0, 1.0)
-        
-        if debug_print:
-            logger.info(f"[refine_gt] refined_gt (final): min={refined_gt.min():.4f}, max={refined_gt.max():.4f}")
-        
-        return refined_gt, delta_update_norm, gate
-    
-    def _compute_denoise_loss(self, original, denoised):
-        """
-        自监督边缘感知去噪 Loss
-        
-        原理：
-        - 在平坦区域（低梯度）：强制颜色一致，消除噪声
-        - 在边缘区域（高梯度）：保持原始颜色，避免模糊
-        
-        L_total = λ_fid * L_fidelity + λ_smooth * L_edge_smooth
-        
-        Args:
-            original: [B, 3, H, W] 原始图像
-            denoised: [B, 3, H, W] 去噪后的图像
-        """
-        # ===== L_fidelity: 保真项，防止过度修改 =====
-        L_fid = (denoised - original).pow(2).mean()
-        
-        # ===== 计算边缘权重（基于亮度梯度）=====
-        # 转换为灰度（亮度通道）
-        gray = 0.299 * original[:, 0:1] + 0.587 * original[:, 1:2] + 0.114 * original[:, 2:3]
-        
-        # 计算亮度梯度
-        grad_x = torch.abs(gray[:, :, :, 1:] - gray[:, :, :, :-1])  # [B, 1, H, W-1]
-        grad_y = torch.abs(gray[:, :, 1:, :] - gray[:, :, :-1, :])  # [B, 1, H-1, W]
-        
-        # 边缘权重：梯度小的地方权重大（平坦区域）
-        sigma = 0.1  # 控制边缘敏感度
-        edge_weight_x = torch.exp(-grad_x / sigma)  # 平坦区域 ≈ 1, 边缘 ≈ 0
-        edge_weight_y = torch.exp(-grad_y / sigma)
-        
-        # ===== L_edge_smooth: 边缘感知平滑 =====
-        # 在平坦区域强制颜色一致
-        color_diff_x = torch.abs(denoised[:, :, :, 1:] - denoised[:, :, :, :-1])  # [B, 3, H, W-1]
-        color_diff_y = torch.abs(denoised[:, :, 1:, :] - denoised[:, :, :-1, :])  # [B, 3, H-1, W]
-        
-        # 加权平滑损失（只在平坦区域平滑）
-        L_smooth_x = (edge_weight_x * color_diff_x).mean()
-        L_smooth_y = (edge_weight_y * color_diff_y).mean()
-        L_smooth = L_smooth_x + L_smooth_y
-        
-        # 加权求和
-        lambda_fid = self.lambda_fid if hasattr(self, 'lambda_fid') else 1.0
-        lambda_smooth = self.lambda_smooth if hasattr(self, 'lambda_smooth') else 2.0
-        
-        return lambda_fid * L_fid + lambda_smooth * L_smooth
-    
-    def _compute_gt_refiner_loss(self, delta_update, gate):
-        """
-        旧版 GT Refiner Loss（保留兼容性）
-        """
-        L_keep = torch.abs(delta_update).mean()
-        L_tv = self._total_variation(delta_update)
-        lambda_keep = self.lambda_keep if hasattr(self, 'lambda_keep') else 0.5
-        lambda_tv = self.lambda_tv if hasattr(self, 'lambda_tv') else 0.1
-        return lambda_keep * L_keep + lambda_tv * L_tv
-    
-    def _total_variation(self, x):
-        """计算 Total Variation loss"""
-        diff_h = torch.abs(x[:, :, 1:, :] - x[:, :, :-1, :]).mean()
-        diff_w = torch.abs(x[:, :, :, 1:] - x[:, :, :, :-1]).mean()
-        return diff_h + diff_w
-    
-    def _rgb_to_lab(self, rgb):
-        """
-        RGB [0,1] → Lab (L:0~100, ab:-128~127)
-        使用 D65 白点
-        """
-        # RGB → XYZ
-        mask = rgb > 0.04045
-        rgb_linear = torch.where(mask, ((rgb + 0.055) / 1.055) ** 2.4, rgb / 12.92)
-        
-        # sRGB to XYZ matrix
-        r, g, b = rgb_linear[:, 0:1], rgb_linear[:, 1:2], rgb_linear[:, 2:3]
-        x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
-        y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
-        z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
-        
-        # Normalize by D65 white point
-        x = x / 0.95047
-        y = y / 1.00000
-        z = z / 1.08883
-        
-        # XYZ → Lab
-        epsilon = 0.008856
-        kappa = 903.3
-        
-        fx = torch.where(x > epsilon, x ** (1/3), (kappa * x + 16) / 116)
-        fy = torch.where(y > epsilon, y ** (1/3), (kappa * y + 16) / 116)
-        fz = torch.where(z > epsilon, z ** (1/3), (kappa * z + 16) / 116)
-        
-        L = 116 * fy - 16
-        a = 500 * (fx - fy)
-        b_ch = 200 * (fy - fz)
-        
-        return torch.cat([L, a, b_ch], dim=1)
-    
-    def _lab_to_rgb(self, lab):
-        """
-        Lab (L:0~100, ab:-128~127) → RGB [0,1]
-        使用 D65 白点
-        """
-        L, a, b_ch = lab[:, 0:1], lab[:, 1:2], lab[:, 2:3]
-        
-        # Lab → XYZ
-        fy = (L + 16) / 116
-        fx = a / 500 + fy
-        fz = fy - b_ch / 200
-        
-        epsilon = 0.008856
-        kappa = 903.3
-        
-        x = torch.where(fx ** 3 > epsilon, fx ** 3, (116 * fx - 16) / kappa)
-        y = torch.where(L > kappa * epsilon, ((L + 16) / 116) ** 3, L / kappa)
-        z = torch.where(fz ** 3 > epsilon, fz ** 3, (116 * fz - 16) / kappa)
-        
-        # D65 白点
-        x = x * 0.95047
-        y = y * 1.00000
-        z = z * 1.08883
-        
-        # XYZ → sRGB (可能产生负值，超出 sRGB 色域)
-        r = x * 3.2404542 + y * -1.5371385 + z * -0.4985314
-        g = x * -0.9692660 + y * 1.8760108 + z * 0.0415560
-        b = x * 0.0556434 + y * -0.2040259 + z * 1.0572252
-        
-        rgb_linear = torch.cat([r, g, b], dim=1)
-        
-        # 关键修复：先 clamp 到 [0, 1]，避免负数的幂次运算产生 NaN
-        rgb_linear = torch.clamp(rgb_linear, 0.0, 1.0)
-        
-        # 线性 RGB → sRGB
-        mask = rgb_linear > 0.0031308
-        rgb = torch.where(mask, 1.055 * (rgb_linear ** (1/2.4)) - 0.055, 12.92 * rgb_linear)
-        
-        return torch.clamp(rgb, 0.0, 1.0)
 
     
     

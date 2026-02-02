@@ -187,12 +187,9 @@ class DebugLogger:
         
         # 如果有去噪后的输入，添加对比
         if refined_gt is not None:
-            labels.append('Denoised')  # 显示去噪效果
+            labels.append('Denoised')
             tensors.append(refined_gt)
-            # Debug: 打印去噪后图像的范围
-            logger.info(f"[DebugLogger] denoised_input received: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}, shape={refined_gt.shape}")
-        else:
-            logger.warning("[DebugLogger] denoised_input is None!")
+            logger.info(f"[DebugLogger] Denoised image: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}")
         
         labels.extend(['Prior', 'Confidence', 'Mask', 'MaskedInput'])
         tensors.extend([color_prior, confidence, mask, masked_input])

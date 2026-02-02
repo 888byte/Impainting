@@ -27,25 +27,7 @@ brushnet:
   depth: 4             # 下采样深度（与主UNet对齐）
   lite: false          # 是否使用轻量版
 
-#### ChromaRefiner配置
-# 轻量级色度去噪网络，对输入图像进行 Lab 空间去噪
-# 目的: 消除输入图像的颜色噪声，使 LUT 变换后得到更均匀的颜色
-# 方法: 自监督边缘感知平滑（无需干净参考图）
-chroma_refiner:
-  enabled: true          # 是否启用 ChromaRefiner
-  in_channels: 6         # 输入通道数: ab(2)+L(1)+填充(3)
-  hidden_channels: 32    # 隐藏层通道数 (可调整: 24/32/48)
-  num_blocks: 1          # Transformer block数量 (可调整: 1/2)
-  num_heads: 4           # 注意力头数
-  expand_ratio: 2        # GDFN扩展比例
-  output_scale: 0.1      # 修正幅度（降低以防止过度修改）
-  learnable_scale: true  # 缩放因子是否可学习
-  
-  # 训练配置 - 自监督边缘感知平滑
-  lr: !!float 1e-5       # 学习率（降低以保证稳定性）
-  lambda_ref: 0.5        # Refiner总loss权重（增大以增强去噪效果）
-  lambda_fid: 1.0        # 保真项权重（防止过度修改）
-  lambda_smooth: 2.0     # 边缘感知平滑权重（控制平滑强度）
+# 注意：输入图像去噪现在使用固定的双边滤波器，不需要 ChromaRefiner 配置
 
 
 
