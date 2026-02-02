@@ -360,51 +360,76 @@ class DenoisingModel(BaseModel):
     def refine_gt(self, gt_image, mask_hole):
         """
         精炼 GT 图像 (Lab 空间去噪)
-        
-        目的: GT 图像可能带有噪声（历史壁画照片的保存条件差），
-        精炼后作为更干净的训练目标，使模型学习生成更干净的输出。
-        
-        Args:
-            gt_image: [B,3,H,W] GT图像 in [0,1]
-            mask_hole: [B,1,H,W] (1=hole, 0=known)
-        
-        Returns:
-            refined_gt: [B,3,H,W] 精炼后的GT in [0,1]
-            delta_update_norm: [B,2,H,W] ab更新量 (用于 loss 计算)
-            gate: [B,1,H,W] 门控系数
         """
+        # Debug: 检查输入
+        if hasattr(self, '_refine_debug_count'):
+            self._refine_debug_count += 1
+        else:
+            self._refine_debug_count = 0
+        
+        debug_print = (self._refine_debug_count % 100 == 0)  # 每100次打印一次
+        
+        if debug_print:
+            logger.info(f"[refine_gt] gt_image: min={gt_image.min():.4f}, max={gt_image.max():.4f}, mean={gt_image.mean():.4f}")
+        
         # Step 1: RGB → Lab
-        lab_gt = self._rgb_to_lab(gt_image)  # L:0~100, ab:-128~127
+        lab_gt = self._rgb_to_lab(gt_image)
+        
+        if debug_print:
+            L_ch = lab_gt[:, 0:1, :, :]
+            a_ch = lab_gt[:, 1:2, :, :]
+            b_ch = lab_gt[:, 2:3, :, :]
+            logger.info(f"[refine_gt] lab_gt L: min={L_ch.min():.2f}, max={L_ch.max():.2f}")
+            logger.info(f"[refine_gt] lab_gt a: min={a_ch.min():.2f}, max={a_ch.max():.2f}")
+            logger.info(f"[refine_gt] lab_gt b: min={b_ch.min():.2f}, max={b_ch.max():.2f}")
         
         # Step 2: 归一化
         L_norm = lab_gt[:, 0:1, :, :] / 100.0
         ab_gt_norm = lab_gt[:, 1:3, :, :] / 128.0
         
         # Step 3: 构造 Refiner 输入
-        delta_ab_zero = torch.zeros_like(ab_gt_norm)  # 无初始偏移
-        
-        # 置信度: 全图都需要精炼
-        conf = torch.ones_like(mask_hole) - mask_hole * 0.5  # known=1.0, hole=0.5
-        
-        # 输入: delta_ab(2) + L(1) + conf(1) + mask(1) + conf(1)
+        delta_ab_zero = torch.zeros_like(ab_gt_norm)
+        conf = torch.ones_like(mask_hole) - mask_hole * 0.5
         ref_in = torch.cat([delta_ab_zero, L_norm, conf, mask_hole, conf], dim=1)
+        
+        if debug_print:
+            logger.info(f"[refine_gt] ref_in shape: {ref_in.shape}, min={ref_in.min():.4f}, max={ref_in.max():.4f}")
         
         # Step 4: Refiner 前向
         delta_update_norm = self.chroma_refiner(ref_in)
         
-        # Step 5: 门控 (全图精炼)
+        if debug_print:
+            logger.info(f"[refine_gt] delta_update: min={delta_update_norm.min():.4f}, max={delta_update_norm.max():.4f}")
+        
+        # Step 5: 门控
         gate = torch.ones_like(mask_hole)
         
-        # Step 6: 应用更新 (这里应该是很小的更新)
+        # Step 6: 应用更新
         ab_refined_norm = ab_gt_norm + gate * delta_update_norm
         
-        # Step 7: 合成 refined Lab (关键：确保使用原始 L 通道值，不是归一化的)
-        L_original = lab_gt[:, 0:1, :, :]  # L: 0~100
+        if debug_print:
+            logger.info(f"[refine_gt] ab_refined_norm: min={ab_refined_norm.min():.4f}, max={ab_refined_norm.max():.4f}")
+        
+        # Step 7: 合成 refined Lab
+        L_original = lab_gt[:, 0:1, :, :]
         lab_refined = torch.cat([L_original, ab_refined_norm * 128.0], dim=1)
+        
+        if debug_print:
+            logger.info(f"[refine_gt] lab_refined: min={lab_refined.min():.2f}, max={lab_refined.max():.2f}")
         
         # Step 8: Lab → RGB
         refined_gt = self._lab_to_rgb(lab_refined)
+        
+        if debug_print:
+            logger.info(f"[refine_gt] refined_gt (before clamp): min={refined_gt.min():.4f}, max={refined_gt.max():.4f}")
+            # 检查 NaN
+            if torch.isnan(refined_gt).any():
+                logger.warning(f"[refine_gt] WARNING: refined_gt contains NaN!")
+        
         refined_gt = torch.clamp(refined_gt, 0.0, 1.0)
+        
+        if debug_print:
+            logger.info(f"[refine_gt] refined_gt (final): min={refined_gt.min():.4f}, max={refined_gt.max():.4f}")
         
         return refined_gt, delta_update_norm, gate
     
