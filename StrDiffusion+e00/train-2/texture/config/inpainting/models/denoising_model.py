@@ -244,8 +244,9 @@ class DenoisingModel(BaseModel):
         # ============ 第一阶段：GT 图像去噪 ============
         # 对完整的 GT 图像进行边缘保持去噪，消除颜色噪声
         # 去噪后的图像将作为新的训练目标
+        # 注意：self.state_0 是 GT，不包含 mask 涂黑
         with torch.no_grad():
-            denoised_gt = self._denoise_image(self.state_0)  # 对 GT 进行去噪
+            denoised_gt = self._denoise_image(self.state_0)  # 对完整 GT 进行去噪
         
         # 使用去噪后的 GT 作为训练目标
         training_target = denoised_gt
@@ -293,11 +294,12 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss"] = loss.item()
         
         # ============ 保存调试信息 ============
-        # 调试顺序：输入 -> 去噪后的输入(GT) -> color_prior -> GT叠加mask -> mask -> 置信度
+        # 注意：self.state_0 是完整的 GT 图像（LUT变换后），不包含 mask 涂黑
+        # 调试顺序：原始GT -> 去噪后GT -> Prior -> GT+Mask -> Mask -> Confidence
         self._debug_refiner_info = {
-            'original_gt': self.state_0.detach(),          # 原始 GT
+            'original_gt': self.state_0.detach(),          # 原始 GT（完整图，无mask涂黑）
             'denoised_gt': denoised_gt.detach(),           # 去噪后的 GT（新的训练目标）
-            'masked_input': self.condition.detach(),       # 带mask的输入
+            'masked_input': self.condition.detach(),       # 带mask涂黑的输入
         }
     
     def _denoise_image(self, image):

@@ -176,8 +176,8 @@ class DebugLogger:
         if not self.should_save(step):
             return
         
-        # GT叠加mask（mask区域显示为半透明）
-        gt_with_mask = gt * (1 - mask * 0.7)  # mask区域变暗
+        # GT叠加mask（mask区域完全涂黑）
+        gt_with_mask = gt * (1 - mask)  # mask=1的区域变黑
         
         # 准备所有图像和标签
         # 顺序：输入 -> 去噪后 -> 颜色先验 -> GT+Mask -> Mask -> 置信度
