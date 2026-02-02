@@ -419,12 +419,29 @@ class DenoisingModel(BaseModel):
             ones = torch.ones_like(L_norm)
             ref_in = torch.cat([ab_norm, L_norm, ones, ones, ones], dim=1)
             
+            # 打印 ref_in 统计信息（每100次）
+            if hasattr(self, '_denoise_count'):
+                self._denoise_count += 1
+            else:
+                self._denoise_count = 0
+            
+            if self._denoise_count % 100 == 0:
+                logger.info(f"[_denoise_image] ref_in: min={ref_in.min():.4f}, max={ref_in.max():.4f}")
+            
             # ChromaRefiner 前向：输出 ab 更新量
             delta_ab = self.chroma_refiner(ref_in)
             
+            # 详细检查 delta_ab
+            if self._denoise_count % 100 == 0:
+                logger.info(f"[_denoise_image] delta_ab: min={delta_ab.min():.6f}, max={delta_ab.max():.6f}, "
+                           f"has_nan={torch.isnan(delta_ab).any().item()}, has_inf={torch.isinf(delta_ab).any().item()}")
+            
             # 检查 ChromaRefiner 输出
             if torch.isnan(delta_ab).any() or torch.isinf(delta_ab).any():
-                logger.warning("[_denoise_image] ChromaRefiner output NaN, returning original")
+                # 详细打印哪里有 NaN
+                nan_count = torch.isnan(delta_ab).sum().item()
+                inf_count = torch.isinf(delta_ab).sum().item()
+                logger.warning(f"[_denoise_image] ChromaRefiner output NaN! nan_count={nan_count}, inf_count={inf_count}")
                 return image.clone()
             
             # 限制 delta_ab 的范围（额外安全措施）
