@@ -177,82 +177,56 @@ class TransformerBlockLite(nn.Module):
         return x
 
 
-class MDTALiteChromaRefiner(nn.Module):
+class SimpleCNNDenoiser(nn.Module):
     """
-    MDTA-lite 色度精炼网络
+    极简 CNN 去噪网络
     
-    在 Lab 的 Δab 空间做有界残差修正，使 Stage1 生成的 color_prior
-    更加稳定、去噪、去伪影。
+    使用简单的卷积层，避免 Transformer 中的数值不稳定性
     
     Args:
-        in_channels: 输入通道数 (默认6: delta_ab(2)+L(1)+conf(1)+mask(1)+conf_lut(1))
+        in_channels: 输入通道数 (默认6)
         hidden_channels: 隐藏层通道数 (默认32)
-        num_blocks: Transformer block 数量 (默认1)
-        num_heads: 注意力头数 (默认4)
-        expand_ratio: GDFN 扩展比例 (默认2)
-        output_scale: tanh 后的缩放因子 (默认0.3)
-        learnable_scale: 缩放因子是否可学习 (默认True)
-    
-    输入:
-        ref_in: [B, Cin, H, W] 拼接后的输入特征
-    
-    输出:
-        delta_ab_update_norm: [B, 2, H, W] 归一化空间的 ab 更新量
+        output_scale: 输出缩放因子 (默认0.02)
     """
     def __init__(
         self,
         in_channels: int = 6,
         hidden_channels: int = 32,
-        num_blocks: int = 1,
-        num_heads: int = 4,
-        expand_ratio: int = 2,
-        output_scale: float = 0.3,
-        learnable_scale: bool = True,
-        bias: bool = True
+        output_scale: float = 0.02,
+        **kwargs  # 忽略其他参数以保持兼容性
     ):
         super().__init__()
         
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
-        self.num_blocks = num_blocks
+        self.output_scale = output_scale
         
-        # 输入投影: Cin -> C
-        self.input_proj = nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=bias)
+        # 简单的 3 层 CNN
+        self.conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(hidden_channels)
         
-        # Transformer blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlockLite(
-                dim=hidden_channels, 
-                num_heads=num_heads, 
-                expand_ratio=expand_ratio,
-                bias=bias
-            )
-            for _ in range(num_blocks)
-        ])
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(hidden_channels)
         
-        # 输出投影: C -> 2 (delta_a, delta_b)
-        self.output_proj = nn.Conv2d(hidden_channels, 2, kernel_size=1, bias=bias)
-        
-        # 输出缩放因子 - 固定为很小的值，确保稳定
-        # 注意：即使配置为 learnable，也强制使用固定小值以保证稳定性
-        self.register_buffer('scale', torch.tensor(min(output_scale, 0.05)))
+        self.conv3 = nn.Conv2d(hidden_channels, 2, kernel_size=3, padding=1)
         
         # 初始化
         self._init_weights()
     
     def _init_weights(self):
-        """权重初始化 - 使用非常小的值确保初始输出接近零"""
+        """权重初始化 - 确保初始输出为零"""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                # 使用很小的初始化值
-                nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
         
-        # 输出投影初始化为零，确保初始输出为零
-        nn.init.zeros_(self.output_proj.weight)
-        if self.output_proj.bias is not None:
-            nn.init.zeros_(self.output_proj.bias)
+        # 输出层初始化为零，确保初始输出为零
+        nn.init.zeros_(self.conv3.weight)
+        nn.init.zeros_(self.conv3.bias)
     
     def forward(self, ref_in: torch.Tensor) -> torch.Tensor:
         """
@@ -260,37 +234,36 @@ class MDTALiteChromaRefiner(nn.Module):
         
         Args:
             ref_in: [B, Cin, H, W] 输入特征
-                - 通道 0-1: delta_ab_norm = (ab_prior - ab_img) / 128
-                - 通道 2: L_norm = L_img / 100
-                - 通道 3: conf_final (置信度)
-                - 通道 4: mask_hole (1=hole)
-                - 通道 5: conf_lut (LUT置信度, 可选)
         
         Returns:
-            delta_ab_update_norm: [B, 2, H, W] 归一化的 ab 更新量
+            delta_ab: [B, 2, H, W] ab 更新量
         """
-        # 输入投影
-        x = self.input_proj(ref_in)
+        x = self.conv1(ref_in)
+        x = self.bn1(x)
+        x = F.relu(x)
         
-        # Transformer blocks
-        for block in self.blocks:
-            x = block(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
         
-        # 输出投影
-        delta_raw = self.output_proj(x)
+        # 输出层
+        delta_raw = self.conv3(x)
         
-        # tanh 限幅 + 缩放
-        delta_ab_update_norm = torch.tanh(delta_raw) * self.scale
+        # tanh 限幅 + 固定小缩放
+        delta_ab = torch.tanh(delta_raw) * self.output_scale
         
-        return delta_ab_update_norm
+        return delta_ab
     
     def extra_repr(self) -> str:
         return (
             f"in_channels={self.in_channels}, "
             f"hidden_channels={self.hidden_channels}, "
-            f"num_blocks={self.num_blocks}, "
-            f"scale={self.scale.item():.3f}"
+            f"output_scale={self.output_scale:.3f}"
         )
+
+
+# 保留旧类名的别名，以保持兼容性
+MDTALiteChromaRefiner = SimpleCNNDenoiser
 
 
 def create_chroma_refiner(opt: dict) -> Optional[MDTALiteChromaRefiner]:
@@ -316,11 +289,7 @@ def create_chroma_refiner(opt: dict) -> Optional[MDTALiteChromaRefiner]:
     return MDTALiteChromaRefiner(
         in_channels=refiner_opt.get('in_channels', 6),
         hidden_channels=refiner_opt.get('hidden_channels', 32),
-        num_blocks=refiner_opt.get('num_blocks', 1),
-        num_heads=refiner_opt.get('num_heads', 4),
-        expand_ratio=refiner_opt.get('expand_ratio', 2),
-        output_scale=refiner_opt.get('output_scale', 0.3),
-        learnable_scale=refiner_opt.get('learnable_scale', True)
+        output_scale=refiner_opt.get('output_scale', 0.02)  # 使用小的缩放因子
     )
 
 
