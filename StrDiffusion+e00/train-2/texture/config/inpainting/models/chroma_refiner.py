@@ -233,25 +233,23 @@ class MDTALiteChromaRefiner(nn.Module):
         # 输出投影: C -> 2 (delta_a, delta_b)
         self.output_proj = nn.Conv2d(hidden_channels, 2, kernel_size=1, bias=bias)
         
-        # 输出缩放因子
-        if learnable_scale:
-            self.scale = nn.Parameter(torch.tensor(output_scale))
-        else:
-            self.register_buffer('scale', torch.tensor(output_scale))
+        # 输出缩放因子 - 固定为很小的值，确保稳定
+        # 注意：即使配置为 learnable，也强制使用固定小值以保证稳定性
+        self.register_buffer('scale', torch.tensor(min(output_scale, 0.05)))
         
         # 初始化
         self._init_weights()
     
     def _init_weights(self):
-        """权重初始化"""
+        """权重初始化 - 使用非常小的值确保初始输出接近零"""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                # 使用较小的初始化值，保证初始输出接近零
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                # 使用很小的初始化值
+                nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
         
-        # 输出投影使用更小的初始化
+        # 输出投影初始化为零，确保初始输出为零
         nn.init.zeros_(self.output_proj.weight)
         if self.output_proj.bias is not None:
             nn.init.zeros_(self.output_proj.bias)

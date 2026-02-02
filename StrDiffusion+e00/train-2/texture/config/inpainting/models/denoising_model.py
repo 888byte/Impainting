@@ -343,12 +343,20 @@ class DenoisingModel(BaseModel):
         if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner'):
             self.optimizer_refiner.zero_grad()
         
-        # 主损失 (使用精炼后的 GT 作为目标)
+        # 主损失 (使用原始 GT 作为目标)
         loss_main = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
-        # 总损失 = 主损失 + Refiner损失
-        loss = loss_main
+        # 检查 loss_refiner 是否有效（NaN 检查）
+        refiner_valid = False
         if loss_refiner is not None:
+            if not torch.isnan(loss_refiner) and not torch.isinf(loss_refiner):
+                refiner_valid = True
+            else:
+                logger.warning("[optimize_parameters] loss_refiner is NaN/Inf, skipping refiner update")
+        
+        # 总损失 = 主损失 + (有效的) Refiner损失
+        loss = loss_main
+        if refiner_valid:
             loss = loss + self.lambda_ref * loss_refiner
         
         loss.backward()
@@ -357,10 +365,10 @@ class DenoisingModel(BaseModel):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
-        # ChromaRefiner 梯度裁剪和更新
-        if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner'):
+        # ChromaRefiner 梯度裁剪和更新（只在 loss 有效时更新）
+        if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner') and refiner_valid:
             # 关键：对 ChromaRefiner 进行梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(self.chroma_refiner.parameters(), max_norm=0.5)
+            torch.nn.utils.clip_grad_norm_(self.chroma_refiner.parameters(), max_norm=0.1)
             self.optimizer_refiner.step()
         
 
@@ -382,36 +390,66 @@ class DenoisingModel(BaseModel):
         Returns:
             denoised: [B, 3, H, W] 去噪后的 RGB 图像 in [0, 1]
         """
-        # RGB → Lab
-        lab = self._rgb_to_lab(image)
-        
-        # 归一化
-        L_norm = lab[:, 0:1, :, :] / 100.0
-        ab_norm = lab[:, 1:3, :, :] / 128.0
-        
-        # 构造输入: 使用 ab 通道作为输入特征
-        # 输入: ab(2) + L(1) + 全1填充(3) = 6 通道
-        ones = torch.ones_like(L_norm)
-        ref_in = torch.cat([ab_norm, L_norm, ones, ones, ones], dim=1)
-        
-        # ChromaRefiner 前向：输出 ab 更新量
-        delta_ab = self.chroma_refiner(ref_in)
-        
-        # 应用更新（小幅度修正）
-        ab_denoised = ab_norm + delta_ab
-        
-        # 合成 Lab
-        lab_denoised = torch.cat([lab[:, 0:1, :, :], ab_denoised * 128.0], dim=1)
-        
-        # Lab → RGB
-        denoised = self._lab_to_rgb(lab_denoised)
-        
-        # 检查 NaN 并回退
-        if torch.isnan(denoised).any() or torch.isinf(denoised).any():
-            logger.warning("[_denoise_image] NaN detected, falling back to original")
-            denoised = image.clone()
-        
-        return torch.clamp(denoised, 0.0, 1.0)
+        try:
+            # 确保输入在有效范围内
+            image = torch.clamp(image, 0.0, 1.0)
+            
+            # 检查输入是否有效
+            if torch.isnan(image).any() or torch.isinf(image).any():
+                logger.warning("[_denoise_image] Invalid input, returning original")
+                return image.clone()
+            
+            # RGB → Lab
+            lab = self._rgb_to_lab(image)
+            
+            # 检查 Lab 转换结果
+            if torch.isnan(lab).any() or torch.isinf(lab).any():
+                logger.warning("[_denoise_image] Lab conversion produced NaN, returning original")
+                return image.clone()
+            
+            # 归一化
+            L_norm = lab[:, 0:1, :, :] / 100.0
+            ab_norm = lab[:, 1:3, :, :] / 128.0
+            
+            # 再次 clamp 确保归一化值在合理范围
+            L_norm = torch.clamp(L_norm, 0.0, 1.0)
+            ab_norm = torch.clamp(ab_norm, -1.0, 1.0)
+            
+            # 构造输入: ab(2) + L(1) + 全1填充(3) = 6 通道
+            ones = torch.ones_like(L_norm)
+            ref_in = torch.cat([ab_norm, L_norm, ones, ones, ones], dim=1)
+            
+            # ChromaRefiner 前向：输出 ab 更新量
+            delta_ab = self.chroma_refiner(ref_in)
+            
+            # 检查 ChromaRefiner 输出
+            if torch.isnan(delta_ab).any() or torch.isinf(delta_ab).any():
+                logger.warning("[_denoise_image] ChromaRefiner output NaN, returning original")
+                return image.clone()
+            
+            # 限制 delta_ab 的范围（额外安全措施）
+            delta_ab = torch.clamp(delta_ab, -0.1, 0.1)
+            
+            # 应用更新
+            ab_denoised = ab_norm + delta_ab
+            ab_denoised = torch.clamp(ab_denoised, -1.0, 1.0)
+            
+            # 合成 Lab（使用原始 L 通道）
+            lab_denoised = torch.cat([lab[:, 0:1, :, :], ab_denoised * 128.0], dim=1)
+            
+            # Lab → RGB
+            denoised = self._lab_to_rgb(lab_denoised)
+            
+            # 最终 NaN 检查
+            if torch.isnan(denoised).any() or torch.isinf(denoised).any():
+                logger.warning("[_denoise_image] Final output NaN, returning original")
+                return image.clone()
+            
+            return torch.clamp(denoised, 0.0, 1.0)
+            
+        except Exception as e:
+            logger.warning(f"[_denoise_image] Exception: {e}, returning original")
+            return image.clone()
     
     def refine_gt(self, gt_image, mask_hole):
         """

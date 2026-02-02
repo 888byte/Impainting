@@ -42,7 +42,7 @@ chroma_refiner:
   learnable_scale: true  # 缩放因子是否可学习
   
   # 训练配置 - 自监督边缘感知平滑
-  lr: !!float 1e-4       # 学习率
+  lr: !!float 1e-5       # 学习率（降低以保证稳定性）
   lambda_ref: 0.5        # Refiner总loss权重（增大以增强去噪效果）
   lambda_fid: 1.0        # 保真项权重（防止过度修改）
   lambda_smooth: 2.0     # 边缘感知平滑权重（控制平滑强度）
