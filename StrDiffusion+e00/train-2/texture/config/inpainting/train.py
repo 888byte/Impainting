@@ -384,29 +384,29 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
-                # 获取 ChromaRefiner 的调试信息（如果有）
+                # 获取 ChromaRefiner 的调试信息（GT精炼）
                 refiner_debug = getattr(model, '_debug_refiner_info', None)
-                refined_prior = refiner_debug['refined_prior'] if refiner_debug else None
-                original_prior = refiner_debug['original_prior'] if refiner_debug else None
+                refined_gt = refiner_debug['refined_gt'] if refiner_debug else None
+                original_gt = refiner_debug['original_gt'] if refiner_debug else None
                 
                 debug_logger.save_training_state(
                     step=current_step,
                     input_image=Y_degraded,  # 褪色图像（输入）
-                    gt=Y_GT,                  # LUT变换后的GT（目标）
-                    color_prior=original_prior if original_prior is not None else (color_prior if color_prior is not None else Y_degraded),
+                    gt=original_gt if original_gt is not None else Y_GT,  # 原始GT
+                    color_prior=color_prior if color_prior is not None else Y_degraded,
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
                     mask=mask if is_mural_mode else (1 - mask),  # 统一为 1=缺失
-                    # 新增：保存精炼后的 prior 用于对比验证
-                    refined_prior=refined_prior
+                    # 新增：精炼后的GT用于对比（显示去噪效果）
+                    refined_gt=refined_gt
                 )
                 
-                # 打印 ChromaRefiner 精炼效果统计
+                # 打印 ChromaRefiner GT精炼效果统计
                 if refiner_debug is not None:
-                    orig = refiner_debug['original_prior']
-                    refn = refiner_debug['refined_prior']
+                    orig = refiner_debug['original_gt']
+                    refn = refiner_debug['refined_gt']
                     diff = (refn - orig).abs().mean().item()
                     logger.info(f"[ChromaRefiner Debug] step={current_step}, "
-                               f"prior_diff_mean={diff:.6f}, "
+                               f"gt_diff_mean={diff:.6f}, "
                                f"gate_mean={refiner_debug['gate'].mean().item():.4f}")
             # ============ 调试保存完成 ============
 

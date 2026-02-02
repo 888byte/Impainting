@@ -149,20 +149,20 @@ class DebugLogger:
         confidence: torch.Tensor,
         mask: torch.Tensor,
         output: Optional[torch.Tensor] = None,
-        refined_prior: Optional[torch.Tensor] = None
+        refined_gt: Optional[torch.Tensor] = None
     ):
         """
         保存完整的训练状态为拼接大图
         
         布局：
-        [原图] [GT] [Color Prior] [Refined Prior] [Confidence] [Mask] [Masked Input]
+        [原图] [GT] [RefinedGT] [Color Prior] [Confidence] [Mask] [Masked Input]
         
         Args:
             step: 当前步数
             input_image: 输入原始图像 (含mask区域的原图)
-            gt: Ground Truth (LUT变换后的目标图)
+            gt: Ground Truth (原始GT，可能带噪声)
+            refined_gt: 精炼后的GT (ChromaRefiner 输出, 可选)
             color_prior: 颜色先验 (第一阶段生成)
-            refined_prior: 精炼后的颜色先验 (ChromaRefiner 输出, 可选)
             confidence: 置信度图 (mask区域应为均匀低值)
             mask: 掩码 (1=缺失, 0=已知)
             output: 模型输出 (可选)
@@ -170,28 +170,25 @@ class DebugLogger:
         说明：
         - input_image: 退化图像（训练时这是含mask的输入）
         - masked_input: input_image 与 mask 结合，mask区域置黑
-          计算方式: input_image * (1 - mask)，其中 mask=1 表示缺失区域
-          注意：这里假设 mask 中 1 表示"缺失/待修复"，0 表示"已知"
         """
         if not self.should_save(step):
             return
         
-        # 计算 masked_input: 已知区域保留，缺失区域(mask=1)置黑
-        # mask: [B, 1, H, W], 1=缺失, 0=已知
-        masked_input = input_image * (1 - mask)  # 缺失区域置为0
+        # 计算 masked_input
+        masked_input = input_image * (1 - mask)
         
         # 准备所有图像
         images = []
-        labels = ['Input', 'GT', 'Prior']
-        tensors = [input_image, gt, color_prior]
+        labels = ['Input', 'GT']
+        tensors = [input_image, gt]
         
-        # 如果有精炼后的 prior，添加对比
-        if refined_prior is not None:
-            labels.append('RefinedPrior')
-            tensors.append(refined_prior)
+        # 如果有精炼后的 GT，添加对比
+        if refined_gt is not None:
+            labels.append('RefinedGT')
+            tensors.append(refined_gt)
         
-        labels.extend(['Confidence', 'Mask', 'MaskedInput'])
-        tensors.extend([confidence, mask, masked_input])
+        labels.extend(['Prior', 'Confidence', 'Mask', 'MaskedInput'])
+        tensors.extend([color_prior, confidence, mask, masked_input])
         
         # 转换并添加标签
         for tensor, label in zip(tensors, labels):
@@ -273,16 +270,16 @@ class DebugLogger:
         confidence: torch.Tensor,
         mask: torch.Tensor,
         output: Optional[torch.Tensor] = None,
-        refined_prior: Optional[torch.Tensor] = None
+        refined_gt: Optional[torch.Tensor] = None
     ):
         """
         保存完整的训练状态（调用拼接版本）
         
         Args:
-            refined_prior: ChromaRefiner 精炼后的 color_prior (可选)
+            refined_gt: ChromaRefiner 精炼后的 GT (可选)
         """
         self.save_training_state_concatenated(
-            step, input_image, gt, color_prior, confidence, mask, output, refined_prior
+            step, input_image, gt, color_prior, confidence, mask, output, refined_gt
         )
 
 

@@ -281,66 +281,49 @@ class DenoisingModel(BaseModel):
     def optimize_parameters(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)
         
-        # ============ ChromaRefiner 精炼 color_prior ============
-        refined_color_prior = self.color_prior
+        # ============ ChromaRefiner 精炼 GT (训练目标去噪) ============
+        # 目的: GT 图像可能带有噪声（历史壁画照片），精炼后作为更干净的训练目标
+        refined_gt = self.state_0  # 默认使用原始 GT
         loss_refiner = None
         
-        if (self.chroma_refiner is not None and 
-            self.color_prior is not None and 
-            self.confidence is not None):
-            
-            # 计算 mask_hole (1=hole, BrushNet 约定)
-            mask_hole = 1 - self.mask  # self.mask 是 SDE 约定 (1=known)
-            
-            # 精炼 color_prior
-            refined_color_prior, delta_update, gate, delta_ab_norm, ab_img_norm = self.refine_prior(
-                img=self.condition,  # Y_degraded * mask_for_sde
-                prior_base=self.color_prior,
-                conf=self.confidence,
-                mask_hole=mask_hole,
-                conf_lut=self.conf_lut if hasattr(self, 'conf_lut') else None
+        if self.chroma_refiner is not None:
+            # 精炼 GT 图像
+            refined_gt, delta_update, gate = self.refine_gt(
+                gt_image=self.state_0,  # 原始 GT (可能带噪声)
+                mask_hole=1 - self.mask  # 1=hole, 0=known
             )
             
-            # 计算 Refiner loss (独立监督)
-            loss_refiner = self._compute_refiner_loss(
+            # 计算 Refiner loss (TV平滑 + 保守项)
+            loss_refiner = self._compute_gt_refiner_loss(
                 delta_update=delta_update,
-                gate=gate,
-                delta_ab_norm=delta_ab_norm,
-                ab_img_norm=ab_img_norm,
-                y_gt=self.state_0,
-                conf=self.confidence
+                gate=gate
             )
             
-            # 保存调试信息（用于验证 refined_color_prior 是否正确传递）
+            # 保存调试信息
             self._debug_refiner_info = {
-                'original_prior': self.color_prior.detach(),
-                'refined_prior': refined_color_prior.detach(),
+                'original_gt': self.state_0.detach(),
+                'refined_gt': refined_gt.detach(),
                 'delta_update': delta_update.detach(),
                 'gate': gate.detach(),
             }
-        # ============ ChromaRefiner 完成 ============
+        # ============ ChromaRefiner 精炼 GT 完成 ============
         
-        yt_1_optimum = sde.reverse_optimum_step(self.state, self.state_0, timesteps)
+        # 使用精炼后的 GT 作为训练目标
+        yt_1_optimum = sde.reverse_optimum_step(self.state, refined_gt, timesteps)
         timesteps = timesteps.to(self.device)
+        
         # Get noise and score
         S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
         S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
         
-        # ============ 传递BrushNet条件（使用精炼后的 prior）============
-        # 将color_prior, confidence, mask传递给网络
-        # 
-        # 注意：mask约定问题！
-        # - self.mask 是 SDE 约定: 1=已知, 0=缺失
-        # - BrushNet 期望约定: 1=需要修复, 0=已知
-        # 因此需要取反！
-        #
+        # ============ 传递BrushNet条件 (color_prior 直接使用，不精炼) ============
         brushnet_kwargs = {}
-        if refined_color_prior is not None:
-            brushnet_kwargs['color_prior'] = refined_color_prior
+        if self.color_prior is not None:
+            brushnet_kwargs['color_prior'] = self.color_prior  # 直接使用，不精炼
         if self.confidence is not None:
             brushnet_kwargs['confidence'] = self.confidence
         if hasattr(self, 'mask') and self.mask is not None:
-            # 关键修复：取反mask给BrushNet（1=需要修复）
+            # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
             brushnet_kwargs['mask'] = 1 - self.mask
         
         noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
@@ -354,7 +337,7 @@ class DenoisingModel(BaseModel):
         if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner'):
             self.optimizer_refiner.zero_grad()
         
-        # 主损失
+        # 主损失 (使用精炼后的 GT 作为目标)
         loss_main = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
         # 总损失 = 主损失 + Refiner损失
@@ -374,89 +357,80 @@ class DenoisingModel(BaseModel):
         if loss_refiner is not None:
             self.log_dict["loss_refiner"] = loss_refiner.item()
     
-    def refine_prior(self, img, prior_base, conf, mask_hole, conf_lut=None):
+    def refine_gt(self, gt_image, mask_hole):
         """
-        在线精炼 color_prior (Lab 空间)
+        精炼 GT 图像 (Lab 空间去噪)
+        
+        目的: GT 图像可能带有噪声（历史壁画照片的保存条件差），
+        精炼后作为更干净的训练目标，使模型学习生成更干净的输出。
         
         Args:
-            img: Y_degraded [B,3,H,W] in [0,1]
-            prior_base: color_prior [B,3,H,W] in [0,1]
-            conf: confidence [B,1,H,W] in [0,1]
-            mask_hole: [B,1,H,W] (1=hole)
-            conf_lut: [可选] [B,1,H,W] LUT置信度 in [0,1]
+            gt_image: [B,3,H,W] GT图像 in [0,1]
+            mask_hole: [B,1,H,W] (1=hole, 0=known)
         
         Returns:
-            prior_refined: [B,3,H,W] in [0,1]
-            delta_update_norm: [B,2,H,W] (用于 loss 计算)
+            refined_gt: [B,3,H,W] 精炼后的GT in [0,1]
+            delta_update_norm: [B,2,H,W] ab更新量 (用于 loss 计算)
             gate: [B,1,H,W] 门控系数
-            delta_ab_norm: [B,2,H,W] 原始色度差
-            ab_img_norm: [B,2,H,W] 原图ab归一化
         """
-        # Step 1: RGB → Lab (手动实现，避免依赖 kornia)
-        lab_img = self._rgb_to_lab(img)      # L:0~100, ab:-128~127
-        lab_prior = self._rgb_to_lab(prior_base)
+        # Step 1: RGB → Lab
+        lab_gt = self._rgb_to_lab(gt_image)  # L:0~100, ab:-128~127
         
         # Step 2: 归一化
-        L_norm = lab_img[:, 0:1, :, :] / 100.0
-        ab_img_norm = lab_img[:, 1:3, :, :] / 128.0
-        ab_prior_norm = lab_prior[:, 1:3, :, :] / 128.0
-        delta_ab_norm = ab_prior_norm - ab_img_norm
+        L_norm = lab_gt[:, 0:1, :, :] / 100.0
+        ab_gt_norm = lab_gt[:, 1:3, :, :] / 128.0
         
-        # Step 3: 构造 Refiner 输入 (6 通道)
-        # delta_ab(2) + L(1) + conf(1) + mask(1) + conf_lut(1)
-        if conf_lut is not None:
-            ref_in = torch.cat([delta_ab_norm, L_norm, conf, mask_hole, conf_lut], dim=1)
-        else:
-            # 如果没有 conf_lut，用 conf 填充
-            ref_in = torch.cat([delta_ab_norm, L_norm, conf, mask_hole, conf], dim=1)
+        # Step 3: 构造 Refiner 输入
+        # 对于GT精炼，我们用自身的 ab 作为 delta (即 delta=0 的初始状态)
+        # 但仍提供 L 和 mask 信息帮助网络理解上下文
+        delta_ab_zero = torch.zeros_like(ab_gt_norm)  # 无初始偏移
+        
+        # 置信度: 全图都需要精炼，但 hole 区域可以更激进
+        conf = 1.0 - mask_hole * 0.5  # known=1.0, hole=0.5
+        
+        # 输入: delta_ab(2) + L(1) + conf(1) + mask(1) + conf_lut(用conf填充)(1)
+        ref_in = torch.cat([delta_ab_zero, L_norm, conf, mask_hole, conf], dim=1)
         
         # Step 4: Refiner 前向
         delta_update_norm = self.chroma_refiner(ref_in)
         
-        # Step 5: 门控与限幅
+        # Step 5: 门控 (全图都需要精炼，但可以根据 mask 加权)
         gamma = self.refiner_gamma if hasattr(self, 'refiner_gamma') else 1.0
-        gate = ((1.0 - conf) ** gamma) * mask_hole
-        delta_final_norm = delta_ab_norm + gate * delta_update_norm
+        # 全图精炼，门控设为 1 (或可配置为只精炼 hole 区域)
+        gate = torch.ones_like(mask_hole)
         
-        # Step 6: 合成 refined Lab
-        ab_refined_norm = ab_img_norm + delta_final_norm
-        L_refined = lab_img[:, 0:1, :, :]  # 保持原亮度
+        # Step 6: 应用更新
+        ab_refined_norm = ab_gt_norm + gate * delta_update_norm
+        
+        # Step 7: 合成 refined Lab
+        L_refined = lab_gt[:, 0:1, :, :]  # 保持原亮度
         lab_refined = torch.cat([L_refined, ab_refined_norm * 128.0], dim=1)
         
-        # Step 7: Lab → RGB
-        prior_refined = self._lab_to_rgb(lab_refined)
-        prior_refined = torch.clamp(prior_refined, 0.0, 1.0)
+        # Step 8: Lab → RGB
+        refined_gt = self._lab_to_rgb(lab_refined)
+        refined_gt = torch.clamp(refined_gt, 0.0, 1.0)
         
-        return prior_refined, delta_update_norm, gate, delta_ab_norm, ab_img_norm
+        return refined_gt, delta_update_norm, gate
     
-    def _compute_refiner_loss(self, delta_update, gate, delta_ab_norm, ab_img_norm, y_gt, conf):
+    def _compute_gt_refiner_loss(self, delta_update, gate):
         """
-        计算 Refiner 的独立监督 loss
+        计算 GT Refiner 的 loss
         
-        L_ref = λ1*L_ab + λ2*L_keep + λ3*L_tv
+        目标: 轻微平滑去噪，不能过度改变原图
+        L_ref = λ_keep * L_keep + λ_tv * L_tv
         """
-        # L_ab: 颜色监督 (只监督 ab)
-        lab_gt = self._rgb_to_lab(y_gt)
-        ab_gt_norm = lab_gt[:, 1:3, :, :] / 128.0
+        # L_keep: 保守项 (防止过度修改)
+        L_keep = torch.abs(delta_update).mean()
         
-        # refined ab = img ab + delta_ab + gate * update
-        ab_refined_norm = ab_img_norm + delta_ab_norm + gate * delta_update
-        
-        # 加权颜色损失 (gate 区域重点监督)
-        L_ab = (torch.abs(ab_refined_norm - ab_gt_norm) * gate).sum() / (gate.sum() + 1e-8)
-        
-        # L_keep: 高置信区域保守项 (2通道分别计算)
-        L_keep = (torch.abs(delta_update) * conf).mean()
-        
-        # L_tv: TV 平滑项
+        # L_tv: TV 平滑项 (去噪)
         L_tv = self._total_variation(delta_update)
         
         # 加权求和
-        lambda_ab = self.lambda_ab if hasattr(self, 'lambda_ab') else 1.0
-        lambda_keep = self.lambda_keep if hasattr(self, 'lambda_keep') else 0.1
-        lambda_tv = self.lambda_tv if hasattr(self, 'lambda_tv') else 0.01
+        lambda_keep = self.lambda_keep if hasattr(self, 'lambda_keep') else 0.5
+        lambda_tv = self.lambda_tv if hasattr(self, 'lambda_tv') else 0.1
         
-        return lambda_ab * L_ab + lambda_keep * L_keep + lambda_tv * L_tv
+        return lambda_keep * L_keep + lambda_tv * L_tv
+    
     
     def _total_variation(self, x):
         """计算 Total Variation loss"""
