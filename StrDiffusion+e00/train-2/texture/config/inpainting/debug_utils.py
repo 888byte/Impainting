@@ -162,46 +162,40 @@ class DebugLogger:
         
         Args:
             step: 当前步数
-            input_image: 输入原始图像 (含mask区域的原图)
-            gt: Ground Truth (原始GT，可能带噪声)
-            refined_gt: 精炼后的GT (ChromaRefiner 输出, 可选)
-            color_prior: 颜色先验 (第一阶段生成)
-            confidence: 置信度图 (mask区域应为均匀低值)
+            input_image: 输入图像 (原始GT)
+            gt: Ground Truth
+            refined_gt: 去噪后的GT (用作训练目标)
+            color_prior: 颜色先验
+            confidence: 置信度图
             mask: 掩码 (1=缺失, 0=已知)
             output: 模型输出 (可选)
         
-        说明：
-        - input_image: 退化图像（训练时这是含mask的输入）
-        - masked_input: input_image 与 mask 结合，mask区域置黑
+        调试输出顺序：
+        Input -> Denoised -> Prior -> GT+Mask -> Mask -> Confidence
         """
         if not self.should_save(step):
             return
         
-        # 计算 masked_input
-        masked_input = input_image * (1 - mask)
+        # GT叠加mask（mask区域显示为半透明）
+        gt_with_mask = gt * (1 - mask * 0.7)  # mask区域变暗
         
-        # 准备所有图像
+        # 准备所有图像和标签
+        # 顺序：输入 -> 去噪后 -> 颜色先验 -> GT+Mask -> Mask -> 置信度
         images = []
-        labels = ['Input', 'GT']
-        tensors = [input_image, gt]
+        labels = ['Input', 'Denoised', 'Prior', 'GT+Mask', 'Mask', 'Confidence']
         
-        # 如果有去噪后的输入，添加对比
         if refined_gt is not None:
-            labels.append('Denoised')
-            tensors.append(refined_gt)
-            logger.info(f"[DebugLogger] Denoised image: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}")
-        
-        labels.extend(['Prior', 'Confidence', 'Mask', 'MaskedInput'])
-        tensors.extend([color_prior, confidence, mask, masked_input])
+            tensors = [input_image, refined_gt, color_prior, gt_with_mask, mask, confidence]
+        else:
+            tensors = [input_image, input_image, color_prior, gt_with_mask, mask, confidence]
         
         # 转换并添加标签
         for tensor, label in zip(tensors, labels):
             try:
                 is_mask = (label == 'Mask')
-                # Confidence 不要归一化，直接显示实际值（0.3会显示为灰色）
+                # Confidence 不要归一化，直接显示实际值
                 is_confidence = (label == 'Confidence')
                 if is_confidence:
-                    # 不归一化，直接 * 255 显示
                     img = self._tensor_to_image(tensor, normalize=False, is_mask=False)
                 else:
                     img = self._tensor_to_image(tensor, normalize=True, is_mask=is_mask)

@@ -241,32 +241,30 @@ class DenoisingModel(BaseModel):
 
 
     def optimize_parameters(self, step, timesteps, sde=None):
+        # ============ 第一阶段：GT 图像去噪 ============
+        # 对完整的 GT 图像进行边缘保持去噪，消除颜色噪声
+        # 去噪后的图像将作为新的训练目标
+        with torch.no_grad():
+            denoised_gt = self._denoise_image(self.state_0)  # 对 GT 进行去噪
+        
+        # 使用去噪后的 GT 作为训练目标
+        training_target = denoised_gt
+        
+        # 更新 SDE 的条件
         sde.set_mu(self.condition)
         
-        # ============ 边缘保持去噪 ============
-        # 对输入图像进行去噪，在平坦区域平滑颜色，边缘保持清晰
-        with torch.no_grad():
-            denoised_condition = self._denoise_image(self.condition)
-        
-        # 保存调试信息（用于可视化）
-        self._debug_refiner_info = {
-            'original_input': self.condition.detach(),
-            'denoised_input': denoised_condition.detach(),
-        }
-        # ============ 去噪完成 ============
-        
-        # 使用原始 GT 作为训练目标
-        yt_1_optimum = sde.reverse_optimum_step(self.state, self.state_0, timesteps)
+        # 使用去噪后的 GT 计算最优逆步骤
+        yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
         timesteps = timesteps.to(self.device)
         
         # Get noise and score
         S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
         S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
         
-        # ============ 传递BrushNet条件 (color_prior 直接使用，不精炼) ============
+        # ============ 传递BrushNet条件 ============
         brushnet_kwargs = {}
         if self.color_prior is not None:
-            brushnet_kwargs['color_prior'] = self.color_prior  # 直接使用，不精炼
+            brushnet_kwargs['color_prior'] = self.color_prior
         if self.confidence is not None:
             brushnet_kwargs['confidence'] = self.confidence
         if hasattr(self, 'mask') and self.mask is not None:
@@ -282,7 +280,7 @@ class DenoisingModel(BaseModel):
         # ============ 优化器更新 ============
         self.optimizer.zero_grad()
         
-        # 主损失
+        # 主损失：模型输出 vs 去噪后的GT
         loss = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
         loss.backward()
@@ -293,6 +291,14 @@ class DenoisingModel(BaseModel):
 
         # set log
         self.log_dict["loss"] = loss.item()
+        
+        # ============ 保存调试信息 ============
+        # 调试顺序：输入 -> 去噪后的输入(GT) -> color_prior -> GT叠加mask -> mask -> 置信度
+        self._debug_refiner_info = {
+            'original_gt': self.state_0.detach(),          # 原始 GT
+            'denoised_gt': denoised_gt.detach(),           # 去噪后的 GT（新的训练目标）
+            'masked_input': self.condition.detach(),       # 带mask的输入
+        }
     
     def _denoise_image(self, image):
         """

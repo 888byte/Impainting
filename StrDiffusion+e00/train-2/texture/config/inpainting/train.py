@@ -384,27 +384,30 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
-                # 获取去噪调试信息（双边滤波去噪）
+                # 获取去噪调试信息
                 denoise_debug = getattr(model, '_debug_refiner_info', None)
-                denoised_input = denoise_debug.get('denoised_input', None) if denoise_debug else None
+                
+                if denoise_debug is not None:
+                    original_gt = denoise_debug.get('original_gt', Y_GT)
+                    denoised_gt = denoise_debug.get('denoised_gt', None)
+                    
+                    # 计算去噪效果
+                    if denoised_gt is not None:
+                        diff = (denoised_gt - original_gt).abs().mean().item()
+                        logger.info(f"[Denoise Debug] step={current_step}, gt_denoise_diff={diff:.6f}")
+                else:
+                    original_gt = Y_GT
+                    denoised_gt = None
                 
                 debug_logger.save_training_state(
                     step=current_step,
-                    input_image=Y_degraded,  # 原始输入
-                    gt=Y_GT,
+                    input_image=original_gt,  # 原始GT
+                    gt=original_gt,           # GT (用于生成 GT+Mask)
                     color_prior=color_prior if color_prior is not None else Y_degraded,
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
                     mask=mask if is_mural_mode else (1 - mask),
-                    # 去噪后的输入（双边滤波效果）
-                    refined_gt=denoised_input
+                    refined_gt=denoised_gt    # 去噪后的GT（新训练目标）
                 )
-                
-                # 打印去噪效果统计
-                if denoise_debug is not None and 'denoised_input' in denoise_debug:
-                    orig = denoise_debug.get('original_input', Y_degraded)
-                    denoised = denoise_debug['denoised_input']
-                    diff = (denoised - orig).abs().mean().item()
-                    logger.info(f"[Denoise Debug] step={current_step}, diff={diff:.6f}")
             # ============ 调试保存完成 ============
 
             #———————————————————检查点保存—————————————————————————
