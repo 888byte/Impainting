@@ -381,30 +381,26 @@ class DenoisingModel(BaseModel):
         ab_gt_norm = lab_gt[:, 1:3, :, :] / 128.0
         
         # Step 3: 构造 Refiner 输入
-        # 对于GT精炼，我们用自身的 ab 作为 delta (即 delta=0 的初始状态)
-        # 但仍提供 L 和 mask 信息帮助网络理解上下文
         delta_ab_zero = torch.zeros_like(ab_gt_norm)  # 无初始偏移
         
-        # 置信度: 全图都需要精炼，但 hole 区域可以更激进
-        conf = 1.0 - mask_hole * 0.5  # known=1.0, hole=0.5
+        # 置信度: 全图都需要精炼
+        conf = torch.ones_like(mask_hole) - mask_hole * 0.5  # known=1.0, hole=0.5
         
-        # 输入: delta_ab(2) + L(1) + conf(1) + mask(1) + conf_lut(用conf填充)(1)
+        # 输入: delta_ab(2) + L(1) + conf(1) + mask(1) + conf(1)
         ref_in = torch.cat([delta_ab_zero, L_norm, conf, mask_hole, conf], dim=1)
         
         # Step 4: Refiner 前向
         delta_update_norm = self.chroma_refiner(ref_in)
         
-        # Step 5: 门控 (全图都需要精炼，但可以根据 mask 加权)
-        gamma = self.refiner_gamma if hasattr(self, 'refiner_gamma') else 1.0
-        # 全图精炼，门控设为 1 (或可配置为只精炼 hole 区域)
+        # Step 5: 门控 (全图精炼)
         gate = torch.ones_like(mask_hole)
         
-        # Step 6: 应用更新
+        # Step 6: 应用更新 (这里应该是很小的更新)
         ab_refined_norm = ab_gt_norm + gate * delta_update_norm
         
-        # Step 7: 合成 refined Lab
-        L_refined = lab_gt[:, 0:1, :, :]  # 保持原亮度
-        lab_refined = torch.cat([L_refined, ab_refined_norm * 128.0], dim=1)
+        # Step 7: 合成 refined Lab (关键：确保使用原始 L 通道值，不是归一化的)
+        L_original = lab_gt[:, 0:1, :, :]  # L: 0~100
+        lab_refined = torch.cat([L_original, ab_refined_norm * 128.0], dim=1)
         
         # Step 8: Lab → RGB
         refined_gt = self._lab_to_rgb(lab_refined)
@@ -496,12 +492,15 @@ class DenoisingModel(BaseModel):
         y = y * 1.00000
         z = z * 1.08883
         
-        # XYZ → sRGB
+        # XYZ → sRGB (可能产生负值，超出 sRGB 色域)
         r = x * 3.2404542 + y * -1.5371385 + z * -0.4985314
         g = x * -0.9692660 + y * 1.8760108 + z * 0.0415560
         b = x * 0.0556434 + y * -0.2040259 + z * 1.0572252
         
         rgb_linear = torch.cat([r, g, b], dim=1)
+        
+        # 关键修复：先 clamp 到 [0, 1]，避免负数的幂次运算产生 NaN
+        rgb_linear = torch.clamp(rgb_linear, 0.0, 1.0)
         
         # 线性 RGB → sRGB
         mask = rgb_linear > 0.0031308
