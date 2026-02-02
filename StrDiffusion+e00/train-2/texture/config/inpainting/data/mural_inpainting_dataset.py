@@ -318,9 +318,10 @@ class MuralInpaintingDataset(Dataset):
         mask: np.ndarray,
         color_prior: np.ndarray,
         gt: np.ndarray,
-        confidence: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """数据增强（包含 confidence）"""
+        confidence: np.ndarray,
+        conf_lut: np.ndarray = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """数据增强（包含 confidence 和 conf_lut）"""
         # 水平翻转
         if self.use_flip and random.random() > 0.5:
             img = np.fliplr(img).copy()
@@ -328,6 +329,8 @@ class MuralInpaintingDataset(Dataset):
             color_prior = np.fliplr(color_prior).copy()
             gt = np.fliplr(gt).copy()
             confidence = np.fliplr(confidence).copy()
+            if conf_lut is not None:
+                conf_lut = np.fliplr(conf_lut).copy()
         
         # 旋转 (0, 90, 180, 270度)
         if self.use_rot:
@@ -338,8 +341,10 @@ class MuralInpaintingDataset(Dataset):
                 color_prior = np.rot90(color_prior, k).copy()
                 gt = np.rot90(gt, k).copy()
                 confidence = np.rot90(confidence, k).copy()
+                if conf_lut is not None:
+                    conf_lut = np.rot90(conf_lut, k).copy()
         
-        return img, mask, color_prior, gt, confidence
+        return img, mask, color_prior, gt, confidence, conf_lut
     
     def _generate_gt(
         self, 
@@ -458,6 +463,7 @@ class MuralInpaintingDataset(Dataset):
         prior_result = self.color_prior_gen.generate(degraded_img, mask, method=self.prior_method)
         lut_mapped = prior_result['color_prior']     # [H, W, 3] float32 - 全图LUT+修复
         confidence = prior_result['confidence']       # [H, W] float32
+        conf_lut = prior_result['conf_lut']           # [H, W] float32 - LUT原始置信度
         
         # 根据 current_mode 决定 color_prior 的内容
         if current_mode == 'full':
@@ -480,10 +486,10 @@ class MuralInpaintingDataset(Dataset):
         gt = self._generate_gt(degraded_img, mask, current_mode)
         
         # ============================================================
-        # Step 6: 数据增强（同时增强 confidence）
+        # Step 6: 数据增强（同时增强 confidence 和 conf_lut）
         # ============================================================
-        degraded_img, mask, color_prior, gt, confidence = self._augment_with_confidence(
-            degraded_img, mask, color_prior, gt, confidence
+        degraded_img, mask, color_prior, gt, confidence, conf_lut = self._augment_with_confidence(
+            degraded_img, mask, color_prior, gt, confidence, conf_lut
         )
         
         # ============================================================
@@ -515,6 +521,11 @@ class MuralInpaintingDataset(Dataset):
             confidence.astype(np.float32)
         ).unsqueeze(0)                                             # [1, H, W]
         
+        # conf_lut 用于 ChromaRefiner
+        conf_lut_tensor = torch.from_numpy(
+            conf_lut.astype(np.float32)
+        ).unsqueeze(0)                                             # [1, H, W]
+        
         # 生成灰度图和边缘图（与原训练代码兼容）
         gt_gray = cv2.cvtColor(gt, cv2.COLOR_RGB2GRAY)
         gt_gray_tensor = torch.from_numpy(
@@ -536,6 +547,7 @@ class MuralInpaintingDataset(Dataset):
             'mask': mask_tensor,
             'color_prior': color_prior_tensor,
             'confidence': confidence_tensor,
+            'conf_lut': conf_lut_tensor,  # ChromaRefiner 需要
             'mode': current_mode,
             'path': img_path,
             'GT_path': img_path  # 与原数据集兼容

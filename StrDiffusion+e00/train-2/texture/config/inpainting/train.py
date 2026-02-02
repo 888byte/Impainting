@@ -330,6 +330,8 @@ def main():
                 mask = train_data["mask"]            # 使用数据集的mask
                 color_prior = train_data["color_prior"]
                 confidence = train_data["confidence"]
+                # ChromaRefiner 需要的 conf_lut
+                conf_lut = train_data.get("conf_lut", None)
             else:
                 # 原始模式：兼容旧数据集
                 Y_GT, X_GT, X_LQ = train_data["GT"], train_data["GT_gray"], train_data["GT_edge"]
@@ -345,6 +347,7 @@ def main():
                 # 使用 ColorPriorGenerator 生成先验
                 color_prior = None
                 confidence = None
+                conf_lut = None
                 if color_prior_gen is not None:
                     color_prior, confidence = color_prior_gen.generate_tensor(
                         Y_GT, 1 - mask, device=device
@@ -360,6 +363,8 @@ def main():
                 color_prior = color_prior.to(device)
             if confidence is not None:
                 confidence = confidence.to(device)
+            if conf_lut is not None:
+                conf_lut = conf_lut.to(device)
             
             # ============ SDE训练 ============
             # 注意：mask约定为 1=已知, 0=缺失
@@ -371,7 +376,7 @@ def main():
             
             timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_degraded*mask_for_sde)
             model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
-                           color_prior=color_prior, confidence=confidence)
+                           color_prior=color_prior, confidence=confidence, conf_lut=conf_lut)
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]

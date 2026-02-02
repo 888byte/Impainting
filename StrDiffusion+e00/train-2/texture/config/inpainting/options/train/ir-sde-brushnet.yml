@@ -27,6 +27,27 @@ brushnet:
   depth: 4             # 下采样深度（与主UNet对齐）
   lite: false          # 是否使用轻量版
 
+#### ChromaRefiner配置
+# 轻量级色度精炼网络，在Lab空间对color_prior进行有界残差修正
+chroma_refiner:
+  enabled: true          # 是否启用ChromaRefiner
+  in_channels: 6         # 输入通道数: delta_ab(2)+L(1)+conf(1)+mask(1)+conf_lut(1)
+  hidden_channels: 32    # 隐藏层通道数 (可调整: 24/32/48)
+  num_blocks: 1          # Transformer block数量 (可调整: 1/2)
+  num_heads: 4           # 注意力头数
+  expand_ratio: 2        # GDFN扩展比例
+  output_scale: 0.3      # tanh后的缩放因子 (控制修正幅度)
+  learnable_scale: true  # 缩放因子是否可学习
+  gamma: 1.0             # 门控指数 (1=线性, 2=更激进)
+  
+  # 训练配置
+  lr: !!float 1e-4       # Refiner学习率
+  lambda_ref: 0.1        # Refiner总loss权重 (可调整: 0.05~0.2)
+  lambda_ab: 1.0         # 颜色监督权重
+  lambda_keep: 0.1       # 保守项权重 (高置信区域别乱动)
+  lambda_tv: 0.01        # TV平滑权重 (抑制椒盐噪点)
+
+
 #### 数据集配置
 datasets:
   train:
