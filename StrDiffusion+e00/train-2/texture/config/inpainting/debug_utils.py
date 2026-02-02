@@ -186,6 +186,8 @@ class DebugLogger:
         if refined_gt is not None:
             labels.append('RefinedGT')
             tensors.append(refined_gt)
+            # Debug: 打印 refined_gt 的范围
+            print(f"[DebugLogger] refined_gt: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}, shape={refined_gt.shape}")
         
         labels.extend(['Prior', 'Confidence', 'Mask', 'MaskedInput'])
         tensors.extend([color_prior, confidence, mask, masked_input])
