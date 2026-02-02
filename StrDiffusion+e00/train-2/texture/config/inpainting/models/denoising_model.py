@@ -119,8 +119,6 @@ class DenoisingModel(BaseModel):
         if self.is_train:
             self.model.train()
             self.dis.train()
-            if self.chroma_refiner is not None:
-                self.chroma_refiner.train()
 
             is_weighted = opt['train']['is_weighted']
             loss_type = opt['train']['loss_type']
