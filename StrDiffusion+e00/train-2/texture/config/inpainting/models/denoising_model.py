@@ -296,14 +296,13 @@ class DenoisingModel(BaseModel):
         loss_refiner = None
         
         if self.chroma_refiner is not None:
-            # 对输入图像进行去噪（自监督边缘感知平滑）
-            denoised_condition = self._denoise_image(self.condition)
+            # 对输入图像进行去噪（使用 ChromaRefiner 作为固定滤波器，不训练）
+            # 暂时禁用训练，只使用去噪功能
+            with torch.no_grad():
+                denoised_condition = self._denoise_image(self.condition)
             
-            # 计算去噪 loss（边缘感知平滑）
-            loss_refiner = self._compute_denoise_loss(
-                original=self.condition,
-                denoised=denoised_condition
-            )
+            # 不计算 loss_refiner，避免梯度损坏 ChromaRefiner 权重
+            # loss_refiner = self._compute_denoise_loss(...)
             
             # 保存调试信息
             self._debug_refiner_info = {
