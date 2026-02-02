@@ -384,30 +384,29 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
-                # 获取 ChromaRefiner 的调试信息（GT精炼）
+                # 获取 ChromaRefiner 的调试信息（输入图像去噪）
                 refiner_debug = getattr(model, '_debug_refiner_info', None)
-                refined_gt = refiner_debug['refined_gt'] if refiner_debug else None
-                original_gt = refiner_debug['original_gt'] if refiner_debug else None
+                denoised_input = refiner_debug.get('denoised_input', None) if refiner_debug else None
+                original_gt = refiner_debug.get('original_gt', None) if refiner_debug else None
                 
                 debug_logger.save_training_state(
                     step=current_step,
-                    input_image=Y_degraded,  # 褪色图像（输入）
-                    gt=original_gt if original_gt is not None else Y_GT,  # 原始GT
+                    input_image=Y_degraded,  # 原始输入（可能有噪声）
+                    gt=original_gt if original_gt is not None else Y_GT,
                     color_prior=color_prior if color_prior is not None else Y_degraded,
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
-                    mask=mask if is_mural_mode else (1 - mask),  # 统一为 1=缺失
-                    # 新增：精炼后的GT用于对比（显示去噪效果）
-                    refined_gt=refined_gt
+                    mask=mask if is_mural_mode else (1 - mask),
+                    # 去噪后的输入（显示去噪效果）
+                    refined_gt=denoised_input  # 复用 refined_gt 参数显示去噪结果
                 )
                 
-                # 打印 ChromaRefiner GT精炼效果统计
-                if refiner_debug is not None:
-                    orig = refiner_debug['original_gt']
-                    refn = refiner_debug['refined_gt']
-                    diff = (refn - orig).abs().mean().item()
+                # 打印 ChromaRefiner 去噪效果统计
+                if refiner_debug is not None and 'denoised_input' in refiner_debug:
+                    orig = refiner_debug.get('original_input', Y_degraded)
+                    denoisd = refiner_debug['denoised_input']
+                    diff = (denoisd - orig).abs().mean().item()
                     logger.info(f"[ChromaRefiner Debug] step={current_step}, "
-                               f"gt_diff_mean={diff:.6f}, "
-                               f"gate_mean={refiner_debug['gate'].mean().item():.4f}")
+                               f"input_denoise_diff={diff:.6f}")
             # ============ 调试保存完成 ============
 
             #———————————————————检查点保存—————————————————————————

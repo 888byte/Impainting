@@ -28,24 +28,26 @@ brushnet:
   lite: false          # 是否使用轻量版
 
 #### ChromaRefiner配置
-# 轻量级色度精炼网络，对GT图像进行Lab空间去噪
-# 目的: 历史壁画照片可能带有噪声，精炼后作为更干净的训练目标
+# 轻量级色度去噪网络，对输入图像进行 Lab 空间去噪
+# 目的: 消除输入图像的颜色噪声，使 LUT 变换后得到更均匀的颜色
+# 方法: 自监督边缘感知平滑（无需干净参考图）
 chroma_refiner:
-  enabled: true          # 是否启用ChromaRefiner (精炼GT)
-  in_channels: 6         # 输入通道数: delta_ab(2)+L(1)+conf(1)+mask(1)+conf(1)
+  enabled: true          # 是否启用 ChromaRefiner
+  in_channels: 6         # 输入通道数: ab(2)+L(1)+填充(3)
   hidden_channels: 32    # 隐藏层通道数 (可调整: 24/32/48)
   num_blocks: 1          # Transformer block数量 (可调整: 1/2)
   num_heads: 4           # 注意力头数
   expand_ratio: 2        # GDFN扩展比例
-  output_scale: 0.3      # tanh后的缩放因子 (控制修正幅度)
+  output_scale: 0.1      # 修正幅度（降低以防止过度修改）
   learnable_scale: true  # 缩放因子是否可学习
-  gamma: 1.0             # 门控指数 (未使用于GT精炼)
   
-  # 训练配置
-  lr: !!float 1e-4       # Refiner学习率
-  lambda_ref: 0.1        # Refiner总loss权重 (可调整: 0.05~0.2)
-  lambda_keep: 0.5       # 保守项权重 (防止过度修改原图，建议较大)
-  lambda_tv: 0.1         # TV平滑权重 (去噪)
+  # 训练配置 - 自监督边缘感知平滑
+  lr: !!float 1e-4       # 学习率
+  lambda_ref: 0.5        # Refiner总loss权重（增大以增强去噪效果）
+  lambda_fid: 1.0        # 保真项权重（防止过度修改）
+  lambda_smooth: 2.0     # 边缘感知平滑权重（控制平滑强度）
+
+
 
 
 

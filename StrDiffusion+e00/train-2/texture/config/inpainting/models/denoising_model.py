@@ -197,13 +197,21 @@ class DenoisingModel(BaseModel):
                     betas=(train_opt["beta1"], train_opt["beta2"]),
                 )
                 self.optimizers.append(self.optimizer_refiner)
+                
                 # Refiner loss 权重配置
-                self.lambda_ref = self.refiner_opt.get('lambda_ref', 0.1)
-                self.lambda_ab = self.refiner_opt.get('lambda_ab', 1.0)
-                self.lambda_keep = self.refiner_opt.get('lambda_keep', 0.1)
-                self.lambda_tv = self.refiner_opt.get('lambda_tv', 0.01)
-                self.refiner_gamma = self.refiner_opt.get('gamma', 1.0)
-                logger.info(f"[ChromaRefiner] 优化器已配置: lr={refiner_lr}, lambda_ref={self.lambda_ref}")
+                self.lambda_ref = self.refiner_opt.get('lambda_ref', 0.5)
+                
+                # 新版边缘感知去噪 loss 权重
+                self.lambda_fid = self.refiner_opt.get('lambda_fid', 1.0)
+                self.lambda_smooth = self.refiner_opt.get('lambda_smooth', 2.0)
+                
+                # 旧版兼容
+                self.lambda_keep = self.refiner_opt.get('lambda_keep', 0.5)
+                self.lambda_tv = self.refiner_opt.get('lambda_tv', 0.1)
+                
+                logger.info(f"[ChromaRefiner] 优化器已配置: lr={refiner_lr}, "
+                           f"lambda_ref={self.lambda_ref}, lambda_fid={self.lambda_fid}, "
+                           f"lambda_smooth={self.lambda_smooth}")
             # ============ ChromaRefiner 优化器完成 ============
 
             # schedulers
@@ -281,35 +289,33 @@ class DenoisingModel(BaseModel):
     def optimize_parameters(self, step, timesteps, sde=None):
         sde.set_mu(self.condition)
         
-        # ============ ChromaRefiner 精炼 GT (训练目标去噪) ============
-        # 目的: GT 图像可能带有噪声（历史壁画照片），精炼后作为更干净的训练目标
-        refined_gt = self.state_0  # 默认使用原始 GT
+        # ============ ChromaRefiner 去噪输入图像 ============
+        # 目的: 输入图像（退化图像）存在颜色噪声，去噪后用于生成更干净的 color_prior
+        # 训练时：使用边缘感知平滑 loss 进行自监督去噪
+        denoised_condition = self.condition  # 默认使用原始输入
         loss_refiner = None
         
         if self.chroma_refiner is not None:
-            # 精炼 GT 图像
-            refined_gt, delta_update, gate = self.refine_gt(
-                gt_image=self.state_0,  # 原始 GT (可能带噪声)
-                mask_hole=1 - self.mask  # 1=hole, 0=known
-            )
+            # 对输入图像进行去噪（自监督边缘感知平滑）
+            denoised_condition = self._denoise_image(self.condition)
             
-            # 计算 Refiner loss (TV平滑 + 保守项)
-            loss_refiner = self._compute_gt_refiner_loss(
-                delta_update=delta_update,
-                gate=gate
+            # 计算去噪 loss（边缘感知平滑）
+            loss_refiner = self._compute_denoise_loss(
+                original=self.condition,
+                denoised=denoised_condition
             )
             
             # 保存调试信息
             self._debug_refiner_info = {
+                'original_input': self.condition.detach(),
+                'denoised_input': denoised_condition.detach(),
                 'original_gt': self.state_0.detach(),
-                'refined_gt': refined_gt.detach(),
-                'delta_update': delta_update.detach(),
-                'gate': gate.detach(),
+                'refined_gt': self.state_0.detach(),  # 兼容旧接口
             }
-        # ============ ChromaRefiner 精炼 GT 完成 ============
+        # ============ ChromaRefiner 去噪完成 ============
         
-        # 使用精炼后的 GT 作为训练目标
-        yt_1_optimum = sde.reverse_optimum_step(self.state, refined_gt, timesteps)
+        # 使用原始 GT 作为训练目标
+        yt_1_optimum = sde.reverse_optimum_step(self.state, self.state_0, timesteps)
         timesteps = timesteps.to(self.device)
         
         # Get noise and score
@@ -363,6 +369,49 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_main"] = loss_main.item()
         if loss_refiner is not None:
             self.log_dict["loss_refiner"] = loss_refiner.item()
+    
+    def _denoise_image(self, image):
+        """
+        使用 ChromaRefiner 对图像进行去噪
+        
+        在 Lab 空间进行处理，只修改 ab 通道（色度），保持 L 通道（亮度）不变
+        
+        Args:
+            image: [B, 3, H, W] RGB 图像 in [0, 1]
+        
+        Returns:
+            denoised: [B, 3, H, W] 去噪后的 RGB 图像 in [0, 1]
+        """
+        # RGB → Lab
+        lab = self._rgb_to_lab(image)
+        
+        # 归一化
+        L_norm = lab[:, 0:1, :, :] / 100.0
+        ab_norm = lab[:, 1:3, :, :] / 128.0
+        
+        # 构造输入: 使用 ab 通道作为输入特征
+        # 输入: ab(2) + L(1) + 全1填充(3) = 6 通道
+        ones = torch.ones_like(L_norm)
+        ref_in = torch.cat([ab_norm, L_norm, ones, ones, ones], dim=1)
+        
+        # ChromaRefiner 前向：输出 ab 更新量
+        delta_ab = self.chroma_refiner(ref_in)
+        
+        # 应用更新（小幅度修正）
+        ab_denoised = ab_norm + delta_ab
+        
+        # 合成 Lab
+        lab_denoised = torch.cat([lab[:, 0:1, :, :], ab_denoised * 128.0], dim=1)
+        
+        # Lab → RGB
+        denoised = self._lab_to_rgb(lab_denoised)
+        
+        # 检查 NaN 并回退
+        if torch.isnan(denoised).any() or torch.isinf(denoised).any():
+            logger.warning("[_denoise_image] NaN detected, falling back to original")
+            denoised = image.clone()
+        
+        return torch.clamp(denoised, 0.0, 1.0)
     
     def refine_gt(self, gt_image, mask_hole):
         """
@@ -443,25 +492,61 @@ class DenoisingModel(BaseModel):
         
         return refined_gt, delta_update_norm, gate
     
-    def _compute_gt_refiner_loss(self, delta_update, gate):
+    def _compute_denoise_loss(self, original, denoised):
         """
-        计算 GT Refiner 的 loss
+        自监督边缘感知去噪 Loss
         
-        目标: 轻微平滑去噪，不能过度改变原图
-        L_ref = λ_keep * L_keep + λ_tv * L_tv
+        原理：
+        - 在平坦区域（低梯度）：强制颜色一致，消除噪声
+        - 在边缘区域（高梯度）：保持原始颜色，避免模糊
+        
+        L_total = λ_fid * L_fidelity + λ_smooth * L_edge_smooth
+        
+        Args:
+            original: [B, 3, H, W] 原始图像
+            denoised: [B, 3, H, W] 去噪后的图像
         """
-        # L_keep: 保守项 (防止过度修改)
-        L_keep = torch.abs(delta_update).mean()
+        # ===== L_fidelity: 保真项，防止过度修改 =====
+        L_fid = (denoised - original).pow(2).mean()
         
-        # L_tv: TV 平滑项 (去噪)
-        L_tv = self._total_variation(delta_update)
+        # ===== 计算边缘权重（基于亮度梯度）=====
+        # 转换为灰度（亮度通道）
+        gray = 0.299 * original[:, 0:1] + 0.587 * original[:, 1:2] + 0.114 * original[:, 2:3]
+        
+        # 计算亮度梯度
+        grad_x = torch.abs(gray[:, :, :, 1:] - gray[:, :, :, :-1])  # [B, 1, H, W-1]
+        grad_y = torch.abs(gray[:, :, 1:, :] - gray[:, :, :-1, :])  # [B, 1, H-1, W]
+        
+        # 边缘权重：梯度小的地方权重大（平坦区域）
+        sigma = 0.1  # 控制边缘敏感度
+        edge_weight_x = torch.exp(-grad_x / sigma)  # 平坦区域 ≈ 1, 边缘 ≈ 0
+        edge_weight_y = torch.exp(-grad_y / sigma)
+        
+        # ===== L_edge_smooth: 边缘感知平滑 =====
+        # 在平坦区域强制颜色一致
+        color_diff_x = torch.abs(denoised[:, :, :, 1:] - denoised[:, :, :, :-1])  # [B, 3, H, W-1]
+        color_diff_y = torch.abs(denoised[:, :, 1:, :] - denoised[:, :, :-1, :])  # [B, 3, H-1, W]
+        
+        # 加权平滑损失（只在平坦区域平滑）
+        L_smooth_x = (edge_weight_x * color_diff_x).mean()
+        L_smooth_y = (edge_weight_y * color_diff_y).mean()
+        L_smooth = L_smooth_x + L_smooth_y
         
         # 加权求和
+        lambda_fid = self.lambda_fid if hasattr(self, 'lambda_fid') else 1.0
+        lambda_smooth = self.lambda_smooth if hasattr(self, 'lambda_smooth') else 2.0
+        
+        return lambda_fid * L_fid + lambda_smooth * L_smooth
+    
+    def _compute_gt_refiner_loss(self, delta_update, gate):
+        """
+        旧版 GT Refiner Loss（保留兼容性）
+        """
+        L_keep = torch.abs(delta_update).mean()
+        L_tv = self._total_variation(delta_update)
         lambda_keep = self.lambda_keep if hasattr(self, 'lambda_keep') else 0.5
         lambda_tv = self.lambda_tv if hasattr(self, 'lambda_tv') else 0.1
-        
         return lambda_keep * L_keep + lambda_tv * L_tv
-    
     
     def _total_variation(self, x):
         """计算 Total Variation loss"""
