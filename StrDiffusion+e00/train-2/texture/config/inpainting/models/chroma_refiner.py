@@ -238,16 +238,46 @@ class SimpleCNNDenoiser(nn.Module):
         Returns:
             delta_ab: [B, 2, H, W] ab 更新量
         """
+        # 检查输入
+        if torch.isnan(ref_in).any():
+            print(f"[SimpleCNNDenoiser] NaN in input!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
+        
         x = self.conv1(ref_in)
+        if torch.isnan(x).any():
+            print(f"[SimpleCNNDenoiser] NaN after conv1!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
+        
         x = self.bn1(x)
+        if torch.isnan(x).any():
+            print(f"[SimpleCNNDenoiser] NaN after bn1!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
+        
         x = F.relu(x)
         
         x = self.conv2(x)
+        if torch.isnan(x).any():
+            print(f"[SimpleCNNDenoiser] NaN after conv2!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
+        
         x = self.bn2(x)
+        if torch.isnan(x).any():
+            print(f"[SimpleCNNDenoiser] NaN after bn2!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
+        
         x = F.relu(x)
         
         # 输出层
         delta_raw = self.conv3(x)
+        if torch.isnan(delta_raw).any():
+            print(f"[SimpleCNNDenoiser] NaN after conv3!")
+            return torch.zeros(ref_in.shape[0], 2, ref_in.shape[2], ref_in.shape[3], 
+                              device=ref_in.device, dtype=ref_in.dtype)
         
         # tanh 限幅 + 固定小缩放
         delta_ab = torch.tanh(delta_raw) * self.output_scale
