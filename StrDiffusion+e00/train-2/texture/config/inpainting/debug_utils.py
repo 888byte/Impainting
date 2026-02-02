@@ -17,11 +17,14 @@ Author: Auto-generated for BrushNet Integration
 """
 
 import os
+import logging
 import torch
 import numpy as np
 import cv2
 from typing import Dict, Optional, Union, List
 from datetime import datetime
+
+logger = logging.getLogger("base")
 
 
 class DebugLogger:
@@ -187,7 +190,9 @@ class DebugLogger:
             labels.append('RefinedGT')
             tensors.append(refined_gt)
             # Debug: 打印 refined_gt 的范围
-            print(f"[DebugLogger] refined_gt: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}, shape={refined_gt.shape}")
+            logger.info(f"[DebugLogger] refined_gt received: min={refined_gt.min().item():.4f}, max={refined_gt.max().item():.4f}, shape={refined_gt.shape}")
+        else:
+            logger.warning("[DebugLogger] refined_gt is None!")
         
         labels.extend(['Prior', 'Confidence', 'Mask', 'MaskedInput'])
         tensors.extend([color_prior, confidence, mask, masked_input])
