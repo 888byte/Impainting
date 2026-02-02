@@ -384,14 +384,30 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
+                # 获取 ChromaRefiner 的调试信息（如果有）
+                refiner_debug = getattr(model, '_debug_refiner_info', None)
+                refined_prior = refiner_debug['refined_prior'] if refiner_debug else None
+                original_prior = refiner_debug['original_prior'] if refiner_debug else None
+                
                 debug_logger.save_training_state(
                     step=current_step,
                     input_image=Y_degraded,  # 褪色图像（输入）
                     gt=Y_GT,                  # LUT变换后的GT（目标）
-                    color_prior=color_prior if color_prior is not None else Y_degraded,
+                    color_prior=original_prior if original_prior is not None else (color_prior if color_prior is not None else Y_degraded),
                     confidence=confidence if confidence is not None else torch.zeros_like(mask),
-                    mask=mask if is_mural_mode else (1 - mask)  # 统一为 1=缺失
+                    mask=mask if is_mural_mode else (1 - mask),  # 统一为 1=缺失
+                    # 新增：保存精炼后的 prior 用于对比验证
+                    refined_prior=refined_prior
                 )
+                
+                # 打印 ChromaRefiner 精炼效果统计
+                if refiner_debug is not None:
+                    orig = refiner_debug['original_prior']
+                    refn = refiner_debug['refined_prior']
+                    diff = (refn - orig).abs().mean().item()
+                    logger.info(f"[ChromaRefiner Debug] step={current_step}, "
+                               f"prior_diff_mean={diff:.6f}, "
+                               f"gate_mean={refiner_debug['gate'].mean().item():.4f}")
             # ============ 调试保存完成 ============
 
             #———————————————————检查点保存—————————————————————————

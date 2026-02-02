@@ -310,6 +310,14 @@ class DenoisingModel(BaseModel):
                 y_gt=self.state_0,
                 conf=self.confidence
             )
+            
+            # 保存调试信息（用于验证 refined_color_prior 是否正确传递）
+            self._debug_refiner_info = {
+                'original_prior': self.color_prior.detach(),
+                'refined_prior': refined_color_prior.detach(),
+                'delta_update': delta_update.detach(),
+                'gate': gate.detach(),
+            }
         # ============ ChromaRefiner 完成 ============
         
         yt_1_optimum = sde.reverse_optimum_step(self.state, self.state_0, timesteps)

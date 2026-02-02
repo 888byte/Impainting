@@ -148,19 +148,21 @@ class DebugLogger:
         color_prior: torch.Tensor,
         confidence: torch.Tensor,
         mask: torch.Tensor,
-        output: Optional[torch.Tensor] = None
+        output: Optional[torch.Tensor] = None,
+        refined_prior: Optional[torch.Tensor] = None
     ):
         """
         保存完整的训练状态为拼接大图
         
         布局：
-        [原图] [GT] [Color Prior] [Confidence] [Mask] [Masked Input]
+        [原图] [GT] [Color Prior] [Refined Prior] [Confidence] [Mask] [Masked Input]
         
         Args:
             step: 当前步数
             input_image: 输入原始图像 (含mask区域的原图)
             gt: Ground Truth (LUT变换后的目标图)
             color_prior: 颜色先验 (第一阶段生成)
+            refined_prior: 精炼后的颜色先验 (ChromaRefiner 输出, 可选)
             confidence: 置信度图 (mask区域应为均匀低值)
             mask: 掩码 (1=缺失, 0=已知)
             output: 模型输出 (可选)
@@ -180,12 +182,16 @@ class DebugLogger:
         
         # 准备所有图像
         images = []
-        labels = ['Input', 'GT', 'Prior', 'Confidence', 'Mask', 'MaskedInput']
-        tensors = [input_image, gt, color_prior, confidence, mask, masked_input]
+        labels = ['Input', 'GT', 'Prior']
+        tensors = [input_image, gt, color_prior]
         
-        if output is not None:
-            labels.append('Output')
-            tensors.append(output)
+        # 如果有精炼后的 prior，添加对比
+        if refined_prior is not None:
+            labels.append('RefinedPrior')
+            tensors.append(refined_prior)
+        
+        labels.extend(['Confidence', 'Mask', 'MaskedInput'])
+        tensors.extend([confidence, mask, masked_input])
         
         # 转换并添加标签
         for tensor, label in zip(tensors, labels):
@@ -266,13 +272,17 @@ class DebugLogger:
         color_prior: torch.Tensor,
         confidence: torch.Tensor,
         mask: torch.Tensor,
-        output: Optional[torch.Tensor] = None
+        output: Optional[torch.Tensor] = None,
+        refined_prior: Optional[torch.Tensor] = None
     ):
         """
         保存完整的训练状态（调用拼接版本）
+        
+        Args:
+            refined_prior: ChromaRefiner 精炼后的 color_prior (可选)
         """
         self.save_training_state_concatenated(
-            step, input_image, gt, color_prior, confidence, mask, output
+            step, input_image, gt, color_prior, confidence, mask, output, refined_prior
         )
 
 
