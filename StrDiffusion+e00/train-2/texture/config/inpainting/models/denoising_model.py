@@ -346,8 +346,15 @@ class DenoisingModel(BaseModel):
             loss = loss + self.lambda_ref * loss_refiner
         
         loss.backward()
+        
+        # 梯度裁剪 - 主模型
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
+        
+        # ChromaRefiner 梯度裁剪和更新
         if self.chroma_refiner is not None and hasattr(self, 'optimizer_refiner'):
+            # 关键：对 ChromaRefiner 进行梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.chroma_refiner.parameters(), max_norm=0.5)
             self.optimizer_refiner.step()
         
 
@@ -420,11 +427,14 @@ class DenoisingModel(BaseModel):
         # Step 8: Lab → RGB
         refined_gt = self._lab_to_rgb(lab_refined)
         
+        # 关键保护：如果出现 NaN，回退到原始 GT
+        if torch.isnan(refined_gt).any() or torch.isinf(refined_gt).any():
+            logger.warning(f"[refine_gt] WARNING: refined_gt contains NaN/Inf! Falling back to original GT.")
+            refined_gt = gt_image.clone()
+            delta_update_norm = torch.zeros_like(delta_update_norm)
+        
         if debug_print:
             logger.info(f"[refine_gt] refined_gt (before clamp): min={refined_gt.min():.4f}, max={refined_gt.max():.4f}")
-            # 检查 NaN
-            if torch.isnan(refined_gt).any():
-                logger.warning(f"[refine_gt] WARNING: refined_gt contains NaN!")
         
         refined_gt = torch.clamp(refined_gt, 0.0, 1.0)
         
