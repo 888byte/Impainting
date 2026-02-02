@@ -379,9 +379,9 @@ class DenoisingModel(BaseModel):
     
     def _denoise_image(self, image):
         """
-        使用 ChromaRefiner 对图像进行去噪
+        使用双边滤波对图像进行边缘保持去噪
         
-        在 Lab 空间进行处理，只修改 ab 通道（色度），保持 L 通道（亮度）不变
+        这是一个固定算法（不需要训练），在平坦区域平滑颜色，在边缘保持清晰
         
         Args:
             image: [B, 3, H, W] RGB 图像 in [0, 1]
@@ -389,83 +389,48 @@ class DenoisingModel(BaseModel):
         Returns:
             denoised: [B, 3, H, W] 去噪后的 RGB 图像 in [0, 1]
         """
-        try:
-            # 确保输入在有效范围内
-            image = torch.clamp(image, 0.0, 1.0)
-            
-            # 检查输入是否有效
-            if torch.isnan(image).any() or torch.isinf(image).any():
-                logger.warning("[_denoise_image] Invalid input, returning original")
-                return image.clone()
-            
-            # RGB → Lab
-            lab = self._rgb_to_lab(image)
-            
-            # 检查 Lab 转换结果
-            if torch.isnan(lab).any() or torch.isinf(lab).any():
-                logger.warning("[_denoise_image] Lab conversion produced NaN, returning original")
-                return image.clone()
-            
-            # 归一化
-            L_norm = lab[:, 0:1, :, :] / 100.0
-            ab_norm = lab[:, 1:3, :, :] / 128.0
-            
-            # 再次 clamp 确保归一化值在合理范围
-            L_norm = torch.clamp(L_norm, 0.0, 1.0)
-            ab_norm = torch.clamp(ab_norm, -1.0, 1.0)
-            
-            # 构造输入: ab(2) + L(1) + 全1填充(3) = 6 通道
-            ones = torch.ones_like(L_norm)
-            ref_in = torch.cat([ab_norm, L_norm, ones, ones, ones], dim=1)
-            
-            # 打印 ref_in 统计信息（每100次）
-            if hasattr(self, '_denoise_count'):
-                self._denoise_count += 1
-            else:
-                self._denoise_count = 0
-            
-            if self._denoise_count % 100 == 0:
-                logger.info(f"[_denoise_image] ref_in: min={ref_in.min():.4f}, max={ref_in.max():.4f}")
-            
-            # ChromaRefiner 前向：输出 ab 更新量
-            delta_ab = self.chroma_refiner(ref_in)
-            
-            # 详细检查 delta_ab
-            if self._denoise_count % 100 == 0:
-                logger.info(f"[_denoise_image] delta_ab: min={delta_ab.min():.6f}, max={delta_ab.max():.6f}, "
-                           f"has_nan={torch.isnan(delta_ab).any().item()}, has_inf={torch.isinf(delta_ab).any().item()}")
-            
-            # 检查 ChromaRefiner 输出
-            if torch.isnan(delta_ab).any() or torch.isinf(delta_ab).any():
-                # 详细打印哪里有 NaN
-                nan_count = torch.isnan(delta_ab).sum().item()
-                inf_count = torch.isinf(delta_ab).sum().item()
-                logger.warning(f"[_denoise_image] ChromaRefiner output NaN! nan_count={nan_count}, inf_count={inf_count}")
-                return image.clone()
-            
-            # 限制 delta_ab 的范围（额外安全措施）
-            delta_ab = torch.clamp(delta_ab, -0.1, 0.1)
-            
-            # 应用更新
-            ab_denoised = ab_norm + delta_ab
-            ab_denoised = torch.clamp(ab_denoised, -1.0, 1.0)
-            
-            # 合成 Lab（使用原始 L 通道）
-            lab_denoised = torch.cat([lab[:, 0:1, :, :], ab_denoised * 128.0], dim=1)
-            
-            # Lab → RGB
-            denoised = self._lab_to_rgb(lab_denoised)
-            
-            # 最终 NaN 检查
-            if torch.isnan(denoised).any() or torch.isinf(denoised).any():
-                logger.warning("[_denoise_image] Final output NaN, returning original")
-                return image.clone()
-            
-            return torch.clamp(denoised, 0.0, 1.0)
-            
-        except Exception as e:
-            logger.warning(f"[_denoise_image] Exception: {e}, returning original")
-            return image.clone()
+        # 使用简单的高斯模糊作为去噪（可调整参数）
+        # 这是一个近似的边缘保持滤波
+        sigma_spatial = 2.0  # 空间平滑程度
+        kernel_size = 5
+        
+        # 创建高斯核
+        x = torch.arange(kernel_size, dtype=image.dtype, device=image.device) - kernel_size // 2
+        gauss_1d = torch.exp(-x**2 / (2 * sigma_spatial**2))
+        gauss_1d = gauss_1d / gauss_1d.sum()
+        gauss_2d = gauss_1d.view(-1, 1) @ gauss_1d.view(1, -1)
+        gauss_2d = gauss_2d.view(1, 1, kernel_size, kernel_size)
+        
+        # 对每个通道分别进行高斯平滑
+        padding = kernel_size // 2
+        smoothed = []
+        for c in range(3):
+            channel = image[:, c:c+1, :, :]
+            channel_smoothed = F.conv2d(channel, gauss_2d, padding=padding)
+            smoothed.append(channel_smoothed)
+        smoothed = torch.cat(smoothed, dim=1)
+        
+        # 计算边缘权重（高梯度区域保持原值）
+        gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+        
+        # Sobel 梯度
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
+                               dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
+                               dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
+        
+        grad_x = F.conv2d(gray, sobel_x, padding=1)
+        grad_y = F.conv2d(gray, sobel_y, padding=1)
+        grad_mag = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
+        
+        # 边缘权重：梯度大的地方保持原值
+        sigma_edge = 0.1
+        edge_weight = 1 - torch.exp(-grad_mag / sigma_edge)  # 边缘=1, 平坦=0
+        
+        # 混合：边缘区域保持原值，平坦区域使用平滑值
+        denoised = edge_weight * image + (1 - edge_weight) * smoothed
+        
+        return torch.clamp(denoised, 0.0, 1.0)
     
     def refine_gt(self, gt_image, mask_hole):
         """
