@@ -282,8 +282,9 @@ class DenoisingModel(BaseModel):
         # - partial: 仅mask区域LUT变换，非mask区域保持去噪后的原色
         with torch.no_grad():
             if self.lut_processor is not None:
-                # 应用 LUT 变换
-                lut_transformed, _ = self.lut_processor.apply_to_tensor(denoised_original)
+                # 应用 LUT 变换，获取颜色映射和置信度
+                lut_transformed, lut_confidence = self.lut_processor.apply_to_tensor(denoised_original)
+                # lut_confidence: [B, 1, H, W] 每个像素的LUT置信度 (0-1)
                 
                 # ============ 平滑处理（导向滤波）============
                 # 以去噪后的原图为引导，平滑 LUT 结果，减少颜色割裂
@@ -294,14 +295,18 @@ class DenoisingModel(BaseModel):
                         radius=self.lut_smooth_radius
                     )
                 
-                # ============ LUT 强度混合 ============
-                # lut_strength 控制 LUT 效果强度
-                # 0 = 保持原色，1 = 完全 LUT 变换
-                if self.lut_strength < 1.0:
-                    lut_transformed = (
-                        denoised_original * (1 - self.lut_strength) + 
-                        lut_transformed * self.lut_strength
-                    )
+                # ============ 置信度加权 LUT 混合 ============
+                # 使用 LUT 置信度进行逐像素加权混合：
+                # - 高置信度像素：使用更多 LUT 颜色
+                # - 低置信度像素：保持更多原色
+                # 最终权重 = lut_strength * lut_confidence
+                effective_weight = self.lut_strength * lut_confidence  # [B, 1, H, W]
+                
+                # 逐像素混合：原色 * (1 - weight) + LUT * weight
+                lut_transformed = (
+                    denoised_original * (1 - effective_weight) + 
+                    lut_transformed * effective_weight
+                )
                 
                 if self.gt_mode == 'full':
                     # 全图 LUT 变换
@@ -315,6 +320,7 @@ class DenoisingModel(BaseModel):
                 # 没有 LUT 处理器，直接使用去噪后的图像
                 color_changed = denoised_original
                 lut_transformed = denoised_original
+                lut_confidence = torch.ones_like(denoised_original[:, :1])
         
         # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
         training_target = color_changed
