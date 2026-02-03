@@ -35,6 +35,8 @@ lut:
   # - full: 全图LUT映射（恢复整张图的颜色，即全局褪色修复）
   # - partial: 仅Mask区域LUT映射（保留背景，修复局部褪色区域）
   gt_mode: partial
+  lut_strength: 0.7     # LUT强度（0-1），使用LUT置信度加权
+  lut_smooth_radius: 5  # 平滑半径（双边滤波），减少颜色割裂
 
 #### 数据集配置
 datasets:

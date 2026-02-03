@@ -42,6 +42,68 @@ except ImportError:
     ColorPriorGenerator = None
     print("[WARNING] ColorPriorGenerator not found, color prior will be disabled")
 
+# 导入LUT处理器（用于置信度加权LUT变换）
+try:
+    from lut_processor import LUTProcessor
+except ImportError:
+    LUTProcessor = None
+    print("[WARNING] LUTProcessor not found, confidence-weighted LUT will be disabled")
+
+
+def denoise_image(img_np: np.ndarray, d=9, sigma_color=75, sigma_space=75) -> np.ndarray:
+    """
+    对图像进行边缘保持去噪（双边滤波）
+    
+    Args:
+        img_np: [H, W, 3] uint8 输入图像
+        d: 滤波直径
+        sigma_color: 颜色空间sigma
+        sigma_space: 坐标空间sigma
+    
+    Returns:
+        denoised: [H, W, 3] uint8 去噪后图像
+    """
+    return cv2.bilateralFilter(img_np, d, sigma_color, sigma_space)
+
+
+def apply_lut_with_confidence(lut_processor, img_np: np.ndarray, lut_strength: float = 0.7,
+                               smooth_radius: int = 5) -> tuple:
+    """
+    应用 LUT 变换并使用置信度加权混合
+    
+    Args:
+        lut_processor: LUTProcessor 实例
+        img_np: [H, W, 3] uint8 输入图像
+        lut_strength: 全局 LUT 强度 (0-1)
+        smooth_radius: 平滑半径
+    
+    Returns:
+        lut_result: [H, W, 3] float32 LUT 变换结果 (0-255)
+        confidence: [H, W] float32 置信度 (0-1)
+    """
+    # 应用 LUT 获取颜色映射和置信度
+    lut_color, confidence = lut_processor.trilinear_interpolate(img_np)
+    
+    # 平滑处理（减少颜色割裂）
+    if smooth_radius > 0:
+        d = smooth_radius * 2 + 1
+        lut_color_uint8 = np.clip(lut_color, 0, 255).astype(np.uint8)
+        for c in range(3):
+            lut_color[:, :, c] = cv2.bilateralFilter(
+                lut_color_uint8[:, :, c], d=d, sigmaColor=50, sigmaSpace=smooth_radius
+            ).astype(np.float32)
+    
+    # 置信度加权混合
+    # 有效权重 = 全局强度 × 逐像素置信度
+    effective_weight = lut_strength * confidence  # [H, W]
+    effective_weight_3ch = effective_weight[:, :, np.newaxis]  # [H, W, 1]
+    
+    # 混合：低置信度保持原色，高置信度使用 LUT
+    img_float = img_np.astype(np.float32)
+    result = img_float * (1 - effective_weight_3ch) + lut_color * effective_weight_3ch
+    
+    return result, confidence
+
 
 class MaskDataset(Dataset):
     """掩码数据集"""
@@ -137,6 +199,7 @@ def main():
     # 初始化颜色先验生成器
     # ============================================================
     color_prior_gen = None
+    lut_processor = None
     lut_opt = opt.get("lut", None)
     if lut_opt and ColorPriorGenerator is not None:
         lut_path = lut_opt.get("path", None)
@@ -148,14 +211,21 @@ def main():
                 inpaint_method=lut_opt.get("inpaint_method", "telea")
             )
             logger.info(f"[ColorPriorGenerator] Loaded LUT from {lut_path}")
+            
+            # 同时加载 LUT 处理器（用于置信度加权变换）
+            if LUTProcessor is not None:
+                lut_processor = LUTProcessor(lut_path)
+                logger.info(f"[LUTProcessor] Loaded for confidence-weighted blending")
         else:
             logger.warning(f"[ColorPriorGenerator] LUT path not found: {lut_path}")
     else:
         logger.warning("[ColorPriorGenerator] LUT config not provided, using original mode")
 
     prior_method = lut_opt.get("prior_method", "quality") if lut_opt else "quality"
-    gt_mode = lut_opt.get("gt_mode", "partial") if lut_opt else "partial"  # full=全局褪色, partial=局部褪色
-    logger.info(f"[Config] gt_mode={gt_mode}, prior_method={prior_method}")
+    gt_mode = lut_opt.get("gt_mode", "partial") if lut_opt else "partial"
+    lut_strength = lut_opt.get("lut_strength", 0.7) if lut_opt else 0.7
+    lut_smooth_radius = lut_opt.get("lut_smooth_radius", 5) if lut_opt else 5
+    logger.info(f"[Config] gt_mode={gt_mode}, prior_method={prior_method}, lut_strength={lut_strength}, smooth_radius={lut_smooth_radius}")
     
     # ============================================================
     # 加载数据集
@@ -221,46 +291,79 @@ def main():
             mask = next(mask_iterator)
 
         # ============================================================
-        # 生成颜色先验和置信度
+        # 第一步：对输入图像去噪
+        # ============================================================
+        # 将tensor转换为numpy进行处理
+        img_np = (Y_GT[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # [H, W, 3]
+        mask_np = ((1 - mask[0, 0]).numpy() * 255).astype(np.uint8)  # [H, W], 255=需要修复
+        
+        # 去噪（边缘保持双边滤波）
+        denoised_np = denoise_image(img_np, d=9, sigma_color=75, sigma_space=75)
+        logger.info(f"[{img_name}] Denoised input image")
+        
+        # ============================================================
+        # 第二步：生成颜色先验和置信度（使用去噪后的图像）
         # ============================================================
         color_prior = None
         confidence = None
         
-        if color_prior_gen is not None:
-            # 将tensor转换为numpy进行处理
-            img_np = (Y_GT[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # [H, W, 3]
-            mask_np = ((1 - mask[0, 0]).numpy() * 255).astype(np.uint8)  # [H, W], 255=需要修复
-            
-            # 生成颜色先验（全图LUT映射）
-            prior_result = color_prior_gen.generate(img_np, mask_np, method=prior_method)
-            lut_mapped = prior_result['color_prior']    # [H, W, 3] float32 - 全图LUT+修复
-            confidence_np = prior_result['confidence']   # [H, W] float32
+        if lut_processor is not None:
+            # 使用置信度加权 LUT 变换
+            lut_result, confidence_np = apply_lut_with_confidence(
+                lut_processor, 
+                denoised_np, 
+                lut_strength=lut_strength,
+                smooth_radius=lut_smooth_radius
+            )
             
             # 根据 gt_mode 决定最终的 color_prior
             if gt_mode == 'full':
-                # Full 模式: 全图使用LUT映射结果（全局褪色修复）
+                # Full 模式: 全图使用 LUT 映射结果
+                color_prior_np = lut_result
+            else:
+                # Partial 模式: 只在 mask 区域使用 LUT
+                lut_result_uint8 = np.clip(lut_result, 0, 255).astype(np.uint8)
+                color_prior_np = _feather_blend(
+                    original=denoised_np,
+                    transformed=lut_result_uint8,
+                    mask=mask_np,
+                    feather_radius=7
+                ).astype(np.float32)
+            
+            logger.info(f"[{img_name}] Applied confidence-weighted LUT (strength={lut_strength}, mode={gt_mode})")
+            
+        elif color_prior_gen is not None:
+            # 回退到原始的 ColorPriorGenerator
+            prior_result = color_prior_gen.generate(denoised_np, mask_np, method=prior_method)
+            lut_mapped = prior_result['color_prior']
+            confidence_np = prior_result['confidence']
+            
+            if gt_mode == 'full':
                 color_prior_np = lut_mapped
             else:
-                # Partial 模式: 只在mask区域使用LUT（局部褪色修复）
-                # 使用羽化融合，避免边界突变
                 lut_mapped_uint8 = np.clip(lut_mapped, 0, 255).astype(np.uint8)
                 color_prior_np = _feather_blend(
-                    original=img_np,
+                    original=denoised_np,
                     transformed=lut_mapped_uint8,
                     mask=mask_np,
                     feather_radius=7
                 ).astype(np.float32)
             
-            # 转换为tensor
+            logger.info(f"[{img_name}] Generated color prior (mode={gt_mode}) using ColorPriorGenerator")
+        else:
+            color_prior_np = None
+            confidence_np = None
+        
+        # 转换为 tensor
+        if color_prior_np is not None:
             color_prior = torch.from_numpy(
                 np.clip(color_prior_np, 0, 255).astype(np.float32) / 255.0
             ).permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
             
+        if confidence_np is not None:
             confidence = torch.from_numpy(
                 confidence_np.astype(np.float32)
             ).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-            
-            logger.info(f"[{img_name}] Generated color prior (mode={gt_mode}) and confidence")
 
         # ============================================================
         # 推理
