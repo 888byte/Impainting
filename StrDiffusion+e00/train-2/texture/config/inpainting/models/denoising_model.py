@@ -196,32 +196,40 @@ class DenoisingModel(BaseModel):
             self.log_dict = OrderedDict()
 
 
-    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, color_prior=None, confidence=None, conf_lut=None):
+    def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, 
+                  color_prior=None, confidence=None, conf_lut=None, original_degraded=None):
         """
         加载训练数据
         
         Args:
             state: 噪声状态
-            LQ: 低质量输入（条件）
-            GT: Ground Truth
+            LQ: 低质量输入（条件，可能带 mask 涂黑）
+            GT: Ground Truth（LUT 变换后的目标）
             mask: 掩码
             S_sde: 结构SDE
             S_GT: 结构GT
             S_LQ: 结构LQ
             color_prior: [可选] 颜色先验图，用于BrushNet
             confidence: [可选] 置信度图，用于BrushNet
-            conf_lut: [可选] LUT置信度图，用于ChromaRefiner
+            conf_lut: [可选] LUT置信度图
+            original_degraded: [可选] 原始褪色图（无 mask 涂黑），用于去噪
         """
         self.state = state.to(self.device)    # noisy_state
-        self.condition = LQ.to(self.device)  # LQ
-        #if GT is not None: 
-        self.state_0 = GT.to(self.device)  # GT
-        self.mask = mask.to(self.device) # mask
+        self.condition = LQ.to(self.device)   # LQ（可能带 mask 涂黑）
+        self.state_0 = GT.to(self.device)     # GT
+        self.mask = mask.to(self.device)      # mask
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
         
-        # BrushNet条件（新增）
+        # 原始褪色图（用于第一阶段去噪）
+        if original_degraded is not None:
+            self.original_degraded = original_degraded.to(self.device)
+        else:
+            # 如果没有提供，回退到 condition
+            self.original_degraded = self.condition
+        
+        # BrushNet条件
         if color_prior is not None:
             self.color_prior = color_prior.to(self.device)
         else:
@@ -232,7 +240,7 @@ class DenoisingModel(BaseModel):
         else:
             self.confidence = None
         
-        # ChromaRefiner 额外输入：LUT置信度
+        # LUT置信度
         if conf_lut is not None:
             self.conf_lut = conf_lut.to(self.device)
         else:
@@ -241,20 +249,20 @@ class DenoisingModel(BaseModel):
 
 
     def optimize_parameters(self, step, timesteps, sde=None):
-        # ============ 第一阶段：GT 图像去噪 ============
-        # 对完整的 GT 图像进行边缘保持去噪，消除颜色噪声
-        # 去噪后的图像将作为新的训练目标
-        # 注意：self.state_0 是 GT，不包含 mask 涂黑
+        # ============ 第一阶段：原始褪色图去噪 ============
+        # 对原始褪色图（original_degraded）进行边缘保持去噪
+        # 去噪是所有后续操作的基础
         with torch.no_grad():
-            denoised_gt = self._denoise_image(self.state_0)  # 对完整 GT 进行去噪
+            denoised_original = self._denoise_image(self.original_degraded)
         
-        # 使用去噪后的 GT 作为训练目标
-        training_target = denoised_gt
+        # 使用数据集提供的 GT（已经是 LUT 变换后的）作为训练目标
+        # GT 是根据 gt_mode 配置生成的：full=全图LUT, partial=仅mask区域LUT
+        training_target = self.state_0
         
         # 更新 SDE 的条件
         sde.set_mu(self.condition)
         
-        # 使用去噪后的 GT 计算最优逆步骤
+        # 使用 GT 计算最优逆步骤
         yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
         timesteps = timesteps.to(self.device)
         
@@ -281,7 +289,7 @@ class DenoisingModel(BaseModel):
         # ============ 优化器更新 ============
         self.optimizer.zero_grad()
         
-        # 主损失：模型输出 vs 去噪后的GT
+        # 主损失：模型输出 vs GT
         loss = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
         loss.backward()
@@ -294,12 +302,20 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss"] = loss.item()
         
         # ============ 保存调试信息 ============
-        # 注意：self.state_0 是完整的 GT 图像（LUT变换后），不包含 mask 涂黑
-        # 调试顺序：原始GT -> 去噪后GT -> Prior -> GT+Mask -> Mask -> Confidence
+        # 调试顺序：
+        # 1. Input: 原始褪色图（未变色，未去噪）
+        # 2. Denoised: 去噪后的原图
+        # 3. ColorChanged: 颜色变换后的图像（GT，根据gt_mode生成）
+        # 4. Prior: 颜色先验
+        # 5. Original+Mask: 原图 + mask 涂黑
+        # 6. Mask
         self._debug_refiner_info = {
-            'original_gt': self.state_0.detach(),          # 原始 GT（完整图，无mask涂黑）
-            'denoised_gt': denoised_gt.detach(),           # 去噪后的 GT（新的训练目标）
-            'masked_input': self.condition.detach(),       # 带mask涂黑的输入
+            'original_degraded': self.original_degraded.detach(),  # 原始褪色图
+            'denoised_original': denoised_original.detach(),       # 去噪后的原图
+            'color_changed': self.state_0.detach(),                # LUT变换后（GT）
+            'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
+            'original_with_mask': (self.original_degraded * self.mask).detach(),  # 原图+mask涂黑
+            'mask': self.mask.detach(),
         }
     
     def _denoise_image(self, image):

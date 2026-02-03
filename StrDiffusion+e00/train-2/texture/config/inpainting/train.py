@@ -376,7 +376,8 @@ def main():
             
             timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_degraded*mask_for_sde)
             model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
-                           color_prior=color_prior, confidence=confidence, conf_lut=conf_lut)
+                           color_prior=color_prior, confidence=confidence, conf_lut=conf_lut,
+                           original_degraded=Y_degraded)  # 传递原始褪色图（无mask涂黑）
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]
@@ -384,29 +385,39 @@ def main():
             
             # ============ 调试保存 ============
             if debug_logger is not None and debug_logger.should_save(current_step):
-                # 获取去噪调试信息
-                denoise_debug = getattr(model, '_debug_refiner_info', None)
+                # 获取调试信息
+                debug_info = getattr(model, '_debug_refiner_info', None)
                 
-                if denoise_debug is not None:
-                    original_gt = denoise_debug.get('original_gt', Y_GT)
-                    denoised_gt = denoise_debug.get('denoised_gt', None)
+                if debug_info is not None:
+                    # 新的调试格式：
+                    # Input -> Denoised -> ColorChanged -> Prior -> Original+Mask -> Mask
+                    original = debug_info.get('original_degraded', Y_degraded)
+                    denoised = debug_info.get('denoised_original', None)
+                    color_changed = debug_info.get('color_changed', Y_GT)
+                    prior = debug_info.get('color_prior', color_prior)
+                    orig_with_mask = debug_info.get('original_with_mask', Y_degraded * mask_for_sde)
+                    mask_img = debug_info.get('mask', mask_for_sde)
                     
                     # 计算去噪效果
-                    if denoised_gt is not None:
-                        diff = (denoised_gt - original_gt).abs().mean().item()
-                        logger.info(f"[Denoise Debug] step={current_step}, gt_denoise_diff={diff:.6f}")
+                    if denoised is not None:
+                        diff = (denoised - original).abs().mean().item()
+                        logger.info(f"[Denoise Debug] step={current_step}, denoise_diff={diff:.6f}")
                 else:
-                    original_gt = Y_GT
-                    denoised_gt = None
+                    original = Y_degraded
+                    denoised = None
+                    color_changed = Y_GT
+                    prior = color_prior
+                    orig_with_mask = Y_degraded * mask_for_sde
+                    mask_img = mask_for_sde
                 
-                debug_logger.save_training_state(
+                debug_logger.save_training_state_v2(
                     step=current_step,
-                    input_image=original_gt,  # 原始GT
-                    gt=original_gt,           # GT (用于生成 GT+Mask)
-                    color_prior=color_prior if color_prior is not None else Y_degraded,
-                    confidence=confidence if confidence is not None else torch.zeros_like(mask),
+                    original=original,
+                    denoised=denoised,
+                    color_changed=color_changed,
+                    color_prior=prior if prior is not None else Y_degraded,
+                    original_with_mask=orig_with_mask,
                     mask=mask if is_mural_mode else (1 - mask),
-                    refined_gt=denoised_gt    # 去噪后的GT（新训练目标）
                 )
             # ============ 调试保存完成 ============
 

@@ -179,10 +179,42 @@ class DebugLogger:
         # GT叠加mask（mask区域完全涂黑）
         gt_with_mask = gt * (1 - mask)  # mask=1的区域变黑
         
+        # ============ 计算去噪提升指标 ============
+        denoise_diff = 0.0
+        variance_reduction = 0.0
+        if refined_gt is not None and input_image is not None:
+            # 计算平均绝对差（MAD）
+            denoise_diff = (refined_gt - input_image).abs().mean().item()
+            
+            # 计算方差减少（衡量平滑程度）
+            # 使用 3x3 邻域的局部方差
+            try:
+                import torch.nn.functional as F
+                # 计算原图局部方差
+                kernel = torch.ones(1, 1, 3, 3, device=input_image.device) / 9
+                gray_orig = 0.299 * input_image[:, 0:1] + 0.587 * input_image[:, 1:2] + 0.114 * input_image[:, 2:3]
+                gray_denoised = 0.299 * refined_gt[:, 0:1] + 0.587 * refined_gt[:, 1:2] + 0.114 * refined_gt[:, 2:3]
+                
+                mean_orig = F.conv2d(gray_orig, kernel, padding=1)
+                mean_denoised = F.conv2d(gray_denoised, kernel, padding=1)
+                
+                var_orig = F.conv2d(gray_orig ** 2, kernel, padding=1) - mean_orig ** 2
+                var_denoised = F.conv2d(gray_denoised ** 2, kernel, padding=1) - mean_denoised ** 2
+                
+                # 方差减少百分比
+                var_orig_mean = var_orig.mean().item()
+                var_denoised_mean = var_denoised.mean().item()
+                if var_orig_mean > 1e-8:
+                    variance_reduction = (var_orig_mean - var_denoised_mean) / var_orig_mean * 100
+            except Exception as e:
+                print(f"[DebugLogger] 计算方差失败: {e}")
+        
         # 准备所有图像和标签
         # 顺序：输入 -> 去噪后 -> 颜色先验 -> GT+Mask -> Mask -> 置信度
         images = []
-        labels = ['Input', 'Denoised', 'Prior', 'GT+Mask', 'Mask', 'Confidence']
+        # 在 Denoised 标签中显示去噪提升指标
+        denoised_label = f'Denoised (diff:{denoise_diff:.4f}, var↓:{variance_reduction:.1f}%)'
+        labels = ['Input', denoised_label, 'Prior', 'GT+Mask', 'Mask', 'Confidence']
         
         if refined_gt is not None:
             tensors = [input_image, refined_gt, color_prior, gt_with_mask, mask, confidence]
@@ -230,7 +262,107 @@ class DebugLogger:
             filename = f"step_{step:08d}_debug.png"
             filepath = os.path.join(self.session_dir, filename)
             cv2.imwrite(filepath, concatenated)
-            print(f"[DebugLogger] Step {step}: 已保存拼接调试图像 -> {filepath}")
+            
+            # 打印去噪指标
+            print(f"[DebugLogger] Step {step}: diff={denoise_diff:.4f}, var_reduction={variance_reduction:.1f}% -> {filepath}")
+    
+    def save_training_state_v2(
+        self,
+        step: int,
+        original: torch.Tensor,
+        denoised: Optional[torch.Tensor],
+        color_changed: torch.Tensor,
+        color_prior: torch.Tensor,
+        original_with_mask: torch.Tensor,
+        mask: torch.Tensor,
+    ):
+        """
+        保存训练状态 V2 版本 - 新的 6 列格式
+        
+        调试输出顺序：
+        1. Input: 原始褪色图（无任何变色）
+        2. Denoised: 去噪后的原图
+        3. ColorChanged: 颜色变换后的图像（GT）
+        4. Prior: 颜色先验
+        5. Original+Mask: 原图 + mask 涂黑
+        6. Mask: 掩码
+        """
+        if not self.should_save(step):
+            return
+        
+        # ============ 计算去噪提升指标 ============
+        denoise_diff = 0.0
+        variance_reduction = 0.0
+        if denoised is not None and original is not None:
+            denoise_diff = (denoised - original).abs().mean().item()
+            
+            try:
+                import torch.nn.functional as F
+                kernel = torch.ones(1, 1, 3, 3, device=original.device) / 9
+                gray_orig = 0.299 * original[:, 0:1] + 0.587 * original[:, 1:2] + 0.114 * original[:, 2:3]
+                gray_denoised = 0.299 * denoised[:, 0:1] + 0.587 * denoised[:, 1:2] + 0.114 * denoised[:, 2:3]
+                
+                mean_orig = F.conv2d(gray_orig, kernel, padding=1)
+                mean_denoised = F.conv2d(gray_denoised, kernel, padding=1)
+                
+                var_orig = F.conv2d(gray_orig ** 2, kernel, padding=1) - mean_orig ** 2
+                var_denoised = F.conv2d(gray_denoised ** 2, kernel, padding=1) - mean_denoised ** 2
+                
+                var_orig_mean = var_orig.mean().item()
+                var_denoised_mean = var_denoised.mean().item()
+                if var_orig_mean > 1e-8:
+                    variance_reduction = (var_orig_mean - var_denoised_mean) / var_orig_mean * 100
+            except Exception as e:
+                print(f"[DebugLogger] 计算方差失败: {e}")
+        
+        # 准备所有图像和标签
+        images = []
+        denoised_label = f'Denoised (d:{denoise_diff:.3f}, v↓:{variance_reduction:.1f}%)'
+        labels = ['Input', denoised_label, 'ColorChanged', 'Prior', 'Orig+Mask', 'Mask']
+        
+        # 如果没有 denoised，显示原图
+        if denoised is None:
+            denoised = original
+        
+        tensors = [original, denoised, color_changed, color_prior, original_with_mask, mask]
+        
+        # 转换并添加标签
+        for tensor, label in zip(tensors, labels):
+            try:
+                is_mask = (label == 'Mask')
+                img = self._tensor_to_image(tensor, normalize=True, is_mask=is_mask)
+                img = self._add_label(img, label)
+                images.append(img)
+            except Exception as e:
+                print(f"[DebugLogger] 转换 {label} 失败: {e}")
+                h, w = 256, 256
+                if len(images) > 0:
+                    h, w = images[0].shape[:2]
+                error_img = np.zeros((h, w, 3), dtype=np.uint8)
+                cv2.putText(error_img, f"Error: {label}", (10, h//2), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                images.append(error_img)
+        
+        # 确保所有图像尺寸一致
+        if images:
+            target_h = max(img.shape[0] for img in images)
+            target_w = max(img.shape[1] for img in images)
+            
+            resized_images = []
+            for img in images:
+                if img.shape[:2] != (target_h, target_w):
+                    img = cv2.resize(img, (target_w, target_h))
+                resized_images.append(img)
+            
+            # 横向拼接
+            concatenated = np.hstack(resized_images)
+            
+            # 保存
+            filename = f"step_{step:08d}_debug.png"
+            filepath = os.path.join(self.session_dir, filename)
+            cv2.imwrite(filepath, concatenated)
+            
+            print(f"[DebugLogger] Step {step}: diff={denoise_diff:.4f}, var↓={variance_reduction:.1f}% -> {filepath}")
     
     def save_tensors(
         self,
