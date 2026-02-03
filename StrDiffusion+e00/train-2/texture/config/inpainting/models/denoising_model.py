@@ -20,6 +20,9 @@ from models.modules.loss import MatchingLoss
 
 from .base_model import BaseModel
 
+# LUT处理器（用于对去噪图像应用颜色变换）
+from lut_processor import LUTProcessor
+
 logger = logging.getLogger("base")
 
 
@@ -113,6 +116,21 @@ class DenoisingModel(BaseModel):
             self.dis   = DataParallel(self.dis,   device_ids=gpu_ids, output_device=gpu_ids[0])
 
         self.load()
+        
+        # ============ 加载 LUT 处理器 ============
+        # 用于对去噪后的图像应用颜色变换
+        lut_path = opt.get('datasets', {}).get('train', {}).get('lut_path', None)
+        if lut_path is not None and os.path.exists(lut_path):
+            self.lut_processor = LUTProcessor(lut_path)
+            logger.info(f"[Model] 已加载 LUT 处理器: {lut_path}")
+        else:
+            self.lut_processor = None
+            if lut_path:
+                logger.warning(f"[Model] LUT 文件不存在: {lut_path}")
+        
+        # 获取 gt_mode 配置
+        self.gt_mode = opt.get('datasets', {}).get('train', {}).get('gt_mode', 'full')
+        logger.info(f"[Model] GT 模式: {self.gt_mode}")
         
         # 注意：去噪使用固定的双边滤波器（_denoise_image），不需要额外网络
         
@@ -255,9 +273,30 @@ class DenoisingModel(BaseModel):
         with torch.no_grad():
             denoised_original = self._denoise_image(self.original_degraded)
         
-        # 使用数据集提供的 GT（已经是 LUT 变换后的）作为训练目标
-        # GT 是根据 gt_mode 配置生成的：full=全图LUT, partial=仅mask区域LUT
-        training_target = self.state_0
+        # ============ 第二阶段：对去噪后的图像应用LUT颜色变换 ============
+        # 根据配置的 gt_mode 决定变换方式：
+        # - full: 全图LUT变换
+        # - partial: 仅mask区域LUT变换，非mask区域保持去噪后的原色
+        with torch.no_grad():
+            if self.lut_processor is not None:
+                # 应用 LUT 变换
+                lut_transformed, _ = self.lut_processor.apply_to_tensor(denoised_original)
+                
+                if self.gt_mode == 'full':
+                    # 全图 LUT 变换
+                    color_changed = lut_transformed
+                else:  # partial 或其他模式
+                    # 仅 mask 区域 LUT 变换
+                    # mask: 1=已知区域, 0=缺失区域
+                    # 缺失区域（mask=0）使用 LUT 变换，已知区域保持去噪原色
+                    color_changed = denoised_original * self.mask + lut_transformed * (1 - self.mask)
+            else:
+                # 没有 LUT 处理器，直接使用去噪后的图像
+                color_changed = denoised_original
+                lut_transformed = denoised_original
+        
+        # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
+        training_target = color_changed
         
         # 更新 SDE 的条件
         sde.set_mu(self.condition)
@@ -305,14 +344,14 @@ class DenoisingModel(BaseModel):
         # 调试顺序：
         # 1. Input: 原始褪色图（未变色，未去噪）
         # 2. Denoised: 去噪后的原图
-        # 3. ColorChanged: 颜色变换后的图像（GT，根据gt_mode生成）
+        # 3. ColorChanged: LUT颜色变换后的图像（训练目标）
         # 4. Prior: 颜色先验
         # 5. Original+Mask: 原图 + mask 涂黑
         # 6. Mask
         self._debug_refiner_info = {
             'original_degraded': self.original_degraded.detach(),  # 原始褪色图
             'denoised_original': denoised_original.detach(),       # 去噪后的原图
-            'color_changed': self.state_0.detach(),                # LUT变换后（GT）
+            'color_changed': color_changed.detach(),               # LUT变换后（训练目标）
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
             'original_with_mask': (self.original_degraded * self.mask).detach(),  # 原图+mask涂黑
             'mask': self.mask.detach(),
