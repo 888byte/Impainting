@@ -119,7 +119,8 @@ class DenoisingModel(BaseModel):
         
         # ============ 加载 LUT 处理器 ============
         # 用于对去噪后的图像应用颜色变换
-        lut_path = opt.get('datasets', {}).get('train', {}).get('lut_path', None)
+        train_dataset_opt = opt.get('datasets', {}).get('train', {})
+        lut_path = train_dataset_opt.get('lut_path', None)
         if lut_path is not None and os.path.exists(lut_path):
             self.lut_processor = LUTProcessor(lut_path)
             logger.info(f"[Model] 已加载 LUT 处理器: {lut_path}")
@@ -128,9 +129,11 @@ class DenoisingModel(BaseModel):
             if lut_path:
                 logger.warning(f"[Model] LUT 文件不存在: {lut_path}")
         
-        # 获取 gt_mode 配置
-        self.gt_mode = opt.get('datasets', {}).get('train', {}).get('gt_mode', 'full')
-        logger.info(f"[Model] GT 模式: {self.gt_mode}")
+        # 获取 LUT 相关配置
+        self.gt_mode = train_dataset_opt.get('gt_mode', 'full')
+        self.lut_strength = train_dataset_opt.get('lut_strength', 1.0)  # LUT 强度
+        self.lut_smooth_radius = train_dataset_opt.get('lut_smooth_radius', 0)  # 平滑半径
+        logger.info(f"[Model] GT 模式: {self.gt_mode}, LUT 强度: {self.lut_strength}, 平滑半径: {self.lut_smooth_radius}")
         
         # 注意：去噪使用固定的双边滤波器（_denoise_image），不需要额外网络
         
@@ -282,6 +285,24 @@ class DenoisingModel(BaseModel):
                 # 应用 LUT 变换
                 lut_transformed, _ = self.lut_processor.apply_to_tensor(denoised_original)
                 
+                # ============ 平滑处理（导向滤波）============
+                # 以去噪后的原图为引导，平滑 LUT 结果，减少颜色割裂
+                if self.lut_smooth_radius > 0:
+                    lut_transformed = self._guided_smooth(
+                        lut_transformed, 
+                        guide=denoised_original, 
+                        radius=self.lut_smooth_radius
+                    )
+                
+                # ============ LUT 强度混合 ============
+                # lut_strength 控制 LUT 效果强度
+                # 0 = 保持原色，1 = 完全 LUT 变换
+                if self.lut_strength < 1.0:
+                    lut_transformed = (
+                        denoised_original * (1 - self.lut_strength) + 
+                        lut_transformed * self.lut_strength
+                    )
+                
                 if self.gt_mode == 'full':
                     # 全图 LUT 变换
                     color_changed = lut_transformed
@@ -411,6 +432,63 @@ class DenoisingModel(BaseModel):
         denoised = edge_weight * image + (1 - edge_weight) * smoothed
         
         return torch.clamp(denoised, 0.0, 1.0)
+
+    def _guided_smooth(self, image, guide, radius=5):
+        """
+        使用联合双边滤波平滑图像，以 guide 为引导保持边缘
+        
+        这可以减少 LUT 变换后的颜色割裂，让相似颜色区域获得更一致的变换结果
+        
+        Args:
+            image: [B, 3, H, W] 需要平滑的图像（LUT 变换结果）
+            guide: [B, 3, H, W] 引导图像（去噪后的原图）
+            radius: 滤波半径
+        
+        Returns:
+            smoothed: [B, 3, H, W] 平滑后的图像
+        """
+        import cv2
+        
+        B, C, H, W = image.shape
+        results = []
+        
+        for b in range(B):
+            # 转换为 numpy [H, W, 3]
+            img_np = image[b].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
+            guide_np = guide[b].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
+            
+            # 转换为 uint8
+            img_uint8 = (np.clip(img_np, 0, 1) * 255).astype(np.uint8)
+            guide_uint8 = (np.clip(guide_np, 0, 1) * 255).astype(np.uint8)
+            
+            # 联合双边滤波
+            # sigma_color: 颜色空间滤波的 sigma，较大值意味着更多颜色混合
+            # sigma_space: 坐标空间滤波的 sigma
+            d = radius * 2 + 1
+            sigma_color = 50  # 颜色相似度阈值
+            sigma_space = radius  # 空间距离 sigma
+            
+            # 使用 guide 作为参考进行联合双边滤波
+            # OpenCV 没有直接的 joint bilateral filter，我们分通道处理
+            smoothed = np.zeros_like(img_uint8, dtype=np.float32)
+            for c in range(3):
+                # 使用 guide 的灰度作为边缘参考
+                guide_gray = cv2.cvtColor(guide_uint8, cv2.COLOR_RGB2GRAY)
+                
+                # 双边滤波
+                filtered = cv2.bilateralFilter(
+                    img_uint8[:, :, c], 
+                    d=d, 
+                    sigmaColor=sigma_color, 
+                    sigmaSpace=sigma_space
+                )
+                smoothed[:, :, c] = filtered.astype(np.float32) / 255.0
+            
+            # 转回 tensor
+            smoothed_tensor = torch.from_numpy(smoothed).permute(2, 0, 1).to(image.device)
+            results.append(smoothed_tensor)
+        
+        return torch.stack(results, dim=0)
 
     
     

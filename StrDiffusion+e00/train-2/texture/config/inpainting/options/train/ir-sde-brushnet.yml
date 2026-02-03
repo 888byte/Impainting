@@ -52,6 +52,8 @@ datasets:
     lut_alpha: 0.7            # LUT置信度权重
     lut_beta: 0.3             # 修复置信度权重
     lut_inpaint_method: telea # 修复方法: telea 或 ns
+    lut_strength: 0.7         # LUT强度（0-1），1=完全使用LUT颜色，0=保持原色
+    lut_smooth_radius: 5      # LUT结果平滑半径（导向滤波），0=不平滑
     
     # 颜色先验生成方法:
     # - fast: 快速版（训练用）- Lab空间+双边滤波+空间置信度
