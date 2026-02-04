@@ -470,8 +470,10 @@ def main():
                 # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
                 if ema_loss < best_loss:
                     best_loss = ema_loss
-                    # 构建日志信息（包含 D_mu loss 如果有）
-                    log_msg = f"[best] iter={current_step} ema={best_loss:.4e}"
+                    # 构建日志信息：epoch/iter/lr/loss 在前，D_mu loss 在后
+                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best] loss: {:.4e}".format(
+                        epoch, current_step, model.get_current_learning_rate(), logs.get('loss', 0)
+                    )
                     if 'l_ss' in logs:
                         log_msg += f" l_ss={logs['l_ss']:.4f}"
                     if 'l_mu_total' in logs:
