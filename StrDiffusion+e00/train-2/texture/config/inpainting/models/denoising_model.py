@@ -397,6 +397,12 @@ class DenoisingModel(BaseModel):
         # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
         training_target = color_changed
         
+        # ============ 重要：同步更新 color_prior ============
+        # 确保 color_prior 与 color_changed 使用相同的 LUT 变换逻辑
+        # 这样 BrushNet 看到的先验与训练目标在非mask区域颜色一致
+        # lut_transformed 已经是经过置信度加权混合的结果
+        self.color_prior = lut_transformed
+        
         # ============ Self-Supervised Mu-Denoiser 训练 ============
         # 在 SDE 训练前，对 mu 进行自监督去噪
         mu_denoiser_loss = None
