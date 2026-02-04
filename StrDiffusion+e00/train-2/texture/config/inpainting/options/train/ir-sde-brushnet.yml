@@ -27,10 +27,19 @@ brushnet:
   depth: 4             # 下采样深度（与主UNet对齐）
   lite: false          # 是否使用轻量版
 
-# 注意：输入图像去噪现在使用固定的双边滤波器，不需要 ChromaRefiner 配置
-
-
-
+#### Self-Supervised Mu-Denoiser配置 (D_mu)
+# 在SDE训练前清理条件均值mu，使用blind-spot自监督训练（不需要干净GT）
+mu_denoiser:
+  enabled: true         # 是否启用Mu-Denoiser
+  in_nc: 5              # 输入通道: 3(RGB) + 1(mask) + 1(confidence)
+  dim: 32               # 基础特征维度（越大越强但更慢）
+  num_blocks: 2         # MDTA+GDFN块数量（2-4块推荐）
+  num_heads: 4          # 注意力头数
+  predict_residual: true  # 预测残差而非直接预测，更稳定
+  blind_ratio: 0.1      # 盲点比例（5%-15%，推荐10%）
+  lambda_ss: 1.0        # 自监督损失权重
+  lambda_tv: 0.01       # TV正则化权重（防止输出不稳定）
+  lr: !!float 1e-4      # 学习率（独立于主网络）
 
 
 #### 数据集配置

@@ -23,6 +23,15 @@ from .base_model import BaseModel
 # LUT处理器（用于对去噪图像应用颜色变换）
 from lut_processor import LUTProcessor
 
+# ============ Self-Supervised Mu-Denoiser ============
+# 用于在 SDE 训练前清理条件均值 mu
+try:
+    from models.mu_denoiser import MuDenoiser, MuDenoiserTrainer
+    HAS_MU_DENOISER = True
+except ImportError:
+    HAS_MU_DENOISER = False
+    print("[Warning] MuDenoiser 未找到，将使用原始 mu")
+
 logger = logging.getLogger("base")
 
 
@@ -135,7 +144,37 @@ class DenoisingModel(BaseModel):
         self.lut_smooth_radius = train_dataset_opt.get('lut_smooth_radius', 0)  # 平滑半径
         logger.info(f"[Model] GT 模式: {self.gt_mode}, LUT 强度: {self.lut_strength}, 平滑半径: {self.lut_smooth_radius}")
         
-        # 注意：去噪使用固定的双边滤波器（_denoise_image），不需要额外网络
+        # ============ 初始化 Self-Supervised Mu-Denoiser ============
+        mu_denoiser_opt = opt.get('mu_denoiser', {})
+        self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
+        
+        if self.use_mu_denoiser:
+            self.mu_denoiser = MuDenoiser(
+                in_nc=mu_denoiser_opt.get('in_nc', 5),
+                dim=mu_denoiser_opt.get('dim', 32),
+                num_blocks=mu_denoiser_opt.get('num_blocks', 2),
+                num_heads=mu_denoiser_opt.get('num_heads', 4),
+                predict_residual=mu_denoiser_opt.get('predict_residual', True),
+            ).to(self.device)
+            
+            # 训练器封装自监督训练逻辑
+            self.mu_denoiser_trainer = MuDenoiserTrainer(
+                self.mu_denoiser,
+                blind_ratio=mu_denoiser_opt.get('blind_ratio', 0.1)
+            )
+            
+            # 超参数
+            self.lambda_ss = mu_denoiser_opt.get('lambda_ss', 1.0)
+            self.lambda_tv = mu_denoiser_opt.get('lambda_tv', 0.01)
+            
+            logger.info(f"[Model] Mu-Denoiser 已启用: dim={mu_denoiser_opt.get('dim', 32)}, "
+                        f"blocks={mu_denoiser_opt.get('num_blocks', 2)}, "
+                        f"blind_ratio={mu_denoiser_opt.get('blind_ratio', 0.1)}")
+        else:
+            self.mu_denoiser = None
+            self.mu_denoiser_trainer = None
+            if mu_denoiser_opt.get('enabled', False) and not HAS_MU_DENOISER:
+                logger.warning("[Model] Mu-Denoiser 配置已启用但模块未找到")
         
         if self.is_train:
             self.model.train()
@@ -187,7 +226,15 @@ class DenoisingModel(BaseModel):
 
             self.optimizers.append(self.optimizer)
             
-            # 注意：去噪使用固定的双边滤波器，不需要训练
+            # Mu-Denoiser 优化器（独立于主网络）
+            if self.use_mu_denoiser:
+                self.optimizer_mu = torch.optim.Adam(
+                    self.mu_denoiser.parameters(),
+                    lr=mu_denoiser_opt.get('lr', 1e-4),
+                    betas=(0.9, 0.999),
+                )
+                # 不加入 self.optimizers，因为我们单独管理它
+                logger.info(f"[Model] Mu-Denoiser 优化器已创建: lr={mu_denoiser_opt.get('lr', 1e-4)}")
 
             # schedulers
             if train_opt["lr_scheme"] == "MultiStepLR":
@@ -267,7 +314,32 @@ class DenoisingModel(BaseModel):
         else:
             self.conf_lut = None
 
-
+    def compute_mu_clean_no_grad(self, y_degraded, mask_known, confidence=None):
+        """
+        计算干净的 mu（无梯度版本），用于 train.py 的 generate_random_states
+        
+        CRITICAL: 确保 generate_random_states 和 optimize_parameters 用同一个 mu_clean
+        
+        Args:
+            y_degraded: [B, 3, H, W] 原始褪色图
+            mask_known: [B, 1, H, W] SDE mask (1=known, 0=hole)
+            confidence: [B, 1, H, W] 可选置信度
+        
+        Returns:
+            mu_clean: [B, 3, H, W] 去噪后的 mu (已乘 mask)
+        """
+        if not self.use_mu_denoiser or self.mu_denoiser is None:
+            # 回退到原始行为
+            return y_degraded * mask_known
+        
+        with torch.no_grad():
+            mu_clean = self.mu_denoiser_trainer.inference(
+                y_degraded, mask_known, confidence
+            )
+            # mu 只保留已知区域（和原始 mu 语义一致）
+            mu_clean = mu_clean * mask_known
+        
+        return mu_clean
 
     def optimize_parameters(self, step, timesteps, sde=None):
         # ============ 第一阶段：原始褪色图去噪 ============
@@ -325,8 +397,34 @@ class DenoisingModel(BaseModel):
         # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
         training_target = color_changed
         
-        # 更新 SDE 的条件
-        sde.set_mu(self.condition)
+        # ============ Self-Supervised Mu-Denoiser 训练 ============
+        # 在 SDE 训练前，对 mu 进行自监督去噪
+        mu_denoiser_loss = None
+        if self.use_mu_denoiser and self.training:
+            # 使用 original_degraded（未涂黑的原始图）进行去噪
+            # 注意：self.mask 已经是 SDE 语义 (1=known, 0=hole)
+            y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
+                y_degraded=self.original_degraded,
+                mask_known=self.mask,
+                confidence=self.confidence,
+                lambda_ss=self.lambda_ss,
+                lambda_tv=self.lambda_tv,
+            )
+            
+            # CRITICAL: detach 防止扩散梯度影响 D_mu
+            # mu_clean 只保留已知区域（和原始 mu = Y_degraded * mask 语义一致）
+            mu_clean = (y_hat.detach()) * self.mask
+            mu_denoiser_loss = loss_mu
+            
+            # 记录 D_mu 损失
+            for key, val in mu_losses.items():
+                self.log_dict[key] = val
+        else:
+            # 回退到原始行为
+            mu_clean = self.condition
+        
+        # 更新 SDE 的条件（用 mu_clean 替换原始的 self.condition）
+        sde.set_mu(mu_clean)
         
         # 使用 GT 计算最优逆步骤
         yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
@@ -354,15 +452,27 @@ class DenoisingModel(BaseModel):
         
         # ============ 优化器更新 ============
         self.optimizer.zero_grad()
+        if self.use_mu_denoiser:
+            self.optimizer_mu.zero_grad()
         
         # 主损失：模型输出 vs GT
         loss = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
         
-        loss.backward()
+        # 总损失 = 扩散损失 + Mu-Denoiser 损失（如果有）
+        total_loss = loss
+        if mu_denoiser_loss is not None:
+            total_loss = total_loss + mu_denoiser_loss
         
-        # 梯度裁剪
+        total_loss.backward()
+        
+        # 梯度裁剪（主网络）
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
+        
+        # Mu-Denoiser 优化器更新
+        if self.use_mu_denoiser:
+            torch.nn.utils.clip_grad_norm_(self.mu_denoiser.parameters(), max_norm=1.0)
+            self.optimizer_mu.step()
 
         # set log
         self.log_dict["loss"] = loss.item()
@@ -377,7 +487,8 @@ class DenoisingModel(BaseModel):
         # 6. Mask
         self._debug_refiner_info = {
             'original_degraded': self.original_degraded.detach(),  # 原始褪色图
-            'denoised_original': denoised_original.detach(),       # 去噪后的原图
+            'denoised_original': denoised_original.detach(),       # 双边滤波去噪后的原图
+            'mu_clean': mu_clean.detach() if mu_clean is not self.condition else None,  # D_mu 去噪的 mu
             'color_changed': color_changed.detach(),               # LUT变换后（训练目标）
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
             'original_with_mask': (self.original_degraded * self.mask).detach(),  # 原图+mask涂黑
