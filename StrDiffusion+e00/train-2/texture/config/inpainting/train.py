@@ -470,7 +470,13 @@ def main():
                 # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
                 if ema_loss < best_loss:
                     best_loss = ema_loss
-                    logger.info(f"[best] iter={current_step} best_ema_loss={best_loss:.6e}. Saving best model/state.")
+                    # 构建日志信息（包含 D_mu loss 如果有）
+                    log_msg = f"[best] iter={current_step} ema={best_loss:.4e}"
+                    if 'l_ss' in logs:
+                        log_msg += f" l_ss={logs['l_ss']:.4f}"
+                    if 'l_mu_total' in logs:
+                        log_msg += f" l_mu={logs['l_mu_total']:.4f}"
+                    logger.info(log_msg)
                     # 使用 "best" 标签，确保只保留一个best文件
                     # 生成: best_G.pth, best_D.pth, best.state
                     model.save("best")
