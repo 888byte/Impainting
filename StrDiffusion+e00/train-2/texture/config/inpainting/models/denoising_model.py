@@ -653,8 +653,76 @@ class DenoisingModel(BaseModel):
         if load_path_G is not None:
             print('load-------------------------------')
             logger.info("Loading model for G [{:s}] ...".format(load_path_G))
-            self.load_network(load_path_G, self.model, self.opt["path"]["strict_load"])
+            
+            # 加载完整 checkpoint（可能包含 mu_denoiser）
+            checkpoint = torch.load(load_path_G, map_location=self.device)
+            
+            # 分离主模型和 D_mu 的权重
+            model_state = {}
+            mu_denoiser_state = {}
+            
+            for k, v in checkpoint.items():
+                if k.startswith('mu_denoiser.'):
+                    # D_mu 权重（去掉前缀）
+                    mu_denoiser_state[k[len('mu_denoiser.'):]] = v
+                elif k.startswith('module.mu_denoiser.'):
+                    mu_denoiser_state[k[len('module.mu_denoiser.'):]] = v
+                elif k.startswith('module.'):
+                    model_state[k[7:]] = v
+                else:
+                    model_state[k] = v
+            
+            # 加载主模型
+            self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
+            
+            # 加载 D_mu（如果有）
+            if self.use_mu_denoiser and self.mu_denoiser is not None and len(mu_denoiser_state) > 0:
+                try:
+                    self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
+                    logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
+                except Exception as e:
+                    logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
+            elif self.use_mu_denoiser and len(mu_denoiser_state) == 0:
+                logger.info("[Model] Checkpoint 中未找到 Mu-Denoiser 权重，将从头训练")
+    
+    def load_network_from_state(self, state_dict, network, strict=True):
+        """从 state_dict 加载网络（辅助方法）"""
+        from torch.nn.parallel import DataParallel, DistributedDataParallel
+        if isinstance(network, (DataParallel, DistributedDataParallel)):
+            network = network.module
+        network.load_state_dict(state_dict, strict=strict)
 
     def save(self, iter_label):
-        self.save_network(self.model, "G", iter_label)
+        """
+        保存模型权重（包含主模型 + D_mu）
         
+        权重文件结构:
+        {
+            'conv1.weight': ...,       # 主模型参数
+            'conv1.bias': ...,
+            ...
+            'mu_denoiser.stem.weight': ...,  # D_mu 参数（带前缀）
+            'mu_denoiser.stem.bias': ...,
+            ...
+        }
+        """
+        import os
+        from torch.nn.parallel import DataParallel, DistributedDataParallel
+        
+        save_filename = "{}_{}.pth".format(iter_label, "G")
+        save_path = os.path.join(self.opt["path"]["models"], save_filename)
+        
+        # 获取主模型 state_dict
+        model = self.model
+        if isinstance(model, (DataParallel, DistributedDataParallel)):
+            model = model.module
+        combined_state = {k: v.cpu() for k, v in model.state_dict().items()}
+        
+        # 添加 D_mu state_dict（带前缀）
+        if self.use_mu_denoiser and self.mu_denoiser is not None:
+            for k, v in self.mu_denoiser.state_dict().items():
+                combined_state[f'mu_denoiser.{k}'] = v.cpu()
+            logger.info(f"[Model] 保存权重包含 Mu-Denoiser ({sum(1 for k in combined_state if k.startswith('mu_denoiser.'))} 个参数)")
+        
+        torch.save(combined_state, save_path)
+        logger.info(f"[Model] 模型已保存到 {save_path}")
