@@ -400,7 +400,7 @@ class DenoisingModel(BaseModel):
         # ============ Self-Supervised Mu-Denoiser 训练 ============
         # 在 SDE 训练前，对 mu 进行自监督去噪
         mu_denoiser_loss = None
-        if self.use_mu_denoiser and self.training:
+        if self.use_mu_denoiser and self.is_train:
             # 使用 original_degraded（未涂黑的原始图）进行去噪
             # 注意：self.mask 已经是 SDE 语义 (1=known, 0=hole)
             y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
