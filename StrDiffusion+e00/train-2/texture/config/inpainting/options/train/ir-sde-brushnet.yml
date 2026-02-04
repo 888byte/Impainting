@@ -54,7 +54,7 @@ datasets:
     # - full: 全图LUT映射（模型学习恢复整张图的颜色）
     # - partial: 仅Mask区域LUT映射（保留背景，修复局部）
     # - mixed: 训练时随机选择 full 或 partial（各50%概率）
-    gt_mode: partial
+    gt_mode: full
     
     # LUT配置（放在这里便于数据集直接读取）
     lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
