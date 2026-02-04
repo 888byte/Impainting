@@ -682,13 +682,15 @@ class DenoisingModel(BaseModel):
             self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
             
             # 加载 D_mu（如果有）
-            if self.use_mu_denoiser and self.mu_denoiser is not None and len(mu_denoiser_state) > 0:
+            use_mu_denoiser = getattr(self, 'use_mu_denoiser', False)
+            mu_denoiser = getattr(self, 'mu_denoiser', None)
+            if use_mu_denoiser and mu_denoiser is not None and len(mu_denoiser_state) > 0:
                 try:
-                    self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
+                    mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
                     logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
                 except Exception as e:
                     logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
-            elif self.use_mu_denoiser and len(mu_denoiser_state) == 0:
+            elif use_mu_denoiser and len(mu_denoiser_state) == 0:
                 logger.info("[Model] Checkpoint 中未找到 Mu-Denoiser 权重，将从头训练")
     
     def load_network_from_state(self, state_dict, network, strict=True):
