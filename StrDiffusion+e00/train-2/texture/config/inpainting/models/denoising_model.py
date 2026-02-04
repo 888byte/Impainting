@@ -733,11 +733,11 @@ class DenoisingModel(BaseModel):
             model = model.module
         combined_state = {k: v.cpu() for k, v in model.state_dict().items()}
         
-        # 添加 D_mu state_dict（带前缀）
+        # 添加 D_mu state_dict（带前缀，静默添加不打印）
         if self.use_mu_denoiser and self.mu_denoiser is not None:
             for k, v in self.mu_denoiser.state_dict().items():
                 combined_state[f'mu_denoiser.{k}'] = v.cpu()
-            logger.info(f"[Model] 保存权重包含 Mu-Denoiser ({sum(1 for k in combined_state if k.startswith('mu_denoiser.'))} 个参数)")
+            #logger.info(f"[Model] 保存权重包含 Mu-Denoiser ({sum(1 for k in combined_state if k.startswith('mu_denoiser.'))} 个参数)")
         
         torch.save(combined_state, save_path)
-        logger.info(f"[Model] 模型已保存到 {save_path}")
+        #logger.info(f"[Model] 模型已保存到 {save_path}")
