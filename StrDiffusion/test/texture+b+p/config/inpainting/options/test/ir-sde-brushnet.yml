@@ -1,0 +1,79 @@
+#### 壁画修复 BrushNet + Mu-Denoiser 测试配置
+# 本配置用于集成 BrushNet + Mu-Denoiser 的推理测试
+name: ir-sde-brushnet
+suffix: ~
+model: denoising
+distortion: inpainting
+gpu_ids: [0]
+
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+
+degradation:
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test1/output_masks
+
+#### BrushNet配置
+brushnet:
+  enabled: true        # 是否启用BrushNet
+  in_nc: 8             # 输入通道数 (3+1+3+1)
+  nf: 64               # 基础特征通道数
+  depth: 4             # 下采样深度
+  lite: false          # 是否使用轻量版
+
+#### Self-Supervised Mu-Denoiser配置 (D_mu)
+mu_denoiser:
+  enabled: true         # 是否启用Mu-Denoiser
+  in_nc: 5              # 输入通道: 3(RGB) + 1(mask) + 1(confidence)
+  dim: 32               # 基础特征维度
+  num_blocks: 2         # MDTA+GDFN块数量
+  num_heads: 4          # 注意力头数
+  predict_residual: true  # 预测残差
+
+#### LUT配置（用于颜色先验生成）
+lut:
+  path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
+  alpha: 0.7           # LUT置信度权重
+  beta: 0.3            # 修复置信度权重
+  inpaint_method: telea
+  prior_method: quality  # 推理时使用高质量版
+  
+  # 推理模式选项:
+  # - full: 全图LUT映射（恢复整张图的颜色，即全局褪色修复）
+  # - partial: 仅Mask区域LUT映射（保留背景，修复局部褪色区域）
+  gt_mode: partial
+  lut_strength: 0.7     # LUT强度（0-1），使用LUT置信度加权
+  lut_smooth_radius: 5  # 平滑半径（双边滤波），减少颜色割裂
+
+#### 数据集配置
+datasets:
+  test1:
+    name: Val_Dataset
+    mode: GT
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test1/cropped_images
+
+#### 网络结构
+network_G:
+  which_model_G: ConditionalUNetWithBrushNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+    
+network_Gs:
+  which_model_G: ConditionalUNets
+  setting:
+    in_nc: 1
+    out_nc: 1
+    nf: 64
+    depth: 4
+
+
+path:
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-2/texture/config/inpainting/log/ir-sde-brushnet/models/best_G.pth
+  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
+  strict_load: false
