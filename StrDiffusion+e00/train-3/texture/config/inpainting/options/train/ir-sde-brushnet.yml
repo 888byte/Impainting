@@ -41,7 +41,8 @@ texture_core:
 #### Baseline compatibility fix only; not counted as innovation
 restore_S_guidance: true
 
-#### Self-Supervised Mu-Denoiser (D_mu)
+#### Self-Supervised Mu-Denoiser閰嶇疆 (D_mu)
+# 鍦⊿DE璁粌鍓嶆竻鐞嗘潯浠跺潎鍊糾u锛屼娇鐢╞lind-spot鑷洃鐫ｈ缁冿紙涓嶉渶瑕佸共鍑€GT锛?
 mu_denoiser:
   enabled: true
   in_nc: 5

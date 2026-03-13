@@ -96,7 +96,7 @@ path:
   pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/experiments/inpainting/ir-sde/models/best_G.pth
   strict_load: false
   # 恢复训练状态（可选）
-  resume_state: ~
+  resume_state: /home/610-wws/Impainting/StrDiffusion+e00/train-2/texture/config/inpainting/log/ir-sde-brushnet/training_state/best.state
 
 #### 训练设置
 train:
