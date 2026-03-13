@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from bridge.confidence_gate import posterior_confidence
 from bridge.condition_builder import (
     build_cond_from_pred_embeds,
     build_true_condition,
@@ -17,6 +18,7 @@ from bridge.condition_builder import (
     teacher_posterior,
 )
 from bridge.distill import embedding_distillation_loss, posterior_kl_loss
+from bridge.physics_heads import DamageHead, DamageHeadConfig, SpecColorHead, SpecColorHeadConfig
 from bridge.posterior_head import PosteriorHead, PosteriorHeadConfig
 from bridge.prototype_bank import PrototypeBank, build_prototype_bank
 from data.dataset import PigmentNPZDataset
@@ -26,6 +28,12 @@ from models.denoiser import DenoiserConfig, MambaDenoiser
 from models.physics import PhysicsCfg, FadingForwardModelLab, warmup_weight
 from models.spectral_encoder import ConditionerConfig, MultimodalConditioner
 from training.diffusion import DiffusionConfig, DiffusionSchedule, diffusion_loss, p_sample_loop
+from training.physics_losses import (
+    compute_aug_consistency_loss,
+    compute_damage_losses,
+    compute_parent_consistency_loss,
+    compute_spec_color_loss,
+)
 from training.samplers import build_parent_sampler
 from utils.color_utils import delta_e2000
 from utils.config_utils import load_config
@@ -114,6 +122,20 @@ def _get_embed(embeds: Dict[str, torch.Tensor], keys: Tuple[str, ...]) -> Option
         if value is not None:
             return value
     return None
+
+
+def _build_damage_features(
+    zc: Optional[torch.Tensor],
+    pseudo_cond: Optional[torch.Tensor],
+    cond_dim: int,
+) -> Optional[torch.Tensor]:
+    if zc is None:
+        return None
+    if cond_dim <= 0:
+        return zc
+    if pseudo_cond is None:
+        pseudo_cond = torch.zeros(zc.shape[0], cond_dim, device=zc.device, dtype=zc.dtype)
+    return torch.cat([zc, pseudo_cond], dim=-1)
 
 
 @torch.no_grad()
@@ -253,6 +275,8 @@ def _save_ckpt(
     cond_predictor: Optional[nn.Module],
     fading_model: Optional[nn.Module] = None,
     posterior_head: Optional[nn.Module] = None,
+    spec_color_head: Optional[nn.Module] = None,
+    damage_head: Optional[nn.Module] = None,
 ) -> None:
     ckpt = {
         'cfg': cfg,
@@ -270,6 +294,10 @@ def _save_ckpt(
         ckpt['fading_model'] = fading_model.state_dict()
     if posterior_head is not None:
         ckpt['posterior_head'] = posterior_head.state_dict()
+    if spec_color_head is not None:
+        ckpt['spec_color_head'] = spec_color_head.state_dict()
+    if damage_head is not None:
+        ckpt['damage_head'] = damage_head.state_dict()
     torch.save(ckpt, path)
 
 
@@ -403,8 +431,14 @@ def main() -> None:
         conditioner.load_state_dict(sd.get('conditioner', sd), strict=False)
 
     phys_raw = cfg.get('physics', {}) or {}
+    physics_enabled = bool(phys_raw.get('enable', False))
+    use_cycle_model_raw = phys_raw.get('use_cycle_model', 'auto')
+    if isinstance(use_cycle_model_raw, str):
+        use_cycle_model = physics_enabled and str(use_cycle_model_raw).lower() != 'false'
+    else:
+        use_cycle_model = physics_enabled and bool(use_cycle_model_raw)
     phys_cfg = PhysicsCfg(
-        enable=bool(phys_raw.get('enable', False)),
+        enable=bool(use_cycle_model),
         lambda_cycle=float(phys_raw.get('lambda_cycle', 0.2)),
         warmup_steps=int(phys_raw.get('warmup_steps', 2000)),
         t_max=int(phys_raw.get('t_max', 30)),
@@ -435,6 +469,33 @@ def main() -> None:
                 )
             ).to(device)
 
+    use_spec_color_consistency = physics_enabled and bool(phys_raw.get('use_spec_color_consistency', False)) and conditioner.cond_dim > 0
+    use_parent_consistency = physics_enabled and bool(phys_raw.get('use_parent_consistency', False))
+    use_aug_consistency = physics_enabled and bool(phys_raw.get('use_aug_consistency', False))
+    use_damage_constraint = physics_enabled and bool(phys_raw.get('use_damage_constraint', False)) and color_encoder is not None
+
+    spec_color_head: Optional[SpecColorHead] = None
+    if use_spec_color_consistency:
+        spec_color_head = SpecColorHead(
+            SpecColorHeadConfig(
+                in_dim=int(conditioner.cond_dim),
+                hidden_dim=int(phys_raw.get('cond_hidden', 128)),
+                n_layers=2,
+                dropout=0.0,
+            )
+        ).to(device)
+
+    damage_head: Optional[DamageHead] = None
+    if use_damage_constraint and color_encoder is not None:
+        damage_head = DamageHead(
+            DamageHeadConfig(
+                in_dim=int(color_encoder.cfg.d_model) + int(conditioner.cond_dim),
+                hidden_dim=int(phys_raw.get('cond_hidden', 128)),
+                n_layers=2,
+                dropout=0.0,
+            )
+        ).to(device)
+
     params = list(denoiser.parameters()) + list(conditioner.parameters())
     if color_encoder is not None:
         params += list(color_encoder.parameters())
@@ -444,6 +505,10 @@ def main() -> None:
         params += list(fading_model.parameters())
     if posterior_head is not None:
         params += list(posterior_head.parameters())
+    if spec_color_head is not None:
+        params += list(spec_color_head.parameters())
+    if damage_head is not None:
+        params += list(damage_head.parameters())
 
     opt = torch.optim.AdamW(
         params,
@@ -488,6 +553,10 @@ def main() -> None:
             posterior_head.train()
         if fading_model is not None:
             fading_model.train()
+        if spec_color_head is not None:
+            spec_color_head.train()
+        if damage_head is not None:
+            damage_head.train()
 
         for batch in dl_train:
             x0 = batch['x0'].to(device)
@@ -543,21 +612,17 @@ def main() -> None:
                 drop_eff = 0.0
 
             cond_post = None
+            posterior_logits_scaled = None
+            posterior_entropy = None
+            posterior_conf = None
             loss_bridge = torch.tensor(0.0, device=device)
             loss_distill = torch.tensor(0.0, device=device)
-            if posterior_head is not None and prototype_bank is not None and zc is not None and cond_true is not None:
+            if posterior_head is not None and prototype_bank is not None and zc is not None:
                 posterior_temp = float(bridge_cfg.get('posterior_temp', 0.07))
                 teacher_temp = float(bridge_cfg.get('teacher_temp', posterior_temp))
                 logits = posterior_head(zc)
-                logits_scaled = logits / posterior_temp
-                teacher_probs = teacher_posterior(
-                    cond_true.detach(),
-                    prototype_bank,
-                    device=device,
-                    temp=teacher_temp,
-                    normalize=bool(bridge_cfg.get('prototype_bank', {}).get('normalize', True)),
-                )
-                weights = torch.softmax(logits_scaled, dim=-1)
+                posterior_logits_scaled = logits / posterior_temp
+                weights = torch.softmax(posterior_logits_scaled, dim=-1)
                 top_k = int(bridge_cfg.get('prototype_top_k', 0))
                 if top_k > 0 and top_k < weights.shape[-1]:
                     topv, topi = torch.topk(weights, k=top_k, dim=-1)
@@ -565,9 +630,19 @@ def main() -> None:
                     sparse.scatter_(1, topi, topv)
                     weights = sparse / sparse.sum(dim=-1, keepdim=True).clamp_min(1e-8)
                 cond_post = prototype_bank.aggregate(weights, device=device)
-                loss_bridge = posterior_kl_loss(logits_scaled, teacher_probs)
-                if bool(bridge_cfg.get('use_distill', False)):
-                    loss_distill = embedding_distillation_loss(cond_post, cond_true.detach())
+                posterior_entropy = -torch.sum(weights * torch.log(weights.clamp_min(1e-8)), dim=-1)
+                posterior_conf = posterior_confidence(posterior_entropy, prototype_bank.num_prototypes)
+                if cond_true is not None:
+                    teacher_probs = teacher_posterior(
+                        cond_true.detach(),
+                        prototype_bank,
+                        device=device,
+                        temp=teacher_temp,
+                        normalize=bool(bridge_cfg.get('prototype_bank', {}).get('normalize', True)),
+                    )
+                    loss_bridge = posterior_kl_loss(posterior_logits_scaled, teacher_probs)
+                    if bool(bridge_cfg.get('use_distill', False)):
+                        loss_distill = embedding_distillation_loss(cond_post, cond_true.detach())
 
             pseudo_cond = cond_pred
             if cond_post is not None and bridge_mode in {'posterior', 'posterior_retrieval'}:
@@ -582,21 +657,32 @@ def main() -> None:
 
             x0_use = _apply_color_aug_selected(x0, selected=use_pred if pseudo_cond is not None else None, cfg=color_aug_cfg)
 
-            loss_phys = torch.tensor(0.0, device=device)
-            if fading_model is not None and phys_cfg.enable:
-                diff_loss, x0_pred, t = diffusion_loss(
-                    denoiser,
-                    schedule,
-                    x0=x0_use,
-                    obs_mask=mask,
-                    cond=cond_in,
-                    return_x0_pred=True,
-                    return_t=True,
-                )
-                loss_phys = fading_model.cycle_loss(x0_pred=x0_pred, x0_true=x0_use, mask=mask, cond=cond_in, t=t)
-                loss = diff_loss + float(phys_cfg.lambda_cycle) * warmup_weight(global_step, phys_cfg.warmup_steps) * loss_phys
+            need_x0_pred = fading_model is not None or (
+                spec_color_head is not None and float(phys_raw.get('lambda_spec_pred_consistency', 0.0)) > 0.0
+            )
+            diff_out = diffusion_loss(
+                denoiser,
+                schedule,
+                x0=x0_use,
+                obs_mask=mask,
+                cond=cond_in,
+                return_x0_pred=bool(need_x0_pred),
+                return_t=bool(fading_model is not None),
+            )
+            x0_pred = None
+            t = None
+            if need_x0_pred and fading_model is not None:
+                diff_loss, x0_pred, t = diff_out
+            elif need_x0_pred:
+                diff_loss, x0_pred = diff_out
             else:
-                loss = diffusion_loss(denoiser, schedule, x0=x0_use, obs_mask=mask, cond=cond_in)
+                diff_loss = diff_out
+
+            loss = diff_loss
+            loss_phys = torch.tensor(0.0, device=device)
+            if fading_model is not None and x0_pred is not None and t is not None:
+                loss_phys = fading_model.cycle_loss(x0_pred=x0_pred, x0_true=x0_use, mask=mask, cond=cond_in, t=t)
+                loss = loss + float(phys_cfg.lambda_cycle) * warmup_weight(global_step, phys_cfg.warmup_steps) * loss_phys
 
             loss_pred = torch.tensor(0.0, device=device)
             if mm_cfg.enable and embeds_pred is not None and cond_true is not None:
@@ -620,6 +706,58 @@ def main() -> None:
                 if bool(bridge_cfg.get('use_distill', False)):
                     loss = loss + float(bridge_cfg.get('distill_weight', 0.1)) * loss_distill
 
+            physics_conf = posterior_conf if bool(phys_raw.get('low_confidence_skip_physics', True)) else None
+            loss_spec = torch.tensor(0.0, device=device)
+            loss_parent = torch.tensor(0.0, device=device)
+            loss_aug = torch.tensor(0.0, device=device)
+            loss_damage_mono = torch.tensor(0.0, device=device)
+            loss_damage_smooth = torch.tensor(0.0, device=device)
+            resolved_parent_level = None
+
+            if spec_color_head is not None:
+                loss_spec, _ = compute_spec_color_loss(
+                    spec_color_head=spec_color_head,
+                    pseudo_cond=pseudo_cond,
+                    x0_true=x0,
+                    confidence=physics_conf,
+                    x0_pred=x0_pred,
+                    lambda_pred_consistency=float(phys_raw.get('lambda_spec_pred_consistency', 0.0)),
+                )
+                loss = loss + float(phys_raw.get('lambda_spec_color', 0.1)) * loss_spec
+
+            if use_parent_consistency and (posterior_logits_scaled is not None or pseudo_cond is not None):
+                loss_parent, resolved_parent_level = compute_parent_consistency_loss(
+                    batch=batch,
+                    level=str(phys_raw.get('parent_consistency_level', 'auto')),
+                    posterior_logits=posterior_logits_scaled,
+                    pseudo_cond=pseudo_cond,
+                    confidence=physics_conf,
+                    side_consistency_scale=float(phys_raw.get('side_consistency_scale', 0.25)),
+                )
+                loss = loss + float(phys_raw.get('lambda_parent_consistency', 0.05)) * loss_parent
+
+            if use_aug_consistency and (posterior_logits_scaled is not None or pseudo_cond is not None):
+                loss_aug = compute_aug_consistency_loss(
+                    batch=batch,
+                    posterior_logits=posterior_logits_scaled,
+                    pseudo_cond=pseudo_cond,
+                    confidence=physics_conf,
+                )
+                loss = loss + float(phys_raw.get('lambda_aug_consistency', 0.05)) * loss_aug
+
+            if damage_head is not None:
+                damage_features = _build_damage_features(zc, pseudo_cond, conditioner.cond_dim)
+                if damage_features is not None:
+                    damage_score = damage_head(damage_features)
+                    loss_damage_mono, loss_damage_smooth = compute_damage_losses(
+                        batch=batch,
+                        damage_score=damage_score,
+                        confidence=physics_conf,
+                        requires_order=bool(phys_raw.get('damage_requires_order', True)),
+                    )
+                    loss = loss + float(phys_raw.get('lambda_damage_mono', 0.01)) * loss_damage_mono
+                    loss = loss + float(phys_raw.get('lambda_damage_smooth', 0.01)) * loss_damage_smooth
+
             opt.zero_grad(set_to_none=True)
             loss.backward()
             if grad_clip > 0:
@@ -633,10 +771,22 @@ def main() -> None:
                     msg += f" pred_mse={loss_pred.item():.6f}"
                 if posterior_head is not None and prototype_bank is not None:
                     msg += f" posterior_kl={loss_bridge.item():.6f}"
+                    if posterior_conf is not None:
+                        msg += f" post_conf={posterior_conf.mean().item():.3f}"
                     if bool(bridge_cfg.get('use_distill', False)):
                         msg += f" distill={loss_distill.item():.6f}"
                 if fading_model is not None and phys_cfg.enable:
                     msg += f" phys={loss_phys.item():.6f}"
+                if spec_color_head is not None:
+                    msg += f" spec={loss_spec.item():.6f}"
+                if use_parent_consistency:
+                    msg += f" parent={loss_parent.item():.6f}"
+                    if resolved_parent_level is not None:
+                        msg += f"[{resolved_parent_level}]"
+                if use_aug_consistency:
+                    msg += f" aug={loss_aug.item():.6f}"
+                if damage_head is not None:
+                    msg += f" dmg_mono={loss_damage_mono.item():.6f} dmg_smooth={loss_damage_smooth.item():.6f}"
                 msg += f" use_pred={use_pred.float().mean().item():.2f}"
                 print(msg)
 
@@ -660,16 +810,16 @@ def main() -> None:
 
             if val_loss_true < best_true - early_stopping_min_delta:
                 best_true = float(val_loss_true)
-                _save_ckpt(os.path.join(save_dir, 'best_true_model.pt'), cfg, ep, global_step, best_true, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head)
+                _save_ckpt(os.path.join(save_dir, 'best_true_model.pt'), cfg, ep, global_step, best_true, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head, spec_color_head, damage_head)
             if val_loss_pred is not None and val_loss_pred < best_pred - early_stopping_min_delta:
                 best_pred = float(val_loss_pred)
-                _save_ckpt(os.path.join(save_dir, 'best_pred_model.pt'), cfg, ep, global_step, best_pred, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head)
+                _save_ckpt(os.path.join(save_dir, 'best_pred_model.pt'), cfg, ep, global_step, best_pred, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head, spec_color_head, damage_head)
 
             monitor_val = _monitor_value(monitor_metric, val_loss_true, val_loss_pred, mixed_alpha)
             if monitor_val < best_monitor - early_stopping_min_delta:
                 best_monitor = float(monitor_val)
                 no_improve_count = 0
-                _save_ckpt(os.path.join(save_dir, 'best_model.pt'), cfg, ep, global_step, best_monitor, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head)
+                _save_ckpt(os.path.join(save_dir, 'best_model.pt'), cfg, ep, global_step, best_monitor, denoiser, conditioner, color_encoder, cond_predictor, fading_model, posterior_head, spec_color_head, damage_head)
             else:
                 no_improve_count += 1
 
@@ -707,6 +857,8 @@ def main() -> None:
                 cond_predictor,
                 fading_model,
                 posterior_head,
+                spec_color_head,
+                damage_head,
             )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import warnings
 from typing import Dict, Optional
 
 import numpy as np
@@ -17,6 +18,7 @@ from bridge.condition_builder import (
     build_true_condition,
     gather_last_observed,
 )
+from bridge.physics_heads import DamageHead, DamageHeadConfig, SpecColorHead, SpecColorHeadConfig
 from bridge.posterior_head import PosteriorHead, PosteriorHeadConfig
 from bridge.prototype_bank import PrototypeBank
 from data.dataset import PigmentNPZDataset
@@ -56,6 +58,55 @@ def _rts_smoother_random_walk(y: np.ndarray, r: np.ndarray, q: np.ndarray) -> np
         x_s[t] = x_f[t] + c * (x_s[t + 1] - x_f[t])
         p_s[t] = p_f[t] + c * (p_s[t + 1] - (p_f[t] + q))
     return x_s
+
+
+def _build_damage_features(bundle: Dict[str, object], x_curr: torch.Tensor, cond: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    color_encoder = bundle.get('color_encoder', None)
+    conditioner = bundle['conditioner']
+    if color_encoder is None:
+        return None
+    zc = color_encoder(x_curr)
+    cond_dim = int(conditioner.cond_dim)
+    if cond_dim <= 0:
+        return zc
+    if cond is None:
+        cond = torch.zeros(zc.shape[0], cond_dim, device=zc.device, dtype=zc.dtype)
+    return torch.cat([zc, cond], dim=-1)
+
+
+def _physics_diagnostics(
+    bundle: Dict[str, object],
+    x_curr: torch.Tensor,
+    cond: Optional[torch.Tensor],
+    pred_lab0: np.ndarray,
+    info: Dict[str, object],
+) -> Dict[str, np.ndarray]:
+    diagnostics: Dict[str, np.ndarray] = {}
+    entropy = info.get('entropy', None)
+    if entropy is None and isinstance(info.get('posterior', None), dict):
+        entropy = info['posterior'].get('entropy', None)
+    if isinstance(entropy, torch.Tensor):
+        diagnostics['posterior_entropy'] = entropy.detach().cpu().numpy()
+
+    confidence = info.get('confidence', None)
+    if isinstance(confidence, torch.Tensor):
+        diagnostics['bridge_confidence'] = confidence.detach().cpu().numpy()
+
+    spec_color_head = bundle.get('spec_color_head', None)
+    if spec_color_head is not None and cond is not None:
+        lab_norm = LabNorm()
+        pred_norm = torch.from_numpy(lab_norm.normalize(np.asarray(pred_lab0, dtype=np.float32)).astype(np.float32)).to(x_curr.device)
+        aux_color = spec_color_head(cond)
+        agreement = torch.exp(-torch.abs(aux_color - pred_norm).mean(dim=-1)).detach().cpu().numpy()
+        diagnostics['spec_color_agreement'] = agreement
+
+    damage_head = bundle.get('damage_head', None)
+    if damage_head is not None:
+        features = _build_damage_features(bundle, x_curr, cond)
+        if features is not None:
+            diagnostics['damage_score'] = damage_head(features).detach().cpu().numpy()
+
+    return diagnostics
 
 
 def load_checkpoint(ckpt_path: str, device: torch.device, prototype_bank_path: str = "") -> Dict[str, object]:
@@ -144,6 +195,43 @@ def load_checkpoint(ckpt_path: str, device: torch.device, prototype_bank_path: s
             posterior_head.load_state_dict(ckpt['posterior_head'], strict=False)
         posterior_head.eval()
 
+    physics_cfg = cfg.get('physics', {})
+    physics_enabled = bool(physics_cfg.get('enable', False))
+
+    spec_color_head = None
+    if physics_enabled and bool(physics_cfg.get('use_spec_color_consistency', False)):
+        if 'spec_color_head' in ckpt and conditioner.cond_dim > 0:
+            spec_color_head = SpecColorHead(
+                SpecColorHeadConfig(
+                    in_dim=int(conditioner.cond_dim),
+                    hidden_dim=int(physics_cfg.get('cond_hidden', 128)),
+                    n_layers=2,
+                    dropout=0.0,
+                )
+            ).to(device)
+            spec_color_head.load_state_dict(ckpt['spec_color_head'], strict=False)
+            spec_color_head.eval()
+        else:
+            warnings.warn('physics.use_spec_color_consistency is enabled but checkpoint has no spec_color_head; disabling diagnostics.')
+
+    damage_head = None
+    if physics_enabled and bool(physics_cfg.get('use_damage_constraint', False)):
+        if color_encoder is None:
+            warnings.warn('physics.use_damage_constraint is enabled but checkpoint has no color_encoder; disabling diagnostics.')
+        elif 'damage_head' in ckpt:
+            damage_head = DamageHead(
+                DamageHeadConfig(
+                    in_dim=int(color_encoder.cfg.d_model) + int(conditioner.cond_dim),
+                    hidden_dim=int(physics_cfg.get('cond_hidden', 128)),
+                    n_layers=2,
+                    dropout=0.0,
+                )
+            ).to(device)
+            damage_head.load_state_dict(ckpt['damage_head'], strict=False)
+            damage_head.eval()
+        else:
+            warnings.warn('physics.use_damage_constraint is enabled but checkpoint has no damage_head; disabling diagnostics.')
+
     return {
         'cfg': cfg,
         'denoiser': denoiser,
@@ -153,6 +241,8 @@ def load_checkpoint(ckpt_path: str, device: torch.device, prototype_bank_path: s
         'cond_predictor': cond_predictor,
         'posterior_head': posterior_head,
         'prototype_bank': prototype_bank,
+        'spec_color_head': spec_color_head,
+        'damage_head': damage_head,
     }
 
 
@@ -215,6 +305,7 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
     lab_norm = LabNorm()
     de_list = []
     conf_list = []
+    diag_lists: Dict[str, list] = {}
 
     for bi, batch in enumerate(dl):
         if bi >= int(max_batches):
@@ -249,6 +340,10 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
             conf_list.extend([sample_info['conf_diffusion']] * pred0.shape[0])
         for p, g in zip(pred0, gt0):
             de_list.append(float(delta_e2000(p, g)))
+        diagnostics = _physics_diagnostics(bundle, x_curr, cond, pred0, info)
+        for key, value in diagnostics.items():
+            arr = np.asarray(value, dtype=np.float32).reshape(-1)
+            diag_lists.setdefault(key, []).extend(arr.tolist())
         if 'confidence' in info:
             conf_value = info['confidence']
             if isinstance(conf_value, torch.Tensor):
@@ -260,6 +355,10 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
     if conf_list:
         out['confidence_mean'] = float(np.mean(conf_list))
         out['confidence_std'] = float(np.std(conf_list))
+    for key, values in diag_lists.items():
+        if values:
+            out[f'{key}_mean'] = float(np.mean(values))
+            out[f'{key}_std'] = float(np.std(values))
     return out
 
 
@@ -288,6 +387,10 @@ def _single_rgb(bundle: Dict[str, object], rgb: np.ndarray, device: torch.device
     confidence = info.get('confidence', None)
     if isinstance(confidence, torch.Tensor):
         confidence = float(confidence.view(-1)[0].item())
+    diagnostics = _physics_diagnostics(bundle, x_curr_t, cond, pred_lab0[None, :], info)
+    posterior_entropy = diagnostics.get('posterior_entropy', None)
+    spec_color_agreement = diagnostics.get('spec_color_agreement', None)
+    damage_score = diagnostics.get('damage_score', None)
     return {
         'input_rgb_current': rgb.tolist(),
         'pred_lab_original': pred_lab0.tolist(),
@@ -296,6 +399,9 @@ def _single_rgb(bundle: Dict[str, object], rgb: np.ndarray, device: torch.device
         'confidence_diffusion': sample_info.get('conf_diffusion', None),
         'diffusion_std_norm_meanL2': sample_info.get('diffusion_std_norm_meanL2', None),
         'confidence_bridge': confidence,
+        'posterior_entropy': float(np.asarray(posterior_entropy).reshape(-1)[0]) if posterior_entropy is not None else None,
+        'spec_color_agreement': float(np.asarray(spec_color_agreement).reshape(-1)[0]) if spec_color_agreement is not None else None,
+        'damage_score': float(np.asarray(damage_score).reshape(-1)[0]) if damage_score is not None else None,
     }
 
 
