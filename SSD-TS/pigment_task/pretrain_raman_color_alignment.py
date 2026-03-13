@@ -38,10 +38,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from pigment_task.color_utils import LabNorm
-from pigment_task.io_utils import load_rruff_raman_sheet
-from pigment_task.models.color_encoder import ColorEncoder, ColorEncoderConfig
-from pigment_task.models.spectral_encoder import MambaSpectralEncoder
+from utils.color_utils import LabNorm
+from utils.io_utils import load_rruff_raman_sheet
+from models.color_encoder import ColorEncoder, ColorEncoderConfig
+from models.spectral_encoder import MambaSpectralEncoder
 
 
 class RamanColorPairs(Dataset):

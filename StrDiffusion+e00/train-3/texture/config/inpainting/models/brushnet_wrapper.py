@@ -2,9 +2,10 @@
 """BrushNet wrapper for the active StrDiffusion texture generator.
 
 This wrapper keeps BrushNet responsible for multi-scale conditioning and adds
-an optional bottleneck-only MGLC-Tex block. The MGLC block does not create a
-second conditioning path; it only refines bottleneck features after BrushNet
-mid-feature fusion.
+an optional MGLC-Tex feature enhancement path. The texture core refines
+features after BrushNet fusion and can be inserted at bottleneck and decoder
+stages. Optional ``restore_S_guidance`` restores the legacy SPADE guidance as a
+baseline-compatibility feature.
 """
 
 import functools
@@ -15,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .modules.DenoisingUNet_arch import SPADEBlock
 from .modules.mglc_block import MGLCBlock
 from .modules.module_util import (
     LinearAttention,
@@ -43,18 +45,27 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_enabled: bool = True,
         brushnet_lite: bool = False,
         texture_core_opt: Optional[dict] = None,
+        restore_S_guidance: bool = False,
     ) -> None:
         super().__init__()
 
         self.depth = depth
         self.nf = nf
         self.brushnet_enabled = brushnet_enabled
+        self.restore_S_guidance = restore_S_guidance
 
         texture_core_opt = texture_core_opt or {}
-        self.texture_core_enabled = bool(
-            texture_core_opt.get("enabled", False)
-            and texture_core_opt.get("insert_mid", True)
-        )
+        insert_mid = texture_core_opt.get("insert_mid", True)
+        insert_dec = texture_core_opt.get("insert_dec", False)
+        texture_core_enabled = bool(texture_core_opt.get("enabled", False))
+        if texture_core_enabled and not (insert_mid or insert_dec):
+            raise ValueError(
+                "texture_core.enabled is true, but no insertion position is enabled"
+            )
+
+        self.texture_core_enabled = texture_core_enabled
+        self.texture_core_insert_mid = bool(texture_core_enabled and insert_mid)
+        self.texture_core_insert_dec = bool(texture_core_enabled and insert_dec)
 
         block_class = functools.partial(
             ResBlock, conv=default_conv, act=NonLinearity()
@@ -72,6 +83,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.init_conv = default_conv(in_nc * 2, nf, 7)
 
         self.downs = nn.ModuleList([])
+        self.guides = nn.ModuleList([])
         for i in range(depth):
             dim_in = nf * int(math.pow(2, i))
             dim_out = nf * int(math.pow(2, i + 1))
@@ -95,6 +107,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
                     ]
                 )
             )
+            if self.restore_S_guidance:
+                self.guides.append(SPADEBlock(dim_out, dim_out, 1))
 
         self.ups = nn.ModuleList([])
         for i in range(depth):
@@ -131,16 +145,22 @@ class ConditionalUNetWithBrushNet(nn.Module):
             dim_in=mid_dim, dim_out=mid_dim, time_emb_dim=time_dim
         )
 
+        block_kwargs = {
+            "backend": texture_core_opt.get("backend", "conv_surrogate"),
+            "branch_mode": texture_core_opt.get("branch_mode", "both"),
+            "use_mask_gate": texture_core_opt.get("use_mask_gate", True),
+            "gate_hidden": texture_core_opt.get("gate_hidden", 16),
+            "boundary_width": texture_core_opt.get("boundary_width", 3),
+            "zero_init_last": texture_core_opt.get("zero_init_last", True),
+        }
+
         self.mglc_mid = None
-        if self.texture_core_enabled:
-            self.mglc_mid = MGLCBlock(
-                channels=mid_dim,
-                backend=texture_core_opt.get("backend", "conv_surrogate"),
-                use_mask_gate=texture_core_opt.get("use_mask_gate", True),
-                gate_hidden=texture_core_opt.get("gate_hidden", 16),
-                boundary_width=texture_core_opt.get("boundary_width", 3),
-                zero_init_last=texture_core_opt.get("zero_init_last", True),
-            )
+        if self.texture_core_insert_mid:
+            self.mglc_mid = MGLCBlock(channels=mid_dim, **block_kwargs)
+
+        self.mglc_dec = None
+        if self.texture_core_insert_dec:
+            self.mglc_dec = MGLCBlock(channels=nf, **block_kwargs)
 
         self.final_res_block = block_class(
             dim_in=nf * 2, dim_out=nf, time_emb_dim=time_dim
@@ -186,7 +206,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
             xt: [B, 3, H, W] noisy state.
             cond: [B, 3, H, W] diffusion condition.
             time: scalar or [B] timestep tensor.
-            S: reserved structure-guide slot kept for call compatibility.
+            S: optional structure guide used only when ``restore_S_guidance`` is on.
             mask: [B, 1, H, W] repair-region mask in BrushNet semantics.
             color_prior: [B, 3, H, W] color prior.
             confidence: [B, 1, H, W] confidence map.
@@ -194,8 +214,6 @@ class ConditionalUNetWithBrushNet(nn.Module):
         Returns:
             Tuple[Tensor, Tensor], both [B, 3, H, W].
         """
-        del S
-
         if isinstance(time, (int, float)):
             time = torch.tensor([time], device=xt.device)
 
@@ -228,7 +246,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
 
         skips = []
         brushnet_idx = 0
-        for blocks in self.downs:
+        for idx, blocks in enumerate(self.downs):
             b1, b2, attn, downsample = blocks
 
             x = b1(x, t)
@@ -246,6 +264,11 @@ class ConditionalUNetWithBrushNet(nn.Module):
 
             x = downsample(x)
 
+            # Baseline compatibility fix only; not counted as the texture-core
+            # innovation. This restores the legacy S guidance when requested.
+            if self.restore_S_guidance and S is not None:
+                x = self.guides[idx](x, S)
+
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
@@ -254,8 +277,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
             x = x + brushnet_mid
 
         # MGLC-Tex does not duplicate BrushNet conditioning. It only refines
-        # bottleneck features after BrushNet fusion.
-        if self.texture_core_enabled and self.mglc_mid is not None:
+        # features after BrushNet fusion.
+        if self.mglc_mid is not None:
             x = self.mglc_mid(x, mask)
 
         for blocks in self.ups:
@@ -269,6 +292,9 @@ class ConditionalUNetWithBrushNet(nn.Module):
             x = attn(x)
             x = upsample(x)
 
+        if self.mglc_dec is not None:
+            x = self.mglc_dec(x, mask)
+
         x = torch.cat([x, x_res], dim=1)
         x = self.final_res_block(x, t)
         x = self.final_conv(x)
@@ -281,6 +307,7 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
     network_opt = opt.get("network_G", {}).get("setting", {})
     brushnet_opt = opt.get("brushnet", {})
     texture_core_opt = opt.get("texture_core", {})
+    restore_S_guidance = opt.get("restore_S_guidance", False)
 
     return ConditionalUNetWithBrushNet(
         in_nc=network_opt.get("in_nc", 3),
@@ -291,6 +318,7 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         brushnet_enabled=brushnet_opt.get("enabled", True),
         brushnet_lite=brushnet_opt.get("lite", False),
         texture_core_opt=texture_core_opt,
+        restore_S_guidance=restore_S_guidance,
     )
 
 
@@ -303,7 +331,15 @@ if __name__ == "__main__":
         depth=4,
         brushnet_in_nc=8,
         brushnet_enabled=True,
-        texture_core_opt={"enabled": True, "backend": "conv_surrogate"},
+        texture_core_opt={
+            "enabled": True,
+            "insert_mid": True,
+            "insert_dec": True,
+            "backend": "sem_lite",
+            "branch_mode": "both",
+            "use_mask_gate": True,
+        },
+        restore_S_guidance=True,
     ).to(device)
 
     batch_size = 2
@@ -314,10 +350,17 @@ if __name__ == "__main__":
     mask = torch.randint(0, 2, (batch_size, 1, height, width), device=device).float()
     color_prior = torch.randn(batch_size, 3, height, width, device=device)
     confidence = torch.rand(batch_size, 1, height, width, device=device)
+    structure = torch.rand(batch_size, 1, height, width, device=device)
 
     with torch.no_grad():
         output, _ = model(
-            xt, cond, time, mask=mask, color_prior=color_prior, confidence=confidence
+            xt,
+            cond,
+            time,
+            S=structure,
+            mask=mask,
+            color_prior=color_prior,
+            confidence=confidence,
         )
 
     print(f"Input: xt={xt.shape}, cond={cond.shape}")

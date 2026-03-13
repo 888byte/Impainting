@@ -23,11 +23,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
 import argparse
 import os
 import random
@@ -39,9 +34,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from pigment_task.color_utils import LabNorm, delta_e2000
-from pigment_task.io_utils import load_rruff_raman_sheet
-from pigment_task.models.spectral_encoder import ConditionerConfig, MultimodalConditioner
+from utils.color_utils import LabNorm, delta_e2000
+from utils.io_utils import load_rruff_raman_sheet
+from models.spectral_encoder import ConditionerConfig, MultimodalConditioner
 
 
 class RamanColorDataset(Dataset):

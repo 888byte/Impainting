@@ -22,28 +22,26 @@ python t2.py \
 """
 import argparse
 import os
-import sys
 import numpy as np
 import cv2
 import torch
 from tqdm import tqdm
 
-# Ensure pigment_task can be imported
-sys.path.append(os.getcwd())
-
 try:
-    from pigment_task.infer_pigment import (
-        _load_ckpt,
-        _predict_embeds_from_rgb,
-        _build_cond_from_pred_embeds,
-        _retrieval_raman_embed,
-        _load_library_npz,
-        _sample_with_confidence
+    from bridge.condition_builder import (
+        build_cond_from_pred_embeds as _build_cond_from_pred_embeds,
+        load_library_npz as _load_library_npz,
+        predict_embeds_from_rgb as _predict_embeds_from_rgb,
+        retrieval_raman_embed as _retrieval_raman_embed,
     )
-    from pigment_task.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
+    from inference.pipeline import load_checkpoint as _load_ckpt
+    from inference.uncertainty import sample_with_confidence as _sample_with_confidence
+    from legacy.experiment_compat import unpack_model_components as _unpack_model_components
+    from utils.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
 except ImportError as e:
-    print(f"Error importing modules: {e}")
-    sys.exit(1)
+    print(f"[Error] Core modules not found: {e}")
+    raise SystemExit(1)
+
 
 def perform_clustering(image, k=8):
     """
@@ -69,7 +67,7 @@ def batch_inference(rgb_centers, model_components, args, device, lib_raman, lab_
     rgb_centers: (K, 3) numpy array
     """
     print(f"[2/4] Preparing batch inference for {len(rgb_centers)} colors...")
-    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = model_components
+    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = _unpack_model_components(model_components)
     
     K = len(rgb_centers)
     

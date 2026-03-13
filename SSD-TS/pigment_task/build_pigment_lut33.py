@@ -4,7 +4,7 @@
 python  pigment_task/build_pigment_lut33.py 
 
 Generate a 3D LUT (current RGB -> predicted original RGB/Lab + confidence) by
-calling `python -m pigment_task.infer_pigment` on a regular RGB grid.
+calling `python infer.py` on a regular RGB grid.
 
 ==============================
 IMPORTANT NOTES / PITFALLS
@@ -181,8 +181,7 @@ def run_infer(rgb, retries=RETRIES):
     rgb_str = f"{rgb[0]:.5g},{rgb[1]:.5g},{rgb[2]:.5g}"
     cmd = [
         PYTHON,
-        "-m",
-        "pigment_task.infer_pigment",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "infer.py"),
         "--ckpt",
         CKPT,
         "--rgb",

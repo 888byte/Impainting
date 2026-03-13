@@ -33,18 +33,15 @@ Example:
 """
 import argparse
 import os
-import sys
 import numpy as np
 import cv2
 
-sys.path.append(os.getcwd())
-
 try:
     # Must match the Lab definition used to generate lut_lab.
-    from pigment_task.color_utils import rgb_to_lab, lab_to_rgb
+    from utils.color_utils import rgb_to_lab, lab_to_rgb
 except ImportError as e:
-    print(f"[Error] pigment_task.color_utils not found: {e}")
-    sys.exit(1)
+    print(f"[Error] utils.color_utils not found: {e}")
+    raise SystemExit(1)
 
 
 # ---------------------------
