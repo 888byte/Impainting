@@ -31,7 +31,7 @@ brushnet:
 # 在SDE训练前清理条件均值mu，使用blind-spot自监督训练（不需要干净GT）
 #### Texture core MVP configuration
 texture_core:
-  enabled: false
+  enabled: true
   name: MGLCBlock
   insert_mid: true
   backend: conv_surrogate
@@ -40,8 +40,8 @@ texture_core:
   boundary_width: 3
   zero_init_last: true
 
-#### Self-Supervised Mu-Denoiser閰嶇疆 (D_mu)
-# 鍦⊿DE璁粌鍓嶆竻鐞嗘潯浠跺潎鍊糾u锛屼娇鐢╞lind-spot鑷洃鐫ｈ缁冿紙涓嶉渶瑕佸共鍑€GT锛?
+#### Self-Supervised Mu-Denoiser配置 (D_mu)
+# 在SDE训练前清理条件均值mu，使用blind-spot自监督训练（不需要干净GT）
 mu_denoiser:
   enabled: true         # 是否启用Mu-Denoiser
   in_nc: 5              # 输入通道: 3(RGB) + 1(mask) + 1(confidence)
