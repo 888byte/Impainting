@@ -1,0 +1,97 @@
+﻿{
+  "data": {
+    "train_npz": "data/pigment_npz/train.npz",
+    "val_npz": "data/pigment_npz/val.npz",
+    "test_npz": "data/pigment_npz/test.npz",
+    "train_index": "data/pigment_npz/train_index.csv",
+    "val_index": "data/pigment_npz/val_index.csv",
+    "test_index": "data/pigment_npz/test_index.csv"
+  },
+  "modality": {
+    "use_raman": true,
+    "use_xrd": true,
+    "raman_len": 1024,
+    "xrd_len": 2048,
+    "spec_d_model": 128,
+    "spec_n_layers": 4,
+    "spec_dropout": 0.0,
+    "raman_peak_dim": 0,
+    "xrd_peak_dim": 0,
+    "use_fuse": true
+  },
+  "model": {
+    "in_channels": 3,
+    "hidden_dim": 128,
+    "n_layers": 4,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 200,
+    "beta_0": 0.0001,
+    "beta_T": 0.02
+  },
+  "missing_modality": {
+    "enable": true,
+    "drop_prob": 0.3,
+    "lambda_pred": 0.1,
+    "color_d_model": 128,
+    "color_hidden_dim": 256,
+    "color_n_layers": 2,
+    "pred_hidden_dim": 256,
+    "pred_n_layers": 2,
+    "freeze_conditioner": false,
+    "freeze_color_encoder": false
+  },
+  "pretrained": {
+    "alignment_ckpt": "data/standard_alignment/alignment_ckpt.pt"
+  },
+  "bridge": {
+    "enable": true,
+    "mode": "posterior",
+    "use_gate": false,
+    "use_distill": true,
+    "use_group_sampler": true,
+    "prototype_bank": {
+      "path": "data/pigment_npz/prototype_bank.npz",
+      "normalize": true
+    },
+    "posterior_temp": 0.07,
+    "distill_weight": 0.1
+  },
+  "train": {
+    "device": "cuda",
+    "seed": 42,
+    "batch_size": 256,
+    "eval_batch_size": 256,
+    "epochs": 250,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "log_every": 50,
+    "eval_every": 1,
+    "eval_num_batches": 2,
+    "save_every": 10,
+    "save_dir": "ckpt/lab_raman_xrd"
+  },
+  "color_aug": {
+    "enable": true,
+    "p": 0.9,
+    "L_scale": 0.15,
+    "L_shift": 12.0,
+    "ab_scale": 0.25,
+    "ab_rotate_deg": 25.0,
+    "noise_std": 1.2
+  },
+  "physics": {
+    "enable": true,
+    "lambda_cycle": 0.8,
+    "warmup_steps": 100,
+    "t_max": 80,
+    "exclude_t0": true,
+    "cond_dependent": true,
+    "cond_hidden": 128,
+    "per_channel_k": true,
+    "learn_c_inf": true,
+    "init_k": 1.0
+  }
+}

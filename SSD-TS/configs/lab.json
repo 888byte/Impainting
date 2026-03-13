@@ -1,0 +1,51 @@
+﻿{
+  "data": {
+    "train_npz": "data/pigment_npz/train.npz",
+    "val_npz": "data/pigment_npz/val.npz",
+    "test_npz": "data/pigment_npz/test.npz",
+    "train_index": "data/pigment_npz/train_index.csv",
+    "val_index": "data/pigment_npz/val_index.csv",
+    "test_index": "data/pigment_npz/test_index.csv"
+  },
+  "modality": {
+    "use_raman": false,
+    "use_xrd": false
+  },
+  "model": {
+    "in_channels": 3,
+    "hidden_dim": 128,
+    "n_layers": 4,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 200,
+    "beta_0": 0.0001,
+    "beta_T": 0.02
+  },
+  "bridge": {
+    "enable": false,
+    "mode": "pred",
+    "use_gate": false,
+    "use_distill": false,
+    "use_group_sampler": false,
+    "prototype_bank": {
+      "path": "data/pigment_npz/prototype_bank.npz",
+      "normalize": true
+    }
+  },
+  "train": {
+    "device": "cuda",
+    "seed": 42,
+    "batch_size": 64,
+    "eval_batch_size": 128,
+    "epochs": 200,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "log_every": 50,
+    "eval_every": 1,
+    "eval_num_batches": 2,
+    "save_every": 10,
+    "save_dir": "ckpt/lab"
+  }
+}

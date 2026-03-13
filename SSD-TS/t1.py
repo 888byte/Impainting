@@ -21,7 +21,6 @@ python t1.py --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
 """
 import argparse
 import os
-import sys
 import math
 import random
 import numpy as np
@@ -30,23 +29,20 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import colorsys
 
-# 确保能导入 pigment_task
-sys.path.append(os.getcwd())
-
 try:
-    from pigment_task.infer_pigment import (
-        _load_ckpt,
-        _predict_embeds_from_rgb,
-        _build_cond_from_pred_embeds,
-        _retrieval_raman_embed,
-        _load_library_npz,
+    from bridge.condition_builder import (
+        build_cond_from_pred_embeds as _build_cond_from_pred_embeds,
+        load_library_npz as _load_library_npz,
+        predict_embeds_from_rgb as _predict_embeds_from_rgb,
+        retrieval_raman_embed as _retrieval_raman_embed,
     )
-    from pigment_task.diffusion import p_sample_loop
-    from pigment_task.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
+    from inference.pipeline import load_checkpoint as _load_ckpt
+    from legacy.experiment_compat import unpack_model_components as _unpack_model_components
+    from training.diffusion import p_sample_loop
+    from utils.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
 except ImportError as e:
-    print("【错误】无法导入 pigment_task 模块。请确保脚本在项目根目录下运行。")
-    print(f"详细错误: {e}")
-    sys.exit(1)
+    print(f"[Error] Core modules not found: {e}")
+    raise SystemExit(1)
 
 # ==============================================================================
 # 1) 你原来的“命名颜色”（保留）
@@ -216,7 +212,7 @@ def build_test_palette(args):
 # ==============================================================================
 @torch.no_grad()
 def batch_inference_with_per_sample_confidence(rgb_list, model_components, args, device, lib_raman, lab_norm):
-    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = model_components
+    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = _unpack_model_components(model_components)
     B = len(rgb_list)
 
     rgb_arr = np.array(rgb_list, dtype=np.float32)

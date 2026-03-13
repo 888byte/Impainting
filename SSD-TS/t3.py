@@ -17,27 +17,26 @@ METHOD: "Keep the Texture, Force-Swap the Color"
 """
 import argparse
 import os
-import sys
 import numpy as np
 import cv2
 import torch
 from scipy.spatial.distance import cdist
 
-sys.path.append(os.getcwd())
-
 try:
-    from pigment_task.infer_pigment import (
-        _load_ckpt,
-        _predict_embeds_from_rgb,
-        _build_cond_from_pred_embeds,
-        _retrieval_raman_embed,
-        _load_library_npz,
-        _sample_with_confidence
+    from bridge.condition_builder import (
+        build_cond_from_pred_embeds as _build_cond_from_pred_embeds,
+        load_library_npz as _load_library_npz,
+        predict_embeds_from_rgb as _predict_embeds_from_rgb,
+        retrieval_raman_embed as _retrieval_raman_embed,
     )
-    from pigment_task.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
+    from inference.pipeline import load_checkpoint as _load_ckpt
+    from inference.uncertainty import sample_with_confidence as _sample_with_confidence
+    from legacy.experiment_compat import unpack_model_components as _unpack_model_components
+    from utils.color_utils import LabNorm, rgb_to_lab, lab_to_rgb
 except ImportError as e:
     print(f"[Error] Core modules not found: {e}")
-    sys.exit(1)
+    raise SystemExit(1)
+
 
 def get_spatial_confidence(mask):
     """Spatial confidence: 1.0 at boundary, dropping to 0.1 at center."""
@@ -51,7 +50,7 @@ def get_spatial_confidence(mask):
 
 def batch_inference_with_conf(rgb_centers, model_components, args, device, lib_raman, lab_norm):
     """Infer restored colors for the palette."""
-    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = model_components
+    cfg, denoiser, conditioner, schedule, color_encoder, cond_predictor = _unpack_model_components(model_components)
     K = len(rgb_centers)
     
     # Preprocess
