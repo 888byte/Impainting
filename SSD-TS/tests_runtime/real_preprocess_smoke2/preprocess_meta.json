@@ -1,0 +1,50 @@
+{
+  "experiments": [
+    {
+      "exp_id": 0,
+      "log_path": "D:\\学习\\研究\\壁画毕设\\数据集\\实验数据\\all\\all.txt",
+      "exp_tag": "66",
+      "side": "unknown",
+      "humidity_median": 64.45999908447266,
+      "T_blocks": 457
+    },
+    {
+      "exp_id": 1,
+      "log_path": "D:\\学习\\研究\\壁画毕设\\数据集\\实验数据\\all\\all_right.txt",
+      "exp_tag": "76",
+      "side": "right",
+      "humidity_median": 71.19999694824219,
+      "T_blocks": 601
+    }
+  ],
+  "patch_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "raman_len": 1024,
+  "xrd_len": 2048,
+  "loaded_raman_cnt": 18,
+  "loaded_xrd_cnt": 18,
+  "peak_features": false,
+  "peak_top_k": 32,
+  "pair_only": true,
+  "sidecar_index": true,
+  "split": {
+    "seed": 123,
+    "val_ratio": 0.2,
+    "test_ratio": 0.1,
+    "mode": "group_exp_patch",
+    "num_groups": 18
+  },
+  "n_total": 9504,
+  "n_train": 6336,
+  "n_val": 2112,
+  "n_test": 1056
+}

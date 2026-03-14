@@ -92,6 +92,21 @@ def _candidate_sheet_names(primary_map: Dict[str, str], fallback_map: Dict[str, 
     return candidates
 
 
+def _sample_map(mapping: Dict[str, str], max_items: int = 4) -> Dict[str, str]:
+    keys = list(mapping.keys())[: int(max_items)]
+    return {key: mapping[key] for key in keys}
+
+
+def _wide_keys_sample(excel_path: str, new_len: int, kind: str, max_items: int = 6) -> List[str]:
+    if not excel_path:
+        return []
+    try:
+        wide = parse_wide_sheet_workbook(excel_path, new_len=new_len, kind=kind, standardize=False)
+    except Exception as exc:
+        return [f'<parse_error: {exc}>']
+    return list(wide.keys())[: int(max_items)]
+
+
 def _save_npz(path: str, arrays: Dict[str, np.ndarray]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez_compressed(path, **arrays)
@@ -144,6 +159,8 @@ def main() -> None:
     exp_meta: List[Dict[str, object]] = []
     loaded_raman = 0
     loaded_xrd = 0
+    raman_debug_rows: List[Dict[str, object]] = []
+    xrd_debug_rows: List[Dict[str, object]] = []
 
     for exp_id, log_path in enumerate(rgb_logs):
         log = filter_rgb_log_by_humidity(parse_rgb_log_txt(log_path), tol=float(args.hum_tol))
@@ -157,11 +174,13 @@ def main() -> None:
 
         if args.raman_excel:
             resolved = {}
+            last_errors: Dict[str, str] = {}
             for pid in patch_ids:
                 candidates = _candidate_sheet_names(p2r, auto_p2r, pid)
                 resolved[str(pid)] = candidates[0] if candidates else ''
                 if not candidates:
                     has_raman_by_exp_patch[(exp_id, pid)] = 0
+                    last_errors[str(pid)] = 'no meta candidate and no wide-order fallback candidate'
                     continue
                 loaded = False
                 for raw in candidates:
@@ -176,20 +195,32 @@ def main() -> None:
                             raman_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
                         loaded = True
                         break
-                    except Exception:
+                    except Exception as exc:
+                        last_errors[str(pid)] = f'{raw}: {exc}'
                         continue
                 if not loaded:
                     has_raman_by_exp_patch[(exp_id, pid)] = 0
+            raman_debug_rows.append({
+                'exp_id': int(exp_id),
+                'exp_tag': exp_tag,
+                'meta_map': _sample_map({str(pid): p2r.get(str(pid), '') for pid in patch_ids}),
+                'auto_map': _sample_map(auto_p2r),
+                'resolved': _sample_map(resolved),
+                'wide_keys': _wide_keys_sample(args.raman_excel, raman_len, 'raman'),
+                'last_errors': _sample_map(last_errors),
+            })
             if args.print_sheet_map:
                 print(f'[INFO] Raman mapping exp={exp_tag}: {resolved}')
 
         if args.xrd_excel:
             resolved = {}
+            last_errors: Dict[str, str] = {}
             for pid in patch_ids:
                 candidates = _candidate_sheet_names(p2x, auto_p2x, pid)
                 resolved[str(pid)] = candidates[0] if candidates else ''
                 if not candidates:
                     has_xrd_by_exp_patch[(exp_id, pid)] = 0
+                    last_errors[str(pid)] = 'no meta candidate and no wide-order fallback candidate'
                     continue
                 loaded = False
                 for raw in candidates:
@@ -204,17 +235,35 @@ def main() -> None:
                             xrd_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
                         loaded = True
                         break
-                    except Exception:
+                    except Exception as exc:
+                        last_errors[str(pid)] = f'{raw}: {exc}'
                         continue
                 if not loaded:
                     has_xrd_by_exp_patch[(exp_id, pid)] = 0
+            xrd_debug_rows.append({
+                'exp_id': int(exp_id),
+                'exp_tag': exp_tag,
+                'meta_map': _sample_map({str(pid): p2x.get(str(pid), '') for pid in patch_ids}),
+                'auto_map': _sample_map(auto_p2x),
+                'resolved': _sample_map(resolved),
+                'wide_keys': _wide_keys_sample(args.xrd_excel, xrd_len, 'xrd'),
+                'last_errors': _sample_map(last_errors),
+            })
             if args.print_sheet_map:
                 print(f'[INFO] XRD mapping exp={exp_tag}: {resolved}')
 
     if args.raman_excel and not args.allow_empty_spectra and loaded_raman == 0:
-        raise ValueError('Raman excel provided but no spectra were loaded. Check meta_json, workbook layout, or wide-sheet header order.')
+        raise ValueError(
+            'Raman excel provided but no spectra were loaded. '
+            'Check meta_json, workbook layout, or wide-sheet header order. '
+            f'Debug: {json.dumps(raman_debug_rows, ensure_ascii=False)}'
+        )
     if args.xrd_excel and not args.allow_empty_spectra and loaded_xrd == 0:
-        raise ValueError('XRD excel provided but no spectra were loaded. Check meta_json, workbook layout, or wide-sheet header order.')
+        raise ValueError(
+            'XRD excel provided but no spectra were loaded. '
+            'Check meta_json, workbook layout, or wide-sheet header order. '
+            f'Debug: {json.dumps(xrd_debug_rows, ensure_ascii=False)}'
+        )
 
     x0_list: List[np.ndarray] = []
     mask_list: List[np.ndarray] = []
