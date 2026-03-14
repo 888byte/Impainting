@@ -16,7 +16,7 @@ def _resolve_path(base_dir: str, value: str) -> str:
 
 
 def load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
     return normalize_config(cfg, config_path=path)
 
