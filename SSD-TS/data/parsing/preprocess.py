@@ -23,6 +23,7 @@ from utils.io_utils import (
     load_spectrum_from_workbook,
     load_xy_from_workbook,
     parse_rgb_log_txt,
+    parse_wide_sheet_workbook,
     split_prefix_base,
 )
 
@@ -51,6 +52,44 @@ def _get_patch_sheet_maps(meta: Dict, exp_tag: str) -> Tuple[Dict[str, str], Dic
         p2r = {str(k): str(v) for k, v in meta.get('patch_to_raman_sheet', {}).items()}
         p2x = {str(k): str(v) for k, v in meta.get('patch_to_xrd_sheet', {}).items()}
     return {k: adapt_sheet_name(v, exp_tag) for k, v in p2r.items()}, {k: adapt_sheet_name(v, exp_tag) for k, v in p2x.items()}
+
+
+def _infer_patch_sheet_map_from_wide(
+    excel_path: str,
+    exp_tag: str,
+    patch_ids: Sequence[int],
+    new_len: int,
+    kind: str,
+) -> Dict[str, str]:
+    if not excel_path:
+        return {}
+    try:
+        wide = parse_wide_sheet_workbook(excel_path, new_len=new_len, kind=kind, standardize=False)
+    except Exception:
+        return {}
+    ordered_bases: List[str] = []
+    seen = set()
+    for spec in wide.values():
+        if str(spec.exp_tag) != str(exp_tag):
+            continue
+        base_name = canonical_base_name(spec.base_name)
+        if not base_name or base_name in seen:
+            continue
+        seen.add(base_name)
+        ordered_bases.append(base_name)
+    out: Dict[str, str] = {}
+    for pid, base_name in zip(patch_ids, ordered_bases):
+        out[str(pid)] = f'{exp_tag} {base_name}'
+    return out
+
+
+def _candidate_sheet_names(primary_map: Dict[str, str], fallback_map: Dict[str, str], patch_id: int) -> List[str]:
+    candidates: List[str] = []
+    for mapping in (primary_map, fallback_map):
+        raw = str(mapping.get(str(patch_id), '') or '').strip()
+        if raw and raw not in candidates:
+            candidates.append(raw)
+    return candidates
 
 
 def _save_npz(path: str, arrays: Dict[str, np.ndarray]) -> None:
@@ -113,57 +152,69 @@ def main() -> None:
         side = infer_side_label(log_path)
         exp_meta.append({'exp_id': exp_id, 'log_path': log_path, 'exp_tag': exp_tag, 'side': side, 'humidity_median': hum_med, 'T_blocks': int(log.rgb.shape[0])})
         p2r, p2x = _get_patch_sheet_maps(meta, exp_tag) if meta else ({}, {})
+        auto_p2r = _infer_patch_sheet_map_from_wide(args.raman_excel, exp_tag, patch_ids, raman_len, 'raman') if args.raman_excel else {}
+        auto_p2x = _infer_patch_sheet_map_from_wide(args.xrd_excel, exp_tag, patch_ids, xrd_len, 'xrd') if args.xrd_excel else {}
 
         if args.raman_excel:
-            if not meta:
-                raise ValueError('You passed --raman_excel but did not provide --meta_json.')
             resolved = {}
             for pid in patch_ids:
-                raw = p2r.get(str(pid), '')
-                resolved[str(pid)] = raw
-                if not raw:
+                candidates = _candidate_sheet_names(p2r, auto_p2r, pid)
+                resolved[str(pid)] = candidates[0] if candidates else ''
+                if not candidates:
                     has_raman_by_exp_patch[(exp_id, pid)] = 0
                     continue
-                try:
-                    spec = load_spectrum_from_workbook(args.raman_excel, raw, exp_tag, new_len=raman_len, kind='raman', standardize=True)
-                    raman_by_exp_patch[(exp_id, pid)] = spec.astype(np.float32)
-                    has_raman_by_exp_patch[(exp_id, pid)] = int(np.any(np.abs(spec) > 1e-8))
-                    loaded_raman += int(has_raman_by_exp_patch[(exp_id, pid)])
-                    if args.peak_features:
-                        x, y = load_xy_from_workbook(args.raman_excel, raw, exp_tag, new_len=raman_len, kind='raman')
-                        raman_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
-                except Exception:
+                loaded = False
+                for raw in candidates:
+                    try:
+                        spec = load_spectrum_from_workbook(args.raman_excel, raw, exp_tag, new_len=raman_len, kind='raman', standardize=True)
+                        raman_by_exp_patch[(exp_id, pid)] = spec.astype(np.float32)
+                        has_raman_by_exp_patch[(exp_id, pid)] = int(np.any(np.abs(spec) > 1e-8))
+                        loaded_raman += int(has_raman_by_exp_patch[(exp_id, pid)])
+                        resolved[str(pid)] = raw
+                        if args.peak_features:
+                            x, y = load_xy_from_workbook(args.raman_excel, raw, exp_tag, new_len=raman_len, kind='raman')
+                            raman_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
+                        loaded = True
+                        break
+                    except Exception:
+                        continue
+                if not loaded:
                     has_raman_by_exp_patch[(exp_id, pid)] = 0
             if args.print_sheet_map:
                 print(f'[INFO] Raman mapping exp={exp_tag}: {resolved}')
 
         if args.xrd_excel:
-            if not meta:
-                raise ValueError('You passed --xrd_excel but did not provide --meta_json.')
             resolved = {}
             for pid in patch_ids:
-                raw = p2x.get(str(pid), '')
-                resolved[str(pid)] = raw
-                if not raw:
+                candidates = _candidate_sheet_names(p2x, auto_p2x, pid)
+                resolved[str(pid)] = candidates[0] if candidates else ''
+                if not candidates:
                     has_xrd_by_exp_patch[(exp_id, pid)] = 0
                     continue
-                try:
-                    spec = load_spectrum_from_workbook(args.xrd_excel, raw, exp_tag, new_len=xrd_len, kind='xrd', standardize=True)
-                    xrd_by_exp_patch[(exp_id, pid)] = spec.astype(np.float32)
-                    has_xrd_by_exp_patch[(exp_id, pid)] = int(np.any(np.abs(spec) > 1e-8))
-                    loaded_xrd += int(has_xrd_by_exp_patch[(exp_id, pid)])
-                    if args.peak_features:
-                        x, y = load_xy_from_workbook(args.xrd_excel, raw, exp_tag, new_len=xrd_len, kind='xrd')
-                        xrd_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
-                except Exception:
+                loaded = False
+                for raw in candidates:
+                    try:
+                        spec = load_spectrum_from_workbook(args.xrd_excel, raw, exp_tag, new_len=xrd_len, kind='xrd', standardize=True)
+                        xrd_by_exp_patch[(exp_id, pid)] = spec.astype(np.float32)
+                        has_xrd_by_exp_patch[(exp_id, pid)] = int(np.any(np.abs(spec) > 1e-8))
+                        loaded_xrd += int(has_xrd_by_exp_patch[(exp_id, pid)])
+                        resolved[str(pid)] = raw
+                        if args.peak_features:
+                            x, y = load_xy_from_workbook(args.xrd_excel, raw, exp_tag, new_len=xrd_len, kind='xrd')
+                            xrd_peaks_by_exp_patch[(exp_id, pid)] = extract_peak_features_xy(x, y, top_k=int(args.peak_top_k), prominence=float(args.peak_prominence))
+                        loaded = True
+                        break
+                    except Exception:
+                        continue
+                if not loaded:
                     has_xrd_by_exp_patch[(exp_id, pid)] = 0
             if args.print_sheet_map:
                 print(f'[INFO] XRD mapping exp={exp_tag}: {resolved}')
 
     if args.raman_excel and not args.allow_empty_spectra and loaded_raman == 0:
-        raise ValueError('Raman excel provided but no spectra were loaded. Check meta_json or workbook layout.')
+        raise ValueError('Raman excel provided but no spectra were loaded. Check meta_json, workbook layout, or wide-sheet header order.')
     if args.xrd_excel and not args.allow_empty_spectra and loaded_xrd == 0:
-        raise ValueError('XRD excel provided but no spectra were loaded. Check meta_json or workbook layout.')
+        raise ValueError('XRD excel provided but no spectra were loaded. Check meta_json, workbook layout, or wide-sheet header order.')
 
     x0_list: List[np.ndarray] = []
     mask_list: List[np.ndarray] = []

@@ -109,3 +109,65 @@ def test_preprocess_wide_sheet_and_sidecar(scratch_dir, python_exe, synthetic_pr
     assert 'spectral_parent_id' in sample
     assert sample['x0'].shape == (2, 3)
 
+
+
+def test_preprocess_wide_sheet_falls_back_when_meta_mapping_is_wrong(scratch_dir, python_exe, synthetic_project):
+    left_log = scratch_dir / 'all.txt'
+    right_log = scratch_dir / 'all_right.txt'
+    _write_rgb_log(left_log, humidity=66.0)
+    _write_rgb_log(right_log, humidity=66.0)
+
+    raman_xlsx = scratch_dir / 'raman_auto.xlsx'
+    xrd_xlsx = scratch_dir / 'xrd_auto.xlsx'
+    names = ['1A??66', '1B???66']
+    _write_wide_workbook(raman_xlsx, names)
+    _write_wide_workbook(xrd_xlsx, names)
+
+    bad_meta = {
+        'raman_len': 32,
+        'xrd_len': 48,
+        'experiments': {
+            '66': {
+                'patch_to_raman_sheet': {'1': '66 ????', '2': '66 ????'},
+                'patch_to_xrd_sheet': {'1': '66 ????', '2': '66 ????'},
+            }
+        },
+    }
+    meta_json = scratch_dir / 'bad_meta.json'
+    meta_json.write_text(json.dumps(bad_meta, ensure_ascii=False, indent=2), encoding='utf-8')
+    out_dir = scratch_dir / 'out_auto'
+
+    cmd = [
+        python_exe,
+        'preprocess.py',
+        '--rgb_logs',
+        f'{left_log},{right_log}',
+        '--exp_tags',
+        '66,66',
+        '--use_patches',
+        '1-2',
+        '--meta_json',
+        str(meta_json),
+        '--raman_excel',
+        str(raman_xlsx),
+        '--xrd_excel',
+        str(xrd_xlsx),
+        '--output_dir',
+        str(out_dir),
+        '--split_mode',
+        'group_patch',
+        '--seed',
+        '1',
+        '--val_ratio',
+        '0.25',
+        '--test_ratio',
+        '0.25',
+    ]
+    res = subprocess.run(cmd, cwd=synthetic_project['root'], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+
+    data = np.load(out_dir / 'all.npz', allow_pickle=True)
+    assert 'raman' in data and data['raman'].shape[1] == 32
+    assert 'xrd' in data and data['xrd'].shape[1] == 48
+    assert int(data['has_raman'].sum()) > 0
+    assert int(data['has_xrd'].sum()) > 0

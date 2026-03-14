@@ -23,12 +23,12 @@
 
 ```bash
 python preprocess.py \
-  --rgb_logs "path/to/1-3.txt,path/to/1-3_Right.txt" \
+  --rgb_logs "data/all/all.txt,data/all/all_right.txt" \
   --output_dir data/pigment_npz \
   --use_patches "1-9" \
   --meta_json pigment_task/pigment_meta_example.json \
-  --raman_excel "path/to/拉曼.xlsx" \
-  --xrd_excel "path/to/xrd.xlsx" \
+  --raman_excel "data/all/laman.xlsx" \
+  --xrd_excel "data/all/xrd.xlsx" \
   --split_mode group_exp_patch
 ```
 
@@ -98,24 +98,24 @@ legacy/
   - `bridge.use_group_sampler`
   - `bridge.prototype_bank.path`
 
-## Physics ??
+## Physics 物理约束
 
-???????????? physics-informed soft constraints????? `physics.*` ????????????????????????? loss ??????
+当前仓库已接入最小侵入式 physics-informed soft constraints，统一使用 `physics.*` 配置，默认关闭。它们不会改写主链，只在训练时作为附加 loss 工作。
 
-???????
+可选子开关包括：
 
 - `use_spec_color_consistency`
 - `use_parent_consistency`
 - `use_aug_consistency`
 - `use_damage_constraint`
 
-?????
+兼容要点：
 
-- `physics.enable=false` ?????????????
-- `physics.use_cycle_model="auto"` ??????? `FadingForwardModelLab` cycle loss?
-- ????????????? checkpoint ???????????????????
+- `physics.enable=false` 时，会尽量回到旧行为。
+- `physics.use_cycle_model="auto"` 时，仍兼容旧的 `FadingForwardModelLab` cycle loss。
+- 推理诊断头只有在配置启用且 checkpoint 含对应权重时才会输出。
 
-?????????
+一个最小开启示例：
 
 ```json
 {
@@ -129,7 +129,7 @@ legacy/
 }
 ```
 
-??????? [docs/PHYSICS_CONSTRAINTS_CN.md](/D:/code/ky/bihua/Impainting/SSD-TS/docs/PHYSICS_CONSTRAINTS_CN.md)?
+更详细的说明见 [docs/PHYSICS_CONSTRAINTS_CN.md](/D:/code/ky/bihua/Impainting/SSD-TS/docs/PHYSICS_CONSTRAINTS_CN.md)。
 
 ## Legacy 兼容
 
