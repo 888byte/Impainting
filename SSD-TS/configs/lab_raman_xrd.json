@@ -1,4 +1,4 @@
-﻿{
+{
   "data": {
     "train_npz": "data/pigment_npz/train.npz",
     "val_npz": "data/pigment_npz/val.npz",
@@ -71,7 +71,9 @@
     "eval_every": 1,
     "eval_num_batches": 2,
     "save_every": 10,
-    "save_dir": "ckpt/lab_raman_xrd"
+    "save_dir": "ckpt/lab_raman_xrd",
+    "early_stopping_patience": 20,
+    "early_stopping_min_delta": 0.001
   },
   "color_aug": {
     "enable": true,

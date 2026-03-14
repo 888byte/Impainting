@@ -37,6 +37,12 @@ def normalize_config(cfg: Dict[str, Any], config_path: str = "") -> Dict[str, An
             pretrained_cfg[key] = _resolve_path(project_root, pretrained_cfg[key])
 
     train_cfg = cfg.setdefault("train", {})
+    train_cfg.setdefault("log_every", 50)
+    train_cfg.setdefault("eval_every", 1)
+    train_cfg.setdefault("eval_num_batches", 2)
+    train_cfg.setdefault("save_every", 10)
+    train_cfg.setdefault("early_stopping_patience", 20)
+    train_cfg.setdefault("early_stopping_min_delta", 0.001)
     if "save_dir" in train_cfg and isinstance(train_cfg["save_dir"], str):
         train_cfg["save_dir"] = _resolve_path(project_root, train_cfg["save_dir"])
 
