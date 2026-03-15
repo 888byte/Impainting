@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import os
 import subprocess
 
-
-def _run(cmd, cwd):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def _run(cmd, cwd, env=None):
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=run_env)
 
 
 def test_train_infer_evaluate_and_build_prototypes_smoke(synthetic_project, python_exe):
@@ -129,3 +132,37 @@ def test_legacy_wrappers_help(synthetic_project, python_exe):
     ):
         res = _run(cmd, cwd=root)
         assert res.returncode == 0, res.stderr or res.stdout
+
+
+def test_t1_smoke_generates_image(synthetic_project, python_exe):
+    root = synthetic_project['root']
+    config = synthetic_project['config']
+    train_res = _run([python_exe, 'train.py', '--config', str(config)], cwd=root)
+    assert train_res.returncode == 0, train_res.stderr or train_res.stdout
+
+    ckpt = synthetic_project['ckpt_dir'] / 'ckpt_ep1.pt'
+    assert ckpt.exists()
+
+    out_img = synthetic_project['tmp_path'] / 't1_smoke.png'
+    res = _run(
+        [
+            python_exe,
+            't1.py',
+            '--ckpt',
+            str(ckpt),
+            '--cond_method',
+            'pred',
+            '--num_samples',
+            '1',
+            '--palette',
+            'named_only',
+            '--output_image',
+            str(out_img),
+        ],
+        cwd=root,
+        env={'KMP_DUPLICATE_LIB_OK': 'TRUE'},
+    )
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert out_img.exists()
+    assert out_img.exists()
+
