@@ -15,7 +15,7 @@ sde:
 
 #### Degradation
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
 #### BrushNet
 brushnet:
@@ -41,8 +41,8 @@ texture_core:
 #### Baseline compatibility fix only; not counted as innovation
 restore_S_guidance: true
 
-#### Self-Supervised Mu-Denoiser閰嶇疆 (D_mu)
-# 鍦⊿DE璁粌鍓嶆竻鐞嗘潯浠跺潎鍊糾u锛屼娇鐢╞lind-spot鑷洃鐫ｈ缁冿紙涓嶉渶瑕佸共鍑€GT锛?
+#### Self-Supervised Mu-Denoiser 配置 (D_mu)
+# 在 SDE 训练前清理条件均值 mu，使用 blind-spot 自监督训练（不需要干净 GT）
 mu_denoiser:
   enabled: true
   in_nc: 5
@@ -60,8 +60,8 @@ datasets:
   train:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
-    dataroot_GT: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/cropped_images
-    dataroot_mask: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
     gt_mode: full
 
