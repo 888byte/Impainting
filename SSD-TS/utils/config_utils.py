@@ -1,4 +1,4 @@
-"""Configuration loading and backward-compatible normalization."""
+﻿"""Configuration loading and backward-compatible normalization."""
 from __future__ import annotations
 
 import json
@@ -102,5 +102,17 @@ def normalize_config(cfg: Dict[str, Any], config_path: str = "") -> Dict[str, An
     physics_cfg.setdefault("per_channel_k", True)
     physics_cfg.setdefault("learn_c_inf", True)
     physics_cfg.setdefault("init_k", 1.0)
+
+    infer_cfg = cfg.setdefault("inference", {})
+    infer_cfg.setdefault("stabilize_single_rgb", True)
+    infer_cfg.setdefault("stabilize_min_strength", 0.15)
+    infer_cfg.setdefault("stabilize_drift_scale_L", 18.0)
+    infer_cfg.setdefault("stabilize_drift_scale_ab", 24.0)
+    infer_cfg.setdefault("stabilize_drift_threshold", 1.0)
+    infer_cfg.setdefault("stabilize_drift_gamma", 1.0)
+    infer_cfg.setdefault("stabilize_L_cap_base", 6.0)
+    infer_cfg.setdefault("stabilize_L_cap_gain", 18.0)
+    infer_cfg.setdefault("stabilize_ab_cap_base", 8.0)
+    infer_cfg.setdefault("stabilize_ab_cap_gain", 28.0)
 
     return cfg

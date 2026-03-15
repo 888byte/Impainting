@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from bridge.physics_heads import DamageHead, DamageHeadConfig, SpecColorHead, SpecColorHeadConfig
-from inference.pipeline import _single_rgb, load_checkpoint
+from inference.pipeline import _single_rgb, _stabilize_single_rgb_prediction, load_checkpoint
 from models.color_encoder import ColorEncoder, ColorEncoderConfig
 from models.cond_predictor import ColorToSpecPredictor, CondPredictorConfig
 from models.denoiser import DenoiserConfig, MambaDenoiser
@@ -32,6 +32,22 @@ def test_normalize_config_adds_physics_defaults():
     assert physics['lambda_spec_pred_consistency'] == 0.0
     assert physics['side_consistency_scale'] == 0.25
     assert physics['low_confidence_skip_physics'] is True
+    inference = cfg['inference']
+    assert inference['stabilize_single_rgb'] is True
+    assert inference['stabilize_min_strength'] == 0.15
+    assert inference['stabilize_drift_scale_L'] == 18.0
+    assert inference['stabilize_ab_cap_gain'] == 28.0
+
+
+def test_single_rgb_stabilizer_pulls_low_conf_prediction_towards_input():
+    cfg = normalize_config({})['inference']
+    current = np.array([55.0, 0.0, 0.0], dtype=np.float32)
+    predicted = np.array([82.0, 48.0, 42.0], dtype=np.float32)
+    stabilized, eff_conf = _stabilize_single_rgb_prediction(current, predicted, 0.05, cfg)
+    assert np.linalg.norm(stabilized - current) < np.linalg.norm(predicted - current)
+    assert eff_conf <= 0.05
+    assert abs(float(stabilized[1] - current[1])) < abs(float(predicted[1] - current[1]))
+
 
 
 def test_spec_color_loss_uses_true_x0_and_detached_pred_target():
@@ -253,3 +269,4 @@ def test_single_rgb_outputs_physics_diagnostics_when_weights_exist(scratch_dir):
     assert 'input_rgb_current' not in out
     assert 'num_samples_used' not in out
     assert 'kalman_refined' not in out
+

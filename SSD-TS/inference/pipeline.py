@@ -100,6 +100,45 @@ def _fuse_confidence(c_diff: Optional[float], std_norm: Optional[float], c_ret: 
         ret_factor = CONF_RET_BASE + (1.0 - CONF_RET_BASE) * c_ret
     return float(max(0.0, min(1.0, float(c_diff) * pen * ret_factor)))
 
+def _confidence_or_default(*values: Optional[float]) -> float:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(scalar):
+            return float(np.clip(scalar, 0.0, 1.0))
+    return 0.0
+
+
+def _stabilize_single_rgb_prediction(curr_lab: np.ndarray, pred_lab: np.ndarray, base_conf: float, infer_cfg: Dict[str, object]):
+    curr = np.asarray(curr_lab, dtype=np.float32).reshape(3,)
+    pred = np.asarray(pred_lab, dtype=np.float32).reshape(3,)
+    base_conf = float(np.clip(base_conf, 0.0, 1.0))
+    drift_scale = np.asarray([
+        float(infer_cfg.get("stabilize_drift_scale_L", 18.0)),
+        float(infer_cfg.get("stabilize_drift_scale_ab", 24.0)),
+        float(infer_cfg.get("stabilize_drift_scale_ab", 24.0)),
+    ], dtype=np.float32)
+    drift = float(np.linalg.norm((pred - curr) / np.maximum(drift_scale, 1e-6)))
+    drift_threshold = float(infer_cfg.get("stabilize_drift_threshold", 1.0))
+    drift_gamma = float(infer_cfg.get("stabilize_drift_gamma", 1.0))
+    drift_penalty = float(np.exp(-max(0.0, drift - drift_threshold) * drift_gamma))
+    effective_conf = float(np.clip(base_conf * drift_penalty, 0.0, 1.0))
+    caps = np.asarray([
+        float(infer_cfg.get("stabilize_L_cap_base", 6.0)) + float(infer_cfg.get("stabilize_L_cap_gain", 18.0)) * effective_conf,
+        float(infer_cfg.get("stabilize_ab_cap_base", 8.0)) + float(infer_cfg.get("stabilize_ab_cap_gain", 28.0)) * effective_conf,
+        float(infer_cfg.get("stabilize_ab_cap_base", 8.0)) + float(infer_cfg.get("stabilize_ab_cap_gain", 28.0)) * effective_conf,
+    ], dtype=np.float32)
+    delta = np.clip(pred - curr, -caps, caps)
+    min_strength = float(np.clip(infer_cfg.get("stabilize_min_strength", 0.15), 0.0, 1.0))
+    strength = float(np.clip(min_strength + (1.0 - min_strength) * effective_conf, 0.0, 1.0))
+    stabilized = curr + strength * delta
+    return stabilized.astype(np.float32), effective_conf
+
+
 
 
 
@@ -464,12 +503,16 @@ def _single_rgb(
         q = np.asarray([float(kalman_process_std_lab) ** 2] * 3, dtype=np.float64)
         pred_lab0 = _rts_smoother_random_walk(y, r, q)[0].astype(np.float32)
 
-    pred_rgb0 = lab_to_rgb(pred_lab0[None, :])[0]
     bridge_conf = _scalar_from_info(info.get('confidence', None))
     retrieval_conf = _extract_retrieval_confidence(info)
     diff_conf = _scalar_from_info(sample_info.get('conf_diffusion', None))
     diff_std = _scalar_from_info(sample_info.get('diffusion_std_norm_meanL2', None))
     fused_conf = _fuse_confidence(diff_conf, diff_std, retrieval_conf)
+    infer_cfg = bundle['cfg'].get('inference', {})
+    if bool(infer_cfg.get('stabilize_single_rgb', True)) and cond_method != 'true':
+        base_conf = _confidence_or_default(fused_conf, bridge_conf, diff_conf)
+        pred_lab0, fused_conf = _stabilize_single_rgb_prediction(lab, pred_lab0, base_conf, infer_cfg)
+    pred_rgb0 = lab_to_rgb(pred_lab0[None, :])[0]
 
     diagnostics = _physics_diagnostics(bundle, x_curr_t, cond, pred_lab0[None, :], info)
     out = {

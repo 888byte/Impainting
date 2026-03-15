@@ -53,8 +53,8 @@ python build_prototypes.py --config configs/lab_raman_xrd.json --ckpt ckpt/lab_r
 ### 4. 推理
 
 ```bash
-python infer.py --ckpt ckpt/lab_raman_xrd/best_model.pt --test_npz data/pigment_npz/test.npz --cond_method pred
-python infer.py --ckpt ckpt/lab_raman_xrd/best_model.pt --rgb "120,80,60" --cond_method posterior
+python infer.py --ckpt ckpt/lab_raman_xrd/best_model.pt --test_npz data/pigment_npz/test.npz --cond_method pred --kalman_rts
+python infer.py --ckpt ckpt/lab_raman_xrd/best_model.pt --rgb "120,80,60" --cond_method posterior --kalman_rts
 ```
 
 ### 5. 评估
