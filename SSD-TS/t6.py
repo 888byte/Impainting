@@ -265,8 +265,9 @@ def main():
     out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
     out_path = os.path.join(args.output_dir, "mural_lut_full.png")
     cv2.imwrite(out_path, out_bgr)
-    print(f"✅ Saved: {out_path}")
+    print(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":
     main()
+

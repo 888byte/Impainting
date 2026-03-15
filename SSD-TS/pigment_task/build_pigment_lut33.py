@@ -1,389 +1,322 @@
-﻿# -*- coding: utf-8 -*-
-"""pigment_lut_build.py
+# -*- coding: utf-8 -*-
+"""Build a 3D LUT by querying the current `infer.py --rgb` pipeline.
 
-python  pigment_task/build_pigment_lut33.py 
+The generated `.npz` stores:
+- `grid`: sampling grid in [0, 255]
+- `lut_rgb`: predicted restored RGB for each grid point
+- `lut_lab`: predicted restored Lab for each grid point
+- `lut_conf`: fused confidence from the current inference pipeline
+- `lut_std`: diffusion uncertainty scalar
+- `lut_cdiff`: diffusion confidence term
+- `lut_cret`: retrieval/bridge confidence term
 
-Generate a 3D LUT (current RGB -> predicted original RGB/Lab + confidence) by
-calling `python infer.py` on a regular RGB grid.
-
-==============================
-IMPORTANT NOTES / PITFALLS
-==============================
-1) LUT axis order (very important)
-   This script stores LUT values as lut[i, j, k] == lut[R_index, G_index, B_index]
-   (i.e., the first dimension corresponds to R, second to G, third to B).
-
-   Your APPLY code MUST use the same convention when doing trilinear interpolation.
-   If your apply uses lut[B, G, R] (common in some .cube readers), colors will be
-   severely wrong (channel/axis swap).
-
-2) `infer.py` already returns the LUT-facing fields we need
-   This script now reads `rgb/lab/conf/std/cdiff/cret` directly instead of
-   recomputing confidence from legacy fields.
-
-3) Missing optional diagnostics are tolerated
-   `cret` may still be missing for some condition paths. In that case we store NaN.
-
-4) Performance / stability
-   - Spawning a Python process per grid point is inherently expensive.
-   - Too many workers will thrash CPU/GPU/IO and may hang.
-   Defaults below are set for stability; tune upward carefully.
-
-5) Data types
-   - `lut_rgb` is stored as uint8 (0..255) for compactness.
-   - `lut_lab` and confidence-related arrays are float32.
-
-Output
-------
-An .npz file containing:
-  grid, lut_rgb, lut_lab, lut_conf, lut_std, lut_cdiff, lut_cret, meta
-and a .npy "done" marker for resume.
+This script is resume-safe. If `out_npz` or `done_npy` already exists, finished grid
+points will be skipped automatically.
 """
 
-import os
+from __future__ import annotations
+
+import argparse
 import json
+import os
 import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
 
 import numpy as np
 
-# =========================
-# User config
-# =========================
-CKPT = "/home/610-wws/Impainting/SSD-TS/ckpt/pigment_lab_raman_xrd/best_model.pt"
-LIB = "data/standard_alignment/library_embeddings.npz"
-COND_METHOD = "pred"
-NUM_SAMPLES = 14  # 8~16 is usually enough for LUT
-N = 33
+_JSON_START_PAT = re.compile(r"\{")
 
-OUT_NPZ = "pigment_lut33.npz"
-DONE_NPY = "pigment_lut33_done.npy"  # resume marker
 
-# Axis order used by this file (see docstring). Keep consistent with apply.
-AXIS_ORDER = "RGB"  # stored as [R, G, B] in lut[r_idx, g_idx, b_idx]
-
-# Parallel settings (stable defaults)
-MAX_WORKERS = 40
-MAX_INFLIGHT = 200  # ~2-3x workers is enough
-SAVE_EVERY = 300
-RETRIES = 5
-SUBPROCESS_TIMEOUT_SEC = 90
-
-# Logging
-VERBOSE_CMD = True  # printing every command is extremely slow
-
-# Use current env python (recommended). If you insist, change to "python".
-PYTHON = "python"
-
-# `infer.py --rgb` already returns the fused confidence (`conf`) plus the
-# component diagnostics that should be persisted into the LUT.
-
-# =========================
-# Grid
-# =========================
-grid = np.linspace(0.0, 255.0, N, dtype=np.float32)
-
-# =========================
-# LUT arrays
-# =========================
-lut_rgb = np.zeros((N, N, N, 3), dtype=np.uint8)
-# Lab is continuous; keep float32
-lut_lab = np.zeros((N, N, N, 3), dtype=np.float32)
-# confidence / diagnostics
-lut_conf = np.zeros((N, N, N), dtype=np.float32)
-# diffusion_std_norm_meanL2
-lut_std = np.zeros((N, N, N), dtype=np.float32)
-# confidence_diffusion
-lut_cdiff = np.zeros((N, N, N), dtype=np.float32)
-# confidence_retrieval (may be missing)
-lut_cret = np.zeros((N, N, N), dtype=np.float32)
-
-# =========================
-# Resume: load existing LUT + done
-# =========================
-if os.path.exists(OUT_NPZ):
-    prev = np.load(OUT_NPZ, allow_pickle=True)
-    if "lut_rgb" in prev and prev["lut_rgb"].shape == lut_rgb.shape:
-        lut_rgb[:] = prev["lut_rgb"]
-    if "lut_lab" in prev and prev["lut_lab"].shape == lut_lab.shape:
-        lut_lab[:] = prev["lut_lab"]
-    if "lut_conf" in prev and prev["lut_conf"].shape == lut_conf.shape:
-        lut_conf[:] = prev["lut_conf"]
-    if "lut_std" in prev and prev["lut_std"].shape == lut_std.shape:
-        lut_std[:] = prev["lut_std"]
-    if "lut_cdiff" in prev and prev["lut_cdiff"].shape == lut_cdiff.shape:
-        lut_cdiff[:] = prev["lut_cdiff"]
-    if "lut_cret" in prev and prev["lut_cret"].shape == lut_cret.shape:
-        lut_cret[:] = prev["lut_cret"]
-
-    if "grid" in prev:
-        gprev = prev["grid"].astype(np.float32)
-        if gprev.shape == grid.shape and np.allclose(gprev, grid):
-            print("[Resume] Loaded LUT arrays from existing npz (grid matches).")
-        else:
-            print("[Warn] Existing npz grid differs from current grid. Proceed with caution.")
-
-if os.path.exists(DONE_NPY):
-    done = np.load(DONE_NPY)
-    if done.shape != (N, N, N):
-        print("[Warn] DONE marker shape mismatch; resetting done marker.")
-        done = np.zeros((N, N, N), dtype=np.uint8)
-else:
-    done = np.zeros((N, N, N), dtype=np.uint8)
-
-# =========================
-# Infer + parse
-# =========================
-# More robust than r"\{.*\}" which is greedy and may grab logs.
-# We look for the LAST JSON object in stdout by finding the last '{' and parsing.
-# This assumes infer_pigment prints a JSON dict at the end (as in your example).
-
-_json_start_pat = re.compile(r"\{")
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Build LUT from the current infer.py RGB pipeline")
+    ap.add_argument("--ckpt", type=str, default="ckpt/lab_raman_xrd/best_model.pt")
+    ap.add_argument("--library_npz", type=str, default="data/standard_alignment/library_embeddings.npz")
+    ap.add_argument("--prototype_bank", type=str, default="data/pigment_npz/prototype_bank.npz")
+    ap.add_argument(
+        "--cond_method",
+        type=str,
+        default="auto",
+        choices=["auto", "pred", "retrieval", "posterior", "posterior_retrieval"],
+    )
+    ap.add_argument("--num_samples", type=int, default=14)
+    ap.add_argument("--grid_size", type=int, default=33)
+    ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--out_npz", type=str, default="pigment_lut33.npz")
+    ap.add_argument("--done_npy", type=str, default="")
+    ap.add_argument("--max_workers", type=int, default=40)
+    ap.add_argument("--max_inflight", type=int, default=200)
+    ap.add_argument("--save_every", type=int, default=300)
+    ap.add_argument("--retries", type=int, default=5)
+    ap.add_argument("--timeout_sec", type=int, default=90)
+    ap.add_argument("--python_exe", type=str, default="python")
+    ap.add_argument("--verbose_cmd", action="store_true")
+    ap.add_argument("--kalman_rts", action="store_true")
+    ap.add_argument("--lut_order", type=str, default="RGB", choices=["RGB"])
+    return ap.parse_args()
 
 
 def _parse_last_json(stdout: str) -> dict:
     if not stdout:
         raise ValueError("empty stdout")
-    # Find last '{'
-    starts = [m.start() for m in _json_start_pat.finditer(stdout)]
+    starts = [m.start() for m in _JSON_START_PAT.finditer(stdout)]
     if not starts:
         raise ValueError("no '{' found in stdout")
-    last = starts[-1]
-    s = stdout[last:].strip()
-    # Try direct parse; if fails, try to trim trailing noise
+    candidate = stdout[starts[-1] :].strip()
     try:
-        return json.loads(s)
+        return json.loads(candidate)
     except Exception:
-        # fallback: find last '}' and parse substring
-        end = s.rfind("}")
+        end = candidate.rfind("}")
         if end == -1:
             raise
-        return json.loads(s[: end + 1])
+        return json.loads(candidate[: end + 1])
 
 
-def run_infer(rgb, retries=RETRIES):
-    """Call infer_pigment for one RGB point.
+def _atomic_save_npz(path: Path, **kwargs) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp.npz")
+    np.savez_compressed(tmp, **kwargs)
+    os.replace(tmp, path)
 
-    rgb: tuple(float r, float g, float b) in [0,255]
-    """
-    rgb_str = f"{rgb[0]:.5g},{rgb[1]:.5g},{rgb[2]:.5g}"
+
+def _build_infer_command(args: argparse.Namespace, rgb: tuple[float, float, float]) -> list[str]:
+    repo_root = Path(__file__).resolve().parents[1]
     cmd = [
-        PYTHON,
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "infer.py"),
+        args.python_exe,
+        str(repo_root / "infer.py"),
         "--ckpt",
-        CKPT,
+        args.ckpt,
+        "--device",
+        args.device,
         "--rgb",
-        rgb_str,
+        f"{rgb[0]:.5g},{rgb[1]:.5g},{rgb[2]:.5g}",
         "--cond_method",
-        COND_METHOD,
-        "--library_npz",
-        LIB,
+        args.cond_method,
         "--num_samples",
-        str(NUM_SAMPLES),
-        "--kalman_rts",
+        str(args.num_samples),
     ]
-    if VERBOSE_CMD:
+    if args.library_npz:
+        cmd.extend(["--library_npz", args.library_npz])
+    if args.prototype_bank:
+        cmd.extend(["--prototype_bank", args.prototype_bank])
+    if args.kalman_rts:
+        cmd.append("--kalman_rts")
+    return cmd
+
+
+def run_infer(args: argparse.Namespace, rgb: tuple[float, float, float]) -> dict:
+    cmd = _build_infer_command(args, rgb)
+    if args.verbose_cmd:
         print(" ".join(cmd))
 
     last_err = None
-    for attempt in range(1, retries + 1):
+    for attempt in range(1, int(args.retries) + 1):
         try:
-            p = subprocess.run(
+            proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT_SEC,
+                timeout=int(args.timeout_sec),
             )
-        except subprocess.TimeoutExpired as e:
-            last_err = RuntimeError(f"infer timeout {attempt}/{retries}: {e}")
+        except subprocess.TimeoutExpired as exc:
+            last_err = RuntimeError(f"infer timeout {attempt}/{args.retries}: {exc}")
             continue
 
-        if p.returncode != 0:
+        if proc.returncode != 0:
             last_err = RuntimeError(
-                f"infer failed attempt {attempt}/{retries}: {p.stderr[:300]}"
+                f"infer failed attempt {attempt}/{args.retries}: {proc.stderr[:300]}"
             )
             continue
 
         try:
-            return _parse_last_json(p.stdout)
-        except Exception as e:
+            return _parse_last_json(proc.stdout)
+        except Exception as exc:
             last_err = RuntimeError(
-                f"json parse error attempt {attempt}/{retries}: {str(e)[:200]}"
+                f"json parse error attempt {attempt}/{args.retries}: {str(exc)[:200]}"
             )
             continue
 
     raise last_err if last_err else RuntimeError("infer failed with unknown error")
 
 
+def load_resume_arrays(args: argparse.Namespace, grid: np.ndarray):
+    n = len(grid)
+    lut_rgb = np.zeros((n, n, n, 3), dtype=np.uint8)
+    lut_lab = np.zeros((n, n, n, 3), dtype=np.float32)
+    lut_conf = np.zeros((n, n, n), dtype=np.float32)
+    lut_std = np.zeros((n, n, n), dtype=np.float32)
+    lut_cdiff = np.zeros((n, n, n), dtype=np.float32)
+    lut_cret = np.zeros((n, n, n), dtype=np.float32)
+
+    out_npz = Path(args.out_npz)
+    done_npy = Path(args.done_npy) if args.done_npy else out_npz.with_name(out_npz.stem + "_done.npy")
+
+    if out_npz.exists():
+        prev = np.load(out_npz, allow_pickle=True)
+        try:
+            for key, arr in {
+                "lut_rgb": lut_rgb,
+                "lut_lab": lut_lab,
+                "lut_conf": lut_conf,
+                "lut_std": lut_std,
+                "lut_cdiff": lut_cdiff,
+                "lut_cret": lut_cret,
+            }.items():
+                if key in prev and prev[key].shape == arr.shape:
+                    arr[:] = prev[key]
+            if "grid" in prev:
+                gprev = prev["grid"].astype(np.float32)
+                if gprev.shape == grid.shape and np.allclose(gprev, grid):
+                    print("[Resume] Loaded existing LUT arrays (grid matches).")
+                else:
+                    print("[Warn] Existing LUT grid differs from current grid.")
+        finally:
+            prev.close()
+
+    if done_npy.exists():
+        done = np.load(done_npy)
+        if done.shape != (n, n, n):
+            print("[Warn] done marker shape mismatch, resetting it.")
+            done = np.zeros((n, n, n), dtype=np.uint8)
+    else:
+        done = np.zeros((n, n, n), dtype=np.uint8)
+
+    return {
+        "out_npz": out_npz,
+        "done_npy": done_npy,
+        "lut_rgb": lut_rgb,
+        "lut_lab": lut_lab,
+        "lut_conf": lut_conf,
+        "lut_std": lut_std,
+        "lut_cdiff": lut_cdiff,
+        "lut_cret": lut_cret,
+        "done": done,
+    }
 
 
-def _atomic_save_npz(path: str, **kwargs):
-    # NOTE: numpy appends ".npz" automatically if the filename doesn't end with it.
-    # So the temp filename must end with ".npz", otherwise os.replace() will fail.
-    tmp = path + ".tmp.npz"
-    np.savez_compressed(tmp, **kwargs)
-    os.replace(tmp, path)
-
-
-def save_all():
-    np.save(DONE_NPY, done)
+def save_all(args: argparse.Namespace, grid: np.ndarray, state: dict) -> None:
+    np.save(state["done_npy"], state["done"])
     _atomic_save_npz(
-        OUT_NPZ,
+        state["out_npz"],
         grid=grid,
-        lut_rgb=lut_rgb,
-        lut_lab=lut_lab,
-        lut_conf=lut_conf,
-        lut_std=lut_std,
-        lut_cdiff=lut_cdiff,
-        lut_cret=lut_cret,
+        lut_rgb=state["lut_rgb"],
+        lut_lab=state["lut_lab"],
+        lut_conf=state["lut_conf"],
+        lut_std=state["lut_std"],
+        lut_cdiff=state["lut_cdiff"],
+        lut_cret=state["lut_cret"],
         meta=dict(
-            axis_order=AXIS_ORDER,
-            ckpt=CKPT,
-            lib=LIB,
-            cond_method=COND_METHOD,
-            num_samples=NUM_SAMPLES,
-            N=N,
-            max_workers=MAX_WORKERS,
-            max_inflight=MAX_INFLIGHT,
-            save_every=SAVE_EVERY,
-            retries=RETRIES,
-            timeout_sec=SUBPROCESS_TIMEOUT_SEC,
+            axis_order=args.lut_order,
+            ckpt=args.ckpt,
+            library_npz=args.library_npz,
+            prototype_bank=args.prototype_bank,
+            cond_method=args.cond_method,
+            num_samples=int(args.num_samples),
+            grid_size=int(args.grid_size),
+            device=args.device,
+            kalman_rts=bool(args.kalman_rts),
+            max_workers=int(args.max_workers),
+            max_inflight=int(args.max_inflight),
+            save_every=int(args.save_every),
+            retries=int(args.retries),
+            timeout_sec=int(args.timeout_sec),
         ),
     )
 
 
-# =========================
-# Worker task
-# =========================
+def task(args: argparse.Namespace, i: int, j: int, k: int, r: float, g: float, b: float):
+    obj = run_infer(args, (r, g, b))
 
-def task(i, j, k, r, g, b):
-    obj = run_infer((r, g, b))
-
-    rgb_pred = obj["rgb"]
-    lab_pred = obj["lab"]
-    c = float(obj.get("conf") or 0.0)
-    c_diff = float(obj.get("cdiff") or 0.0)
-    s = float(obj.get("std") or 0.0)
+    rgb_pred = np.clip(np.array(obj["rgb"], dtype=np.float32), 0.0, 255.0).round().astype(np.uint8)
+    lab_pred = np.array(obj["lab"], dtype=np.float32)
+    conf = np.float32(float(obj.get("conf") or 0.0))
+    cdiff = np.float32(float(obj.get("cdiff") or 0.0))
+    std = np.float32(float(obj.get("std") or 0.0))
 
     c_ret_raw = obj.get("cret", None)
-    c_ret = float("nan") if c_ret_raw is None else float(c_ret_raw)
+    cret = np.float32(np.nan if c_ret_raw is None else float(c_ret_raw))
 
-    rgb_u8 = np.clip(np.array(rgb_pred, dtype=np.float32), 0.0, 255.0).round().astype(
-        np.uint8
-    )
-    lab_f32 = np.array(lab_pred, dtype=np.float32)
-
-    return (
-        i,
-        j,
-        k,
-        rgb_u8,
-        lab_f32,
-        np.float32(c),
-        np.float32(c_diff),
-        np.float32(s),
-        np.float32(c_ret),
-    )
+    return i, j, k, rgb_pred, lab_pred, conf, cdiff, std, cret
 
 
-# =========================
-# Build pending iterator
-# =========================
-
-def pending_points():
+def pending_points(grid: np.ndarray, done: np.ndarray):
     for i, r in enumerate(grid):
         for j, g in enumerate(grid):
             for k, b in enumerate(grid):
                 if done[i, j, k]:
                     continue
-                yield (i, j, k, float(r), float(g), float(b))
+                yield i, j, k, float(r), float(g), float(b)
 
 
-total = N * N * N
-done_count = int(done.sum())
-print(f"[Init] done={done_count}/{total}, pending={total - done_count}")
+def main() -> None:
+    args = parse_args()
+    grid = np.linspace(0.0, 255.0, int(args.grid_size), dtype=np.float32)
+    state = load_resume_arrays(args, grid)
 
-# =========================
-# Parallel loop
-# =========================
-completed_this_run = 0
-failures = 0
-t0 = time.time()
+    total = int(args.grid_size) ** 3
+    done_count = int(state["done"].sum())
+    print(f"[Init] done={done_count}/{total}, pending={total - done_count}")
 
-point_iter = pending_points()
-inflight = {}  # future -> (i,j,k,r,g,b)
+    completed_this_run = 0
+    failures = 0
+    started = time.time()
 
-try:
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        # prefill inflight
-        while len(inflight) < MAX_INFLIGHT:
-            try:
-                pt = next(point_iter)
-            except StopIteration:
-                break
-            fut = ex.submit(task, *pt)
-            inflight[fut] = pt
+    point_iter = pending_points(grid, state["done"])
+    inflight: dict = {}
 
-        while inflight:
-            done_futs, _ = wait(inflight.keys(), return_when=FIRST_COMPLETED)
-
-            for fut in done_futs:
-                pt = inflight.pop(fut)
-
+    try:
+        with ThreadPoolExecutor(max_workers=int(args.max_workers)) as executor:
+            while len(inflight) < int(args.max_inflight):
                 try:
-                    (
-                        i,
-                        j,
-                        k,
-                        rgb_u8,
-                        lab_f32,
-                        c,
-                        c_diff,
-                        s,
-                        c_ret,
-                    ) = fut.result()
+                    pt = next(point_iter)
+                except StopIteration:
+                    break
+                fut = executor.submit(task, args, *pt)
+                inflight[fut] = pt
 
-                    lut_rgb[i, j, k] = rgb_u8
-                    lut_lab[i, j, k] = lab_f32
-                    lut_conf[i, j, k] = c
-                    lut_std[i, j, k] = s
-                    lut_cdiff[i, j, k] = c_diff
-                    lut_cret[i, j, k] = c_ret
-
-                    done[i, j, k] = 1
-                    completed_this_run += 1
-
-                except Exception as e:
-                    failures += 1
-                    # do NOT mark done, it will be retried on next run
-                    print(f"[Fail] idx={pt[:3]} rgb={pt[3:]} err={str(e)[:200]}")
-
-                # periodic save
-                if completed_this_run > 0 and (completed_this_run % SAVE_EVERY == 0):
-                    save_all()
-                    elapsed = (time.time() - t0) / 60.0
-                    print(
-                        f"[Save] +{completed_this_run} this run | total_done={int(done.sum())}/{total} "
-                        f"| failures={failures} | elapsed={elapsed:.1f} min"
-                    )
-
-                # refill inflight
-                while len(inflight) < MAX_INFLIGHT:
+            while inflight:
+                done_futs, _ = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+                for fut in done_futs:
+                    pt = inflight.pop(fut)
                     try:
-                        pt2 = next(point_iter)
-                    except StopIteration:
-                        break
-                    fut2 = ex.submit(task, *pt2)
-                    inflight[fut2] = pt2
+                        i, j, k, rgb_u8, lab_f32, conf, cdiff, std, cret = fut.result()
+                        state["lut_rgb"][i, j, k] = rgb_u8
+                        state["lut_lab"][i, j, k] = lab_f32
+                        state["lut_conf"][i, j, k] = conf
+                        state["lut_cdiff"][i, j, k] = cdiff
+                        state["lut_std"][i, j, k] = std
+                        state["lut_cret"][i, j, k] = cret
+                        state["done"][i, j, k] = 1
+                        completed_this_run += 1
+                    except Exception as exc:
+                        failures += 1
+                        print(f"[Fail] idx={pt[:3]} rgb={pt[3:]} err={str(exc)[:200]}")
 
-finally:
-    # final save even if interrupted
-    save_all()
-    elapsed = (time.time() - t0) / 60.0
-    print(f"[Done] saved to {OUT_NPZ}")
-    print(
-        f"       done={int(done.sum())}/{total}, completed_this_run={completed_this_run}, failures={failures}"
-    )
-    print(f"       elapsed={elapsed:.1f} min")
+                    if completed_this_run > 0 and completed_this_run % int(args.save_every) == 0:
+                        save_all(args, grid, state)
+                        elapsed = (time.time() - started) / 60.0
+                        print(
+                            f"[Save] +{completed_this_run} this run | total_done={int(state['done'].sum())}/{total} "
+                            f"| failures={failures} | elapsed={elapsed:.1f} min"
+                        )
+
+                    while len(inflight) < int(args.max_inflight):
+                        try:
+                            pt2 = next(point_iter)
+                        except StopIteration:
+                            break
+                        fut2 = executor.submit(task, args, *pt2)
+                        inflight[fut2] = pt2
+    finally:
+        save_all(args, grid, state)
+        elapsed = (time.time() - started) / 60.0
+        print(f"[Done] saved to {state['out_npz']}")
+        print(
+            f"       done={int(state['done'].sum())}/{total}, completed_this_run={completed_this_run}, failures={failures}"
+        )
+        print(f"       elapsed={elapsed:.1f} min")
+
+
+if __name__ == "__main__":
+    main()

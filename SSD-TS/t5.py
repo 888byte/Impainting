@@ -1,54 +1,39 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-根据mask+lut生成颜色先验图和置信度图
-Generate Color Prior & Confidence Maps (LUT-driven, Palette + Luminance-Preserving Recolor)
+"""LUT 驱动的掩膜区域颜色先验图脚本。
 
-This is a drop-in conceptual replacement for your original t3.py: it keeps the
-"context palette -> recolor hole by nearest palette" logic, but replaces the diffusion/
-embedding model with a precomputed 3D LUT from an npz file (e.g. pigment_lut33.npz).
+流程：
+1. 用 Telea 做结构修补。
+2. 从掩膜外区域提取上下文调色板。
+3. 通过 LUT 恢复调色板颜色与调色板置信度。
+4. 对掩膜区域做软分配重着色，并输出颜色先验图与置信图。
 
-Pipeline (same spirit as original):
-1) Inpaint structure (Telea) -> keep texture/L.
-2) Extract outside-mask pixels -> KMeans -> faded_palette_rgb.
-3) Restore palette via LUT interpolation (lut_lab or lut_rgb) + palette confidence.
-4) For each hole pixel: find nearest faded palette color in RGB; swap (a,b) to restored palette,
-   optionally keeping L from inpaint.
-5) Confidence = spatial_confidence(mask) * palette_conf (from LUT).
-
-Example:
+示例：
   python t5.py \
-  --img_path /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images/42-0-1_bottom.jpg\
-  --mask_path /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks/42-0-1_bottom_mask.png \
-  --lut_npz pigment_lut33.npz \
-  --n_colors 64 \
-  --output_dir results
-
-  Outputs:
-- color_prior_lut_mural_opt.png
-- confidence_map.png
-- confidence_heatmap.png
-- 01_structure.png (inpainted)
-
+    --img_path demo.png \
+    --mask_path demo_mask.png \
+    --lut_npz pigment_lut33.npz \
+    --n_colors 64 \
+    --output_dir results
 """
+
+from __future__ import annotations
+
 import argparse
 import os
-import numpy as np
+
 import cv2
+import numpy as np
 
 try:
-    # Must match the Lab definition used to generate lut_lab.
     from utils.color_utils import rgb_to_lab, lab_to_rgb
 except ImportError as e:
     print(f"[Error] utils.color_utils not found: {e}")
     raise SystemExit(1)
 
 
-# ---------------------------
-# Confidence (spatial)
-# ---------------------------
 def get_spatial_confidence(mask_u8: np.ndarray) -> np.ndarray:
-    """Spatial confidence: 1.0 at boundary, dropping to 0.1 at center (inside hole)."""
+    """Boundary pixels keep high confidence, center pixels decay gradually."""
     dist_map = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
     max_dist = float(dist_map.max()) + 1e-8
     norm_dist = dist_map / max_dist
@@ -58,9 +43,6 @@ def get_spatial_confidence(mask_u8: np.ndarray) -> np.ndarray:
     return spatial_conf.astype(np.float32)
 
 
-# ---------------------------
-# LUT interpolation
-# ---------------------------
 def _prepare_indices_and_weights(vals: np.ndarray, grid: np.ndarray):
     vals = np.clip(vals.astype(np.float32), float(grid[0]), float(grid[-1]))
     i0 = np.searchsorted(grid, vals, side="right") - 1
@@ -110,9 +92,7 @@ def lut_trilinear(points_rgb: np.ndarray, grid: np.ndarray, lut: np.ndarray, lut
 
     c0 = c00 * (1 - tgb) + c01 * tgb
     c1 = c10 * (1 - tgb) + c11 * tgb
-
-    c = c0 * (1 - trb) + c1 * trb
-    return c
+    return c0 * (1 - trb) + c1 * trb
 
 
 def load_lut_npz(path: str):
@@ -129,14 +109,11 @@ def load_lut_npz(path: str):
     return grid, lut_lab, lut_rgb, lut_conf, data
 
 
-# ---------------------------
-# Palette (KMeans)
-# ---------------------------
 def kmeans_palette(img_rgb: np.ndarray, mask_u8: np.ndarray, n_colors: int, sample_max: int = 60000):
-    """Build palette from outside-mask pixels (context)."""
+    """Build palette from outside-mask pixels."""
     valid_pixels = img_rgb[mask_u8 == 0]
     if valid_pixels.size == 0:
-        raise ValueError("No context pixels found (mask covers whole image?)")
+        raise ValueError("No context pixels found (mask covers the whole image?)")
 
     if len(valid_pixels) > sample_max:
         idx = np.random.choice(len(valid_pixels), sample_max, replace=False)
@@ -147,12 +124,9 @@ def kmeans_palette(img_rgb: np.ndarray, mask_u8: np.ndarray, n_colors: int, samp
     pixel_values = np.float32(sample_pixels)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
     _, _, centers = cv2.kmeans(pixel_values, n_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-    return centers  # (K,3) float32
+    return centers
 
 
-# ---------------------------
-# Soft assignment (top-k)
-# ---------------------------
 def soft_palette_target_lab(
     pixels_rgb: np.ndarray,
     palette_rgb: np.ndarray,
@@ -160,65 +134,48 @@ def soft_palette_target_lab(
     palette_conf: np.ndarray,
     sigma: float = 25.0,
     topk: int = 6,
-    chunk: int = 120000
+    chunk: int = 120000,
 ):
-    """
-    Soft assignment to palette:
-    - for each pixel, pick topk nearest palette colors in RGB
-    - weights = exp(-d2/(2*sigma^2))
-    - target_lab = weighted average of restored_palette_lab over topk
-    - target_conf = weighted average of palette_conf over topk
-    """
-    N = pixels_rgb.shape[0]
-    K = palette_rgb.shape[0]
-    out_lab = np.empty((N, 3), dtype=np.float32)
-    out_conf = np.empty((N,), dtype=np.float32)
+    """Soft-assign each pixel to the nearest palette colors in RGB space."""
+    num_points = pixels_rgb.shape[0]
+    num_palette = palette_rgb.shape[0]
+    out_lab = np.empty((num_points, 3), dtype=np.float32)
+    out_conf = np.empty((num_points,), dtype=np.float32)
 
     pal = palette_rgb.astype(np.float32)
     pal_lab = restored_palette_lab.astype(np.float32)
     pal_conf = palette_conf.astype(np.float32).reshape(-1)
 
     sig2 = max(1e-6, float(sigma) ** 2)
-    kk = min(max(1, int(topk)), K)
+    kk = min(max(1, int(topk)), num_palette)
 
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        x = pixels_rgb[s:e].astype(np.float32)  # (M,3)
+    for s in range(0, num_points, chunk):
+        e = min(s + chunk, num_points)
+        x = pixels_rgb[s:e].astype(np.float32)
 
-        d2 = np.sum((x[:, None, :] - pal[None, :, :]) ** 2, axis=2)  # (M,K)
-        idx = np.argpartition(d2, kth=kk - 1, axis=1)[:, :kk]        # (M,kk)
-        d2_top = np.take_along_axis(d2, idx, axis=1)                 # (M,kk)
+        d2 = np.sum((x[:, None, :] - pal[None, :, :]) ** 2, axis=2)
+        idx = np.argpartition(d2, kth=kk - 1, axis=1)[:, :kk]
+        d2_top = np.take_along_axis(d2, idx, axis=1)
 
         w = np.exp(-d2_top / (2.0 * sig2)).astype(np.float32)
         w_sum = np.sum(w, axis=1, keepdims=True) + 1e-8
         w = w / w_sum
 
-        lab_top = pal_lab[idx]  # (M,kk,3)
-        tgt_lab = np.sum(lab_top * w[:, :, None], axis=1)  # (M,3)
+        lab_top = pal_lab[idx]
+        conf_top = pal_conf[idx]
 
-        conf_top = pal_conf[idx]  # (M,kk)
-        tgt_conf = np.sum(conf_top * w, axis=1)            # (M,)
-
-        out_lab[s:e] = tgt_lab
-        out_conf[s:e] = tgt_conf
+        out_lab[s:e] = np.sum(lab_top * w[:, :, None], axis=1)
+        out_conf[s:e] = np.sum(conf_top * w, axis=1)
 
     return out_lab, out_conf
 
 
-# ---------------------------
-# Masked region smoothing (delta-ab)
-# ---------------------------
-def _has_guided_filter():
+def _has_guided_filter() -> bool:
     return hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "guidedFilter")
 
 
-def masked_edge_aware_smooth(delta: np.ndarray, mask01: np.ndarray, guide: np.ndarray,
-                            radius: int = 16, eps: float = 0.01, method: str = "guided") -> np.ndarray:
-    """
-    Smooth delta inside mask with normalized filtering:
-      smooth(delta) = F(delta*mask) / (F(mask) + small)
-    method: guided | bilateral | none
-    """
+def masked_edge_aware_smooth(delta: np.ndarray, mask01: np.ndarray, guide: np.ndarray, radius: int = 16, eps: float = 0.01, method: str = "guided") -> np.ndarray:
+    """Smooth delta inside mask using normalized filtering."""
     if method == "none":
         return delta * mask01
 
@@ -230,16 +187,14 @@ def masked_edge_aware_smooth(delta: np.ndarray, mask01: np.ndarray, guide: np.nd
         num = cv2.ximgproc.guidedFilter(guide=guide, src=num_in, radius=radius, eps=eps, dDepth=-1)
         den = cv2.ximgproc.guidedFilter(guide=guide, src=den_in, radius=radius, eps=eps, dDepth=-1)
     else:
-        # fallback
         num = cv2.bilateralFilter(num_in, d=0, sigmaColor=eps * 255.0, sigmaSpace=radius)
         den = cv2.bilateralFilter(den_in, d=0, sigmaColor=eps * 255.0, sigmaSpace=radius)
 
-    out = num / (den + 1e-6)
-    return out * m
+    return (num / (den + 1e-6)) * m
 
 
 def multiscale_normalized_smooth(delta: np.ndarray, mask01: np.ndarray, down: int = 1, sigma: float = 2.0) -> np.ndarray:
-    """Multiscale normalized smoothing inside mask. Good for murals (large region consistency)."""
+    """Multiscale normalized smoothing inside mask."""
     if down <= 0:
         return delta * mask01
 
@@ -258,55 +213,38 @@ def multiscale_normalized_smooth(delta: np.ndarray, mask01: np.ndarray, down: in
         num = cv2.pyrUp(num)
         den = cv2.pyrUp(den)
 
-    H, W = delta.shape[:2]
-    num = num[:H, :W]
-    den = den[:H, :W]
-
-    out = num / (den + 1e-6)
-    return out * m
+    h, w = delta.shape[:2]
+    num = num[:h, :w]
+    den = den[:h, :w]
+    return (num / (den + 1e-6)) * m
 
 
-# ---------------------------
-# Main
-# ---------------------------
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--img_path', type=str, required=True)
-    parser.add_argument('--mask_path', type=str, required=True)
-    parser.add_argument('--output_dir', type=str, default='results_priors_lut_mural_opt')
-
-    parser.add_argument('--n_colors', type=int, default=64)
-    parser.add_argument('--kmeans_samples', type=int, default=60000)
-    parser.add_argument('--inpaint_radius', type=int, default=3)
-
-    # LUT
-    parser.add_argument('--lut_npz', type=str, default='pigment_lut33.npz')
-    parser.add_argument('--lut_order', type=str, default='rgb', choices=['rgb', 'bgr'])
-    parser.add_argument('--use_lut', type=str, default='lab', choices=['lab', 'rgb'])
-
-    # Luminance
-    parser.add_argument('--keep_luminance', dest='keep_luminance', action='store_true')
-    parser.add_argument('--no_keep_luminance', dest='keep_luminance', action='store_false')
+    parser.add_argument("--img_path", type=str, required=True)
+    parser.add_argument("--mask_path", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="results_priors_lut_mural_opt")
+    parser.add_argument("--n_colors", type=int, default=64)
+    parser.add_argument("--kmeans_samples", type=int, default=60000)
+    parser.add_argument("--inpaint_radius", type=int, default=3)
+    parser.add_argument("--lut_npz", type=str, default="pigment_lut33.npz")
+    parser.add_argument("--lut_order", type=str, default="rgb", choices=["rgb", "bgr"])
+    parser.add_argument("--use_lut", type=str, default="lab", choices=["lab", "rgb"])
+    parser.add_argument("--keep_luminance", dest="keep_luminance", action="store_true")
+    parser.add_argument("--no_keep_luminance", dest="keep_luminance", action="store_false")
     parser.set_defaults(keep_luminance=True)
-
-    # Soft assignment
-    parser.add_argument('--soft_sigma', type=float, default=25.0)
-    parser.add_argument('--soft_topk', type=int, default=6)
-
-    # Region smoothing
-    parser.add_argument('--delta_smooth', type=str, default='guided', choices=['none', 'guided', 'bilateral'])
-    parser.add_argument('--gf_radius', type=int, default=16)
-    parser.add_argument('--gf_eps', type=float, default=0.01)
-    parser.add_argument('--ms_down', type=int, default=1)
-    parser.add_argument('--ms_sigma', type=float, default=2.0)
-
-    # Speed
-    parser.add_argument('--chunk', type=int, default=120000)
-
+    parser.add_argument("--soft_sigma", type=float, default=25.0)
+    parser.add_argument("--soft_topk", type=int, default=6)
+    parser.add_argument("--delta_smooth", type=str, default="guided", choices=["none", "guided", "bilateral"])
+    parser.add_argument("--gf_radius", type=int, default=16)
+    parser.add_argument("--gf_eps", type=float, default=0.01)
+    parser.add_argument("--ms_down", type=int, default=1)
+    parser.add_argument("--ms_sigma", type=float, default=2.0)
+    parser.add_argument("--chunk", type=int, default=120000)
     args = parser.parse_args()
+
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 1) Load
     print(f"Loading image: {args.img_path}")
     img_bgr = cv2.imread(args.img_path)
     if img_bgr is None:
@@ -317,11 +255,10 @@ def main():
         raise FileNotFoundError(f"Cannot read mask: {args.mask_path}")
     _, mask_u8 = cv2.threshold(mask_u8, 127, 255, cv2.THRESH_BINARY)
 
-    H, W = mask_u8.shape[:2]
+    h, w = mask_u8.shape[:2]
     hole_mask01 = (mask_u8 == 255).astype(np.float32)
 
-    # 2) Inpaint structure
-    print("Step 1: Structure Inpainting (Telea)...")
+    print("Step 1: Structure inpainting (Telea)...")
     inpainted_bgr = cv2.inpaint(img_bgr, mask_u8, args.inpaint_radius, cv2.INPAINT_TELEA)
     cv2.imwrite(os.path.join(args.output_dir, "01_structure.png"), inpainted_bgr)
 
@@ -329,18 +266,15 @@ def main():
     inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
     inpainted_lab = rgb_to_lab(inpainted_rgb).astype(np.float32)
 
-    # 3) Palette from outside mask
-    print("Step 2: Analyzing Context Palette (KMeans)...")
+    print("Step 2: Analyzing context palette (KMeans)...")
     faded_palette_rgb = kmeans_palette(img_rgb, mask_u8, args.n_colors, sample_max=args.kmeans_samples)
 
-    # 4) Restore palette via LUT + palette confidence
-    print(f"Step 3: Restoring Palette via LUT ({args.lut_npz})...")
+    print(f"Step 3: Restoring palette via LUT ({args.lut_npz})...")
     grid, lut_lab, lut_rgb, lut_conf_default, _ = load_lut_npz(args.lut_npz)
-
     palette_conf = lut_trilinear(faded_palette_rgb, grid, lut_conf_default, lut_order=args.lut_order)
     palette_conf = np.clip(palette_conf.astype(np.float32).reshape(-1), 0.0, 1.0)
 
-    if args.use_lut == 'lab':
+    if args.use_lut == "lab":
         restored_palette_lab = lut_trilinear(faded_palette_rgb, grid, lut_lab, lut_order=args.lut_order).astype(np.float32)
         if restored_palette_lab.shape[-1] != 3:
             raise ValueError(f"lut_lab interpolation output shape unexpected: {restored_palette_lab.shape}")
@@ -349,19 +283,16 @@ def main():
         restored_palette_rgb = np.clip(restored_palette_rgb, 0, 255).astype(np.uint8)
         restored_palette_lab = rgb_to_lab(restored_palette_rgb).astype(np.float32)
 
-    # 5) Recolor hole (soft target + delta smoothing)
-    print("Step 4: Mural-friendly recolor (soft palette + delta smoothing)...")
+    print("Step 4: Recoloring masked region...")
     hole_yx = np.where(mask_u8 == 255)
-
     if hole_yx[0].size == 0:
-        print("[Info] Empty hole region (mask has no 255).")
+        print("[Info] Empty hole region; saving the inpainted image directly.")
         color_prior_map = inpainted_rgb
-        hole_conf_map = np.ones((H, W), dtype=np.float32)
+        hole_conf_map = np.ones((h, w), dtype=np.float32)
     else:
         hole_rgb = inpainted_rgb[hole_yx].astype(np.float32)
         current_lab = inpainted_lab[hole_yx].astype(np.float32)
 
-        # soft assignment target
         target_lab, hole_conf = soft_palette_target_lab(
             pixels_rgb=hole_rgb,
             palette_rgb=faded_palette_rgb,
@@ -369,52 +300,42 @@ def main():
             palette_conf=palette_conf,
             sigma=args.soft_sigma,
             topk=args.soft_topk,
-            chunk=args.chunk
+            chunk=args.chunk,
         )
 
-        # keep luminance
         if args.keep_luminance:
             target_lab[:, 0] = current_lab[:, 0]
 
-        # build delta field inside hole
-        delta_a = np.zeros((H, W), dtype=np.float32)
-        delta_b = np.zeros((H, W), dtype=np.float32)
+        delta_a = np.zeros((h, w), dtype=np.float32)
+        delta_b = np.zeros((h, w), dtype=np.float32)
         delta_a[hole_yx] = target_lab[:, 1] - current_lab[:, 1]
         delta_b[hole_yx] = target_lab[:, 2] - current_lab[:, 2]
 
-        # guide = normalized L for edge guidance
         L = inpainted_lab[..., 0].astype(np.float32)
         guide = (L / (L.max() + 1e-6)).astype(np.float32)
 
-        # multiscale pre-smooth
         if args.ms_down > 0:
             delta_a = multiscale_normalized_smooth(delta_a, hole_mask01, down=args.ms_down, sigma=args.ms_sigma)
             delta_b = multiscale_normalized_smooth(delta_b, hole_mask01, down=args.ms_down, sigma=args.ms_sigma)
 
-        # edge-aware smooth inside mask
         delta_a_s = masked_edge_aware_smooth(delta_a, hole_mask01, guide, radius=args.gf_radius, eps=args.gf_eps, method=args.delta_smooth)
         delta_b_s = masked_edge_aware_smooth(delta_b, hole_mask01, guide, radius=args.gf_radius, eps=args.gf_eps, method=args.delta_smooth)
 
-        # apply delta to inpainted lab inside hole
         out_lab = inpainted_lab.copy()
         out_lab[..., 1] = out_lab[..., 1] + delta_a_s
         out_lab[..., 2] = out_lab[..., 2] + delta_b_s
 
-        out_rgb = lab_to_rgb(out_lab.reshape(-1, 3)).reshape(H, W, 3)
+        out_rgb = lab_to_rgb(out_lab.reshape(-1, 3)).reshape(h, w, 3)
         if out_rgb.dtype != np.uint8:
             out_rgb = np.clip(out_rgb, 0, 255).astype(np.uint8)
 
         color_prior_map = out_rgb
-
-        # hole confidence map (from soft assignment)
-        hole_conf_map = np.ones((H, W), dtype=np.float32)
+        hole_conf_map = np.ones((h, w), dtype=np.float32)
         hole_conf_map[hole_yx] = np.clip(hole_conf, 0.0, 1.0)
 
-    # 6) Confidence maps (spatial * palette_conf)
     spatial_conf = get_spatial_confidence(mask_u8)
     final_conf = np.clip(spatial_conf * hole_conf_map, 0.0, 1.0)
 
-    # 7) Save outputs
     out_prior = os.path.join(args.output_dir, "color_prior_lut_mural_opt.png")
     cv2.imwrite(out_prior, cv2.cvtColor(color_prior_map, cv2.COLOR_RGB2BGR))
 
@@ -423,7 +344,7 @@ def main():
     cv2.imwrite(os.path.join(args.output_dir, "confidence_map.png"), conf_vis)
     cv2.imwrite(os.path.join(args.output_dir, "confidence_heatmap.png"), conf_heat)
 
-    print("✅ Finished!")
+    print("Finished LUT prior generation.")
     print(f"-> Prior: {out_prior}")
     print(f"-> Conf : {os.path.join(args.output_dir, 'confidence_map.png')}")
 
