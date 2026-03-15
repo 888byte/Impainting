@@ -393,57 +393,32 @@ class DenoisingModel(BaseModel):
         load_path_G = self.opt["path"]["pretrain_model_G"]
         load_path_Gs = self.opt["path"]["pretrain_model_Gs"]
         load_path_D = self.opt["path"]["pretrain_model_D"]
-        
         if load_path_G is not None:
             logger.info("Loading model for G [{:s}] ...".format(load_path_G))
+            self.load_network(load_path_G, self.model, self.opt["path"]["strict_load"])
+            self.load_network(load_path_Gs, self.models, self.opt["path"]["strict_load"])
+            self.load_network(load_path_D, self.dis, self.opt["path"]["strict_load"])
             
-            # 加载 checkpoint（可能包含 mu_denoiser 权重）
-            checkpoint = torch.load(load_path_G, map_location=self.device)
-            
-            # 分离主模型和 D_mu 的权重
-            model_state = {}
-            mu_denoiser_state = {}
-            
-            for k, v in checkpoint.items():
-                if k.startswith('mu_denoiser.'):
-                    mu_denoiser_state[k[len('mu_denoiser.'):]] = v
-                elif k.startswith('module.mu_denoiser.'):
-                    mu_denoiser_state[k[len('module.mu_denoiser.'):]] = v
-                elif k.startswith('module.'):
-                    model_state[k[7:]] = v
-                else:
-                    model_state[k] = v
-            
-            # 加载主模型
-            self._load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
-            
-            # 加载 Mu-Denoiser（如果有）
-            if self.use_mu_denoiser and self.mu_denoiser is not None and len(mu_denoiser_state) > 0:
+            # 加载 Mu-Denoiser 权重（从同一个 checkpoint 分离）
+            if self.use_mu_denoiser and self.mu_denoiser is not None:
                 try:
-                    self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
-                    logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
+                    checkpoint = torch.load(load_path_G, map_location=self.device)
+                    mu_state = {}
+                    for k, v in checkpoint.items():
+                        if k.startswith('mu_denoiser.'):
+                            mu_state[k[len('mu_denoiser.'):]] = v
+                        elif k.startswith('module.mu_denoiser.'):
+                            mu_state[k[len('module.mu_denoiser.'):]] = v
+                    if len(mu_state) > 0:
+                        self.mu_denoiser.load_state_dict(mu_state, strict=False)
+                        logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_state)} keys)")
+                    else:
+                        logger.warning("[Model] Checkpoint 中未找到 Mu-Denoiser 权重")
                 except Exception as e:
                     logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
-            elif self.use_mu_denoiser and len(mu_denoiser_state) == 0:
-                logger.warning("[Model] Checkpoint 中未找到 Mu-Denoiser 权重")
-        
-        # 加载 structure model
-        if load_path_Gs is not None:
-            logger.info("Loading model for Gs [{:s}] ...".format(load_path_Gs))
-            self.load_network(load_path_Gs, self.models, self.opt["path"]["strict_load"])
-        
-        # 加载 discriminator
-        if load_path_D is not None:
-            logger.info("Loading model for D [{:s}] ...".format(load_path_D))
-            self.load_network(load_path_D, self.dis, self.opt["path"]["strict_load"])
-
-    def _load_network_from_state(self, state_dict, network, strict=True):
-        """从 state_dict 加载网络"""
-        if isinstance(network, (DataParallel, DistributedDataParallel)):
-            network = network.module
-        network.load_state_dict(state_dict, strict=strict)
 
     def save(self, iter_label):
         self.save_network(self.model, "G", iter_label)
         self.save_network(self.ema.ema_model, "EMA", 'lastest')
         
+
