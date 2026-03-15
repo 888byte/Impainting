@@ -1,4 +1,5 @@
-"""create dataset and dataloader"""
+"""Dataset and dataloader factories for official-compatible inference."""
+
 import logging
 
 import torch
@@ -6,6 +7,7 @@ import torch.utils.data
 
 
 def create_dataloader(dataset, dataset_opt, opt=None, sampler=None):
+    """Create a dataloader for train or test phases."""
     phase = dataset_opt["phase"]
     if phase == "train":
         if opt["dist"]:
@@ -27,38 +29,39 @@ def create_dataloader(dataset, dataset_opt, opt=None, sampler=None):
             drop_last=True,
             pin_memory=False,
         )
-    else:
-        return torch.utils.data.DataLoader(
-            dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=(phase=="val")
-        )
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=(phase == "val"),
+    )
 
 
 def create_dataset(dataset_opt):
+    """Instantiate one dataset by ``mode``."""
     mode = dataset_opt["mode"]
-    if mode == "LQ":  # Predictor
-        from data.LQ_dataset import LQDataset as D
-        dataset = D(dataset_opt)
-    elif mode == "LQGT":  # SFTMD
-        from data.LQGT_dataset import LQGTDataset as D
-        dataset = D(dataset_opt)
-    elif mode == "GT":  # Corrector
-        from data.GT_dataset import GTDataset as D
-        dataset = D(dataset_opt)
-    elif mode == 'SteLQGT':
-        from data.StereoLQGT_dataset import StereoLQGTDataset as D
-        dataset = D(dataset_opt)
-    elif mode == 'SteLQ':
-        from data.StereoLQ_dataset import StereoLQDataset as D
-        dataset = D(dataset_opt)
-    elif mode == 'BokehLQGT':
-        from data.BokehLQGT_dataset import BokehLQGTDataset as D
-        dataset = D(dataset_opt)
-    elif mode == 'BokehLQ':
-        from data.BokehLQ_dataset import BokehLQDataset as D
-        dataset = D(dataset_opt)
+    if mode == "LQ":
+        from data.LQ_dataset import LQDataset as dataset_cls
+    elif mode == "LQGT":
+        from data.LQGT_dataset import LQGTDataset as dataset_cls
+    elif mode == "GT":
+        from data.GT_dataset import GTDataset as dataset_cls
+    elif mode == "SteLQGT":
+        from data.StereoLQGT_dataset import StereoLQGTDataset as dataset_cls
+    elif mode == "SteLQ":
+        from data.StereoLQ_dataset import StereoLQDataset as dataset_cls
+    elif mode == "BokehLQGT":
+        from data.BokehLQGT_dataset import BokehLQGTDataset as dataset_cls
+    elif mode == "BokehLQ":
+        from data.BokehLQ_dataset import BokehLQDataset as dataset_cls
+    elif mode == "mural_inference":
+        from data.mural_inference_dataset import MuralInferenceDataset as dataset_cls
     else:
-        raise NotImplementedError("Dataset [{:s}] is not recognized.".format(mode))
+        raise NotImplementedError(f"Dataset [{mode}] is not recognized.")
 
+    dataset = dataset_cls(dataset_opt)
     logger = logging.getLogger("base")
     logger.info(
         "Dataset [{:s} - {:s}] is created.".format(
