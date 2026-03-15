@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import warnings
 
@@ -235,6 +235,21 @@ def test_single_rgb_outputs_physics_diagnostics_when_weights_exist(scratch_dir):
         retrieval_k=1,
         retrieval_temp=0.1,
         num_samples=1,
+        kalman_refine=True,
     )
     assert out['spec_color_agreement'] is not None
     assert out['damage_score'] is not None
+    assert out['rgb'] is not None
+    assert out['lab'] is not None
+    assert out['conf'] is not None
+    assert out['std'] is not None
+    assert out['cdiff'] is not None
+    assert 'cret' in out
+    assert 'pred_rgb_original' not in out
+    assert 'pred_lab_original' not in out
+    assert 'confidence_diffusion' not in out
+    assert 'diffusion_std_norm_meanL2' not in out
+    assert 'confidence_retrieval' not in out
+    assert 'input_rgb_current' not in out
+    assert 'num_samples_used' not in out
+    assert 'kalman_refined' not in out

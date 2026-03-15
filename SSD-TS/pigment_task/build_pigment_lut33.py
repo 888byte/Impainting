@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """pigment_lut_build.py
 
 python  pigment_task/build_pigment_lut33.py 
@@ -17,15 +17,12 @@ IMPORTANT NOTES / PITFALLS
    If your apply uses lut[B, G, R] (common in some .cube readers), colors will be
    severely wrong (channel/axis swap).
 
-2) `confidence_retrieval` can be null
-   `infer_pigment` may output "confidence_retrieval": null.
-   The old code did `float(None)` and crashed, leaving LUT holes.
-   This version treats null as "not available" and does NOT penalize confidence.
+2) `infer.py` already returns the LUT-facing fields we need
+   This script now reads `rgb/lab/conf/std/cdiff/cret` directly instead of
+   recomputing confidence from legacy fields.
 
-3) Confidence fusion is intentionally conservative but still dominated by color
-   We keep `confidence_diffusion` as the primary term.
-   The diffusion uncertainty (std_norm_meanL2) only softly reduces confidence.
-   Retrieval (if present) has a small influence.
+3) Missing optional diagnostics are tolerated
+   `cret` may still be missing for some condition paths. In that case we store NaN.
 
 4) Performance / stability
    - Spawning a Python process per grid point is inherently expensive.
@@ -45,7 +42,6 @@ and a .npy "done" marker for resume.
 
 import os
 import json
-import math
 import re
 import subprocess
 import time
@@ -81,14 +77,8 @@ VERBOSE_CMD = True  # printing every command is extremely slow
 # Use current env python (recommended). If you insist, change to "python".
 PYTHON = "python"
 
-# Confidence fusion
-# c = c_diff * (SOFT_MIN + (1-SOFT_MIN)*exp(-BETA*s)) * (RET_BASE + (1-RET_BASE)*c_ret)
-# - c_diff dominates
-# - s (diffusion_std_norm_meanL2) softly reduces confidence
-# - retrieval is optional and has small effect
-BETA = 4.0      # smaller than 8.0 => std penalizes less
-SOFT_MIN = 0.35 # even large std won't drive confidence to ~0
-RET_BASE = 0.85 # retrieval effect is mild
+# `infer.py --rgb` already returns the fused confidence (`conf`) plus the
+# component diagnostics that should be persisted into the LUT.
 
 # =========================
 # Grid
@@ -227,34 +217,6 @@ def run_infer(rgb, retries=RETRIES):
     raise last_err if last_err else RuntimeError("infer failed with unknown error")
 
 
-def fuse_conf(obj):
-    """Fuse confidence signals.
-
-    We keep confidence_diffusion as the primary term (dominates).
-    Uncertainty (std_norm_meanL2) reduces confidence softly.
-    Retrieval confidence, if present, has small influence.
-
-    Returns: (c_final, c_diff, std_norm, c_ret_or_nan)
-    """
-    c_diff = float(obj.get("confidence_diffusion") or 0.0)
-    s = float(obj.get("diffusion_std_norm_meanL2") or 0.0)
-
-    c_ret_raw = obj.get("confidence_retrieval", None)
-    if c_ret_raw is None:
-        c_ret = float("nan")
-        ret_factor = 1.0
-    else:
-        c_ret = float(c_ret_raw)
-        c_ret = max(0.0, min(1.0, c_ret))
-        ret_factor = RET_BASE + (1.0 - RET_BASE) * c_ret
-
-    # soft penalty from uncertainty (keeps c dominated by c_diff)
-    pen = math.exp(-BETA * max(0.0, s))
-    pen = SOFT_MIN + (1.0 - SOFT_MIN) * pen
-
-    c = c_diff * pen * ret_factor
-    c = max(0.0, min(1.0, c))
-    return c, c_diff, s, c_ret
 
 
 def _atomic_save_npz(path: str, **kwargs):
@@ -283,9 +245,6 @@ def save_all():
             cond_method=COND_METHOD,
             num_samples=NUM_SAMPLES,
             N=N,
-            beta=BETA,
-            soft_min=SOFT_MIN,
-            ret_base=RET_BASE,
             max_workers=MAX_WORKERS,
             max_inflight=MAX_INFLIGHT,
             save_every=SAVE_EVERY,
@@ -302,15 +261,15 @@ def save_all():
 def task(i, j, k, r, g, b):
     obj = run_infer((r, g, b))
 
-    # infer_pigment example output:
-    #  pred_rgb_original: [71, 217, 240]  (already in 0..255 ints)
-    #  pred_lab_original: [L,a,b] floats
-    rgb_pred = obj["pred_rgb_original"]
-    lab_pred = obj["pred_lab_original"]
+    rgb_pred = obj["rgb"]
+    lab_pred = obj["lab"]
+    c = float(obj.get("conf") or 0.0)
+    c_diff = float(obj.get("cdiff") or 0.0)
+    s = float(obj.get("std") or 0.0)
 
-    c, c_diff, s, c_ret = fuse_conf(obj)
+    c_ret_raw = obj.get("cret", None)
+    c_ret = float("nan") if c_ret_raw is None else float(c_ret_raw)
 
-    # Ensure types
     rgb_u8 = np.clip(np.array(rgb_pred, dtype=np.float32), 0.0, 255.0).round().astype(
         np.uint8
     )

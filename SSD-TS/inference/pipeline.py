@@ -31,6 +31,10 @@ from training.diffusion import DiffusionConfig, DiffusionSchedule, p_sample_loop
 from utils.color_utils import LabNorm, delta_e2000, lab_to_rgb, rgb_to_lab
 from utils.config_utils import normalize_config
 
+CONF_BETA = 4.0
+CONF_SOFT_MIN = 0.35
+CONF_RET_BASE = 0.85
+
 
 def _rts_smoother_random_walk(y: np.ndarray, r: np.ndarray, q: np.ndarray) -> np.ndarray:
     y = np.asarray(y, dtype=np.float64)
@@ -58,6 +62,45 @@ def _rts_smoother_random_walk(y: np.ndarray, r: np.ndarray, q: np.ndarray) -> np
         x_s[t] = x_f[t] + c * (x_s[t + 1] - x_f[t])
         p_s[t] = p_f[t] + c * (p_s[t + 1] - (p_f[t] + q))
     return x_s
+
+
+def _scalar_from_info(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return None
+        return float(value.detach().view(-1)[0].item())
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return None
+        return float(value.reshape(-1)[0])
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_retrieval_confidence(info: Dict[str, object]) -> Optional[float]:
+    if isinstance(info.get('retrieval', None), dict):
+        return _scalar_from_info(info['retrieval'].get('confidence', None))
+    return _scalar_from_info(info.get('confidence', None))
+
+
+def _fuse_confidence(c_diff: Optional[float], std_norm: Optional[float], c_ret: Optional[float]) -> Optional[float]:
+    if c_diff is None:
+        return None
+    s = max(0.0, float(std_norm or 0.0))
+    pen = np.exp(-CONF_BETA * s)
+    pen = CONF_SOFT_MIN + (1.0 - CONF_SOFT_MIN) * pen
+    if c_ret is None:
+        ret_factor = 1.0
+    else:
+        c_ret = max(0.0, min(1.0, float(c_ret)))
+        ret_factor = CONF_RET_BASE + (1.0 - CONF_RET_BASE) * c_ret
+    return float(max(0.0, min(1.0, float(c_diff) * pen * ret_factor)))
+
+
 
 
 def _build_damage_features(bundle: Dict[str, object], x_curr: torch.Tensor, cond: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -314,13 +357,17 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
         mask = batch['mask'].to(device)
         x_curr = gather_last_observed(x0, mask)
         cond, info = _resolve_condition(bundle, batch, x_curr, device, cond_method, library_npz, retrieval_k, retrieval_temp)
-        if int(num_samples) <= 1:
+        effective_num_samples = int(num_samples)
+        if kalman_refine and effective_num_samples <= 1:
+            effective_num_samples = 8
+        sample_info = {'conf_diffusion': None, 'diffusion_std_norm_meanL2': None, 'num_samples': effective_num_samples}
+        if effective_num_samples <= 1:
             x_obs = x0 * mask
             x_sample = p_sample_loop(bundle['denoiser'], bundle['schedule'], x_obs=x_obs, obs_mask=mask, cond=cond)
             pred0 = lab_norm.denormalize(x_sample[:, 0, :].detach().cpu().numpy())
             gt0 = lab_norm.denormalize(x0[:, 0, :].detach().cpu().numpy())
         else:
-            pred0, std0, sample_info = sample_with_confidence(bundle['denoiser'], bundle['schedule'], x0, mask, cond, num_samples=int(num_samples))
+            pred0, std0, sample_info = sample_with_confidence(bundle['denoiser'], bundle['schedule'], x0, mask, cond, num_samples=effective_num_samples)
             gt0 = lab_norm.denormalize(x0[:, 0, :].detach().cpu().numpy())
             if kalman_refine:
                 x0_den = lab_norm.denormalize(x0.detach().cpu().numpy())
@@ -337,7 +384,19 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
                     r[unobs] = 1e6
                     refined.append(_rts_smoother_random_walk(y, r, q)[0])
                 pred0 = np.stack(refined, axis=0).astype(np.float32)
-            conf_list.extend([sample_info['conf_diffusion']] * pred0.shape[0])
+            diff_conf = _scalar_from_info(sample_info.get('conf_diffusion', None))
+            diff_std = _scalar_from_info(sample_info.get('diffusion_std_norm_meanL2', None))
+            retrieval_conf = _extract_retrieval_confidence(info)
+            fused_conf = _fuse_confidence(diff_conf, diff_std, retrieval_conf)
+            if diff_conf is not None:
+                diag_lists.setdefault('cdiff', []).extend([diff_conf] * pred0.shape[0])
+                conf_list.extend([diff_conf] * pred0.shape[0])
+            if diff_std is not None:
+                diag_lists.setdefault('std', []).extend([diff_std] * pred0.shape[0])
+            if retrieval_conf is not None:
+                diag_lists.setdefault('cret', []).extend([retrieval_conf] * pred0.shape[0])
+            if fused_conf is not None:
+                diag_lists.setdefault('conf', []).extend([fused_conf] * pred0.shape[0])
         for p, g in zip(pred0, gt0):
             de_list.append(float(delta_e2000(p, g)))
         diagnostics = _physics_diagnostics(bundle, x_curr, cond, pred0, info)
@@ -362,7 +421,19 @@ def evaluate_test(bundle: Dict[str, object], test_npz: str, device: torch.device
     return out
 
 
-def _single_rgb(bundle: Dict[str, object], rgb: np.ndarray, device: torch.device, cond_method: str, library_npz: Optional[str], retrieval_k: int, retrieval_temp: float, num_samples: int):
+def _single_rgb(
+    bundle: Dict[str, object],
+    rgb: np.ndarray,
+    device: torch.device,
+    cond_method: str,
+    library_npz: Optional[str],
+    retrieval_k: int,
+    retrieval_temp: float,
+    num_samples: int,
+    kalman_refine: bool = False,
+    kalman_meas_std_lab: float = 1.0,
+    kalman_process_std_lab: float = 2.0,
+):
     lab = rgb_to_lab(rgb[None, :])[0]
     lab_norm = LabNorm()
     x_curr = lab_norm.normalize(lab[None, :]).astype(np.float32)
@@ -373,36 +444,52 @@ def _single_rgb(bundle: Dict[str, object], rgb: np.ndarray, device: torch.device
     mask_t = torch.from_numpy(mask).to(device)
     x_curr_t = torch.from_numpy(x_curr).to(device)
     cond, info = _resolve_condition(bundle, None, x_curr_t, device, cond_method, library_npz, retrieval_k, retrieval_temp)
-    if int(num_samples) <= 1:
-        x_obs = x0_t * mask_t
-        x_s = p_sample_loop(bundle['denoiser'], bundle['schedule'], x_obs=x_obs, obs_mask=mask_t, cond=cond)
-        pred_lab0 = lab_norm.denormalize(x_s[:, 0, :].detach().cpu().numpy())[0]
-        std_lab0 = None
-        sample_info = {'num_samples': 1, 'conf_diffusion': None, 'diffusion_std_norm_meanL2': None}
-    else:
-        pred_lab0_b, std_lab0_b, sample_info = sample_with_confidence(bundle['denoiser'], bundle['schedule'], x0_t, mask_t, cond, num_samples=int(num_samples))
-        pred_lab0 = pred_lab0_b[0]
-        std_lab0 = std_lab0_b[0]
+
+    effective_num_samples = max(int(num_samples), 8)
+    pred_lab0_b, std_lab0_b, sample_info = sample_with_confidence(
+        bundle['denoiser'],
+        bundle['schedule'],
+        x0_t,
+        mask_t,
+        cond,
+        num_samples=effective_num_samples,
+    )
+    pred_lab0 = pred_lab0_b[0]
+    std_lab0 = std_lab0_b[0]
+
+    if kalman_refine:
+        y = np.stack([pred_lab0, lab.astype(np.float32)], axis=0)
+        r = np.ones((2, 3), dtype=np.float64) * (float(kalman_meas_std_lab) ** 2)
+        r[0] = np.maximum(std_lab0.astype(np.float64) ** 2, 1e-6)
+        q = np.asarray([float(kalman_process_std_lab) ** 2] * 3, dtype=np.float64)
+        pred_lab0 = _rts_smoother_random_walk(y, r, q)[0].astype(np.float32)
+
     pred_rgb0 = lab_to_rgb(pred_lab0[None, :])[0]
-    confidence = info.get('confidence', None)
-    if isinstance(confidence, torch.Tensor):
-        confidence = float(confidence.view(-1)[0].item())
+    bridge_conf = _scalar_from_info(info.get('confidence', None))
+    retrieval_conf = _extract_retrieval_confidence(info)
+    diff_conf = _scalar_from_info(sample_info.get('conf_diffusion', None))
+    diff_std = _scalar_from_info(sample_info.get('diffusion_std_norm_meanL2', None))
+    fused_conf = _fuse_confidence(diff_conf, diff_std, retrieval_conf)
+
     diagnostics = _physics_diagnostics(bundle, x_curr_t, cond, pred_lab0[None, :], info)
-    posterior_entropy = diagnostics.get('posterior_entropy', None)
-    spec_color_agreement = diagnostics.get('spec_color_agreement', None)
-    damage_score = diagnostics.get('damage_score', None)
-    return {
-        'input_rgb_current': rgb.tolist(),
-        'pred_lab_original': pred_lab0.tolist(),
-        'pred_rgb_original': pred_rgb0.tolist(),
-        'pred_lab_std': std_lab0.tolist() if std_lab0 is not None else None,
-        'confidence_diffusion': sample_info.get('conf_diffusion', None),
-        'diffusion_std_norm_meanL2': sample_info.get('diffusion_std_norm_meanL2', None),
-        'confidence_bridge': confidence,
-        'posterior_entropy': float(np.asarray(posterior_entropy).reshape(-1)[0]) if posterior_entropy is not None else None,
-        'spec_color_agreement': float(np.asarray(spec_color_agreement).reshape(-1)[0]) if spec_color_agreement is not None else None,
-        'damage_score': float(np.asarray(damage_score).reshape(-1)[0]) if damage_score is not None else None,
+    out = {
+        'rgb': pred_rgb0.tolist(),
+        'lab': pred_lab0.tolist(),
+        'conf': fused_conf,
+        'std': diff_std,
+        'cdiff': diff_conf,
+        'cret': retrieval_conf if retrieval_conf is not None else bridge_conf,
     }
+    for key in ('posterior_entropy', 'confidence_bridge', 'spec_color_agreement', 'damage_score'):
+        if key == 'confidence_bridge':
+            value = bridge_conf
+        else:
+            value = diagnostics.get(key, None)
+            if value is not None:
+                value = float(np.asarray(value).reshape(-1)[0])
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def main() -> None:
@@ -458,6 +545,9 @@ def main() -> None:
             retrieval_k=int(args.retrieval_k),
             retrieval_temp=float(args.retrieval_temp),
             num_samples=int(args.num_samples),
+            kalman_refine=bool(args.kalman_refine or args.kalman_rts),
+            kalman_meas_std_lab=float(args.kalman_meas_std_lab),
+            kalman_process_std_lab=float(args.kalman_process_std_lab),
         )
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
