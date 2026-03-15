@@ -22,6 +22,7 @@ brushnet:
   nf: 64               # 基础特征通道数
   depth: 4             # 下采样深度
   lite: false          # 是否使用轻量版
+  conditioning_scale: 0.5  # BrushNet特征注入强度 (0-1)，默认0.5，可调节
 
 #### Self-Supervised Mu-Denoiser配置 (D_mu)
 mu_denoiser:

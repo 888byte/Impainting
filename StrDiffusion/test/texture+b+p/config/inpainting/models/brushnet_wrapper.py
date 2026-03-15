@@ -186,6 +186,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_mask: Optional[torch.Tensor] = None,  # 重命名避免与reverse_sde的mask冲突
         color_prior: Optional[torch.Tensor] = None,
         confidence: Optional[torch.Tensor] = None,
+        conditioning_scale: float = 1.0,  # BrushNet特征注入强度
         **kwargs  # 接收其他参数（如reverse_sde传入的mask等）
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -263,18 +264,18 @@ class ConditionalUNetWithBrushNet(nn.Module):
             
             # 第一个ResBlock
             x = b1(x, t)
-            # 注入BrushNet特征
+            # 注入BrushNet特征（使用conditioning_scale控制强度）
             if brushnet_features is not None and bn_idx < len(brushnet_features):
-                x = x + brushnet_features[bn_idx]
+                x = x + brushnet_features[bn_idx] * conditioning_scale
                 bn_idx += 1
             h.append(x)
             
             # 第二个ResBlock + Attention
             x = b2(x, t)
             x = attn(x)
-            # 注入BrushNet特征
+            # 注入BrushNet特征（使用conditioning_scale控制强度）
             if brushnet_features is not None and bn_idx < len(brushnet_features):
-                x = x + brushnet_features[bn_idx]
+                x = x + brushnet_features[bn_idx] * conditioning_scale
                 bn_idx += 1
             h.append(x)
             
@@ -290,7 +291,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         
         # 注入BrushNet中间层特征
         if brushnet_mid is not None:
-            x = x + brushnet_mid
+            x = x + brushnet_mid * conditioning_scale
         
         # ============================================================
         # 主UNet上采样

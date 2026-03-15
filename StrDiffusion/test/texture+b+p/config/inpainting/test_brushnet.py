@@ -382,7 +382,7 @@ def main():
         # ============================================================
         # DEBUG: 设为 True 可禁用所有 BrushNet 条件，测试纯 SDE 反向
         # ============================================================
-        DEBUG_NO_BRUSHNET = True
+        DEBUG_NO_BRUSHNET = False  # 设为 True 可禁用 BrushNet 排查问题
         if DEBUG_NO_BRUSHNET:
             color_prior = None
             confidence = None
