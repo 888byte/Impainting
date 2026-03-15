@@ -48,7 +48,7 @@
   "bridge": {
     "enable": true,
     "mode": "posterior",
-    "use_gate": false,
+    "use_gate": true,
     "use_distill": true,
     "use_group_sampler": true,
     "prototype_bank": {
@@ -61,18 +61,18 @@
   "train": {
     "device": "cuda",
     "seed": 42,
-    "batch_size": 256,
-    "eval_batch_size": 256,
-    "epochs": 250,
+    "batch_size": 1024,
+    "eval_batch_size": 1024,
+    "epochs": 1000,
     "lr": 0.001,
     "weight_decay": 0.0,
     "grad_clip": 1.0,
     "log_every": 50,
     "eval_every": 1,
     "eval_num_batches": 2,
-    "save_every": 10,
+    "save_every": 20,
     "save_dir": "ckpt/lab_raman_xrd",
-    "early_stopping_patience": 20,
+    "early_stopping_patience": 50,
     "early_stopping_min_delta": 0.001
   },
   "color_aug": {

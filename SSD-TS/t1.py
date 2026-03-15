@@ -5,19 +5,23 @@
 
 示例：
 python t1.py \
-  --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
-  --cond_method pred \
+  --ckpt ckpt/lab_raman_xrd/best_model.pt \
+  --cond_method retrieval \
   --num_samples 30 \
   --palette hsv_fps \
   --n_test_colors 96 \
   --output_image batch_test_pred_96.png
 
 
-python t1.py --ckpt ckpt/pigment_lab_raman_xrd/best_model.pt \
+python t1.py --ckpt ckpt/lab_raman_xrd/best_model.pt \
   --cond_method pred --num_samples 30 \
   --palette hsv_fps --n_test_colors 144 --min_lab_dist 10 \
-  --output_image batch_test_144.png
+  --output_image batch_test_144_pred.png
 
+python t1.py --ckpt ckpt/lab_raman_xrd/best_model.pt \
+  --cond_method retrieval --num_samples 30 \
+  --palette hsv_fps --n_test_colors 144 --min_lab_dist 10 \
+  --output_image batch_test_144.png
 """
 import argparse
 import os
@@ -259,7 +263,11 @@ def batch_inference_with_per_sample_confidence(rgb_list, model_components, args,
     # 多次采样：每次对整个 batch 一起做
     print(f"Running diffusion for batch of {B} colors (samples={args.num_samples})...")
     samples = []
-    for _ in range(int(args.num_samples)):
+    for i in range(int(args.num_samples)):
+        if (i + 1) % 5 == 0 or i == 0:
+            print(f"  Sample {i+1}/{args.num_samples}... (approx {(i+1)/args.num_samples*100:.1f}%)")
+            import sys
+            sys.stdout.flush()
         x_s = p_sample_loop(denoiser, schedule, x_obs=x0_t * mask_t, obs_mask=mask_t, cond=cond)
         samples.append(x_s[:, 0, :].detach().cpu().numpy())  # (B,3) normalized
 
@@ -348,7 +356,11 @@ def main():
 
     # 加载模型
     print(f"Loading model from {args.ckpt}...")
+    import sys
+    sys.stdout.flush()
     model_components = _load_ckpt(args.ckpt, device)
+    print(f"✓ Model loaded successfully!")
+    sys.stdout.flush()
 
     lib_raman = None
     if args.cond_method == "retrieval":
@@ -358,6 +370,7 @@ def main():
             key = 'raman_emb' if 'raman_emb' in lib else 'embeddings'
             if key in lib:
                 lib_raman = torch.from_numpy(lib[key].astype(np.float32)).to(device)
+                print(f"✓ Library loaded successfully!")
             else:
                 print("Warning: Library key not found, fallback to pred mode.")
                 args.cond_method = "pred"
@@ -368,13 +381,21 @@ def main():
     lab_norm = LabNorm()
 
     # ✅ 生成更全面且不相近的测试色
+    print("Generating test colors...")
     names, rgb_inputs = build_test_palette(args)
-    print(f"[INFO] Testing colors: {len(rgb_inputs)} (palette={args.palette}, include_named={args.include_named})")
+    print(f"✓ Generated {len(rgb_inputs)} test colors (palette={args.palette}, include_named={args.include_named})")
 
     # 批量推理
+    print("Starting batch inference...")
+    import sys
+    sys.stdout.flush()
+    print(f"Estimated time: {len(rgb_inputs) * args.num_samples * 200 / 500:.0f} seconds (approx)")
+    sys.stdout.flush()
     restored_rgbs, confidences = batch_inference_with_per_sample_confidence(
         rgb_inputs, model_components, args, device, lib_raman, lab_norm
     )
+    print("✓ Batch inference completed!")
+    sys.stdout.flush()
 
     # 绘图
     plot_results(names, rgb_inputs, restored_rgbs, confidences, args.output_image)
