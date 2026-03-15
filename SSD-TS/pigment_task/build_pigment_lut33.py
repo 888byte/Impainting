@@ -103,6 +103,29 @@ def _atomic_save_npz(path: Path, **kwargs) -> None:
     os.replace(tmp, path)
 
 
+def _format_eta_minutes(minutes: Optional[float]) -> str:
+    if minutes is None or not np.isfinite(minutes):
+        return 'unknown'
+    total_minutes = max(0, int(round(float(minutes))))
+    hours, mins = divmod(total_minutes, 60)
+    if hours <= 0:
+        return f'{mins} min'
+    return f'{hours}h {mins:02d}m'
+
+
+def _estimate_eta_minutes(started: float, done_now: int, total: int) -> Optional[float]:
+    if done_now <= 0:
+        return None
+    elapsed_min = (time.time() - started) / 60.0
+    if elapsed_min <= 0:
+        return None
+    rate = done_now / elapsed_min
+    if rate <= 1e-8:
+        return None
+    remaining = max(0, total - done_now)
+    return remaining / rate
+
+
 def _build_infer_command(args: argparse.Namespace, rgb: tuple[float, float, float]) -> list[str]:
     repo_root = Path(__file__).resolve().parents[1]
     cmd = [
@@ -454,18 +477,22 @@ def run_batch_engine(args: argparse.Namespace, grid: np.ndarray, state: dict) ->
                 _write_results(chunk, result, state)
                 completed_this_run += len(chunk)
                 elapsed = (time.time() - started) / 60.0
+                total_done = int(state["done"].sum())
+                eta = _format_eta_minutes(_estimate_eta_minutes(started, total_done, total))
                 print(
-                    f'[BatchDone] size={len(chunk)} | total_done={int(state["done"].sum())}/{total} '
-                    f'| completed_this_run={completed_this_run} | failures={failures} | elapsed={elapsed:.1f} min'
+                    f'[BatchDone] size={len(chunk)} | total_done={total_done}/{total} '
+                    f'| completed_this_run={completed_this_run} | failures={failures} '
+                    f'| elapsed={elapsed:.1f} min | eta={eta}'
                 )
                 if completed_this_run > 0 and completed_this_run % log_every == 0:
                     print(
-                        f'[Progress] total_done={int(state["done"].sum())}/{total} '
-                        f'| completed_this_run={completed_this_run} | failures={failures} | elapsed={elapsed:.1f} min'
+                        f'[Progress] total_done={total_done}/{total} '
+                        f'| completed_this_run={completed_this_run} | failures={failures} '
+                        f'| elapsed={elapsed:.1f} min | eta={eta}'
                     )
                 if completed_this_run > 0 and completed_this_run % int(args.save_every) == 0:
                     save_all(args, grid, state)
-                    print(f'[Save] total_done={int(state["done"].sum())}/{total}')
+                    print(f'[Save] total_done={total_done}/{total} | eta={eta}')
             except Exception as exc:
                 retryable = _is_retryable_batch_error(exc)
                 if retryable and torch.cuda.is_available():
@@ -547,10 +574,12 @@ def run_subprocess_engine(args: argparse.Namespace, grid: np.ndarray, state: dic
                 done_futs, _ = wait(inflight.keys(), timeout=float(heartbeat_sec), return_when=FIRST_COMPLETED)
                 if not done_futs:
                     elapsed = (time.time() - started) / 60.0
+                    total_done = int(state["done"].sum())
+                    eta = _format_eta_minutes(_estimate_eta_minutes(started, total_done, total))
                     print(
-                        f'[Heartbeat] total_done={int(state["done"].sum())}/{total} '
+                        f'[Heartbeat] total_done={total_done}/{total} '
                         f'| completed_this_run={completed_this_run} | inflight={len(inflight)} '
-                        f'| failures={failures} | elapsed={elapsed:.1f} min'
+                        f'| failures={failures} | elapsed={elapsed:.1f} min | eta={eta}'
                     )
                     continue
 
@@ -568,10 +597,12 @@ def run_subprocess_engine(args: argparse.Namespace, grid: np.ndarray, state: dic
                         completed_this_run += 1
                         if completed_this_run == 1 or completed_this_run % log_every == 0:
                             elapsed = (time.time() - started) / 60.0
+                            total_done = int(state["done"].sum())
+                            eta = _format_eta_minutes(_estimate_eta_minutes(started, total_done, total))
                             print(
-                                f'[Progress] total_done={int(state["done"].sum())}/{total} '
+                                f'[Progress] total_done={total_done}/{total} '
                                 f'| completed_this_run={completed_this_run} | inflight={len(inflight)} '
-                                f'| failures={failures} | elapsed={elapsed:.1f} min'
+                                f'| failures={failures} | elapsed={elapsed:.1f} min | eta={eta}'
                             )
                     except Exception as exc:
                         failures += 1
@@ -580,9 +611,11 @@ def run_subprocess_engine(args: argparse.Namespace, grid: np.ndarray, state: dic
                     if completed_this_run > 0 and completed_this_run % int(args.save_every) == 0:
                         save_all(args, grid, state)
                         elapsed = (time.time() - started) / 60.0
+                        total_done = int(state["done"].sum())
+                        eta = _format_eta_minutes(_estimate_eta_minutes(started, total_done, total))
                         print(
-                            f'[Save] +{completed_this_run} this run | total_done={int(state["done"].sum())}/{total} '
-                            f'| failures={failures} | elapsed={elapsed:.1f} min'
+                            f'[Save] +{completed_this_run} this run | total_done={total_done}/{total} '
+                            f'| failures={failures} | elapsed={elapsed:.1f} min | eta={eta}'
                         )
 
                     while len(inflight) < int(args.max_inflight):
