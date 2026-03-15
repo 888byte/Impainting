@@ -64,3 +64,7 @@ SSD-TS/results/confidence_heatmap.png
 SSD-TS/results/confidence_map.png
 SSD-TS/results_mural_lut/mural_lut_full.png
 StrDiffusion+e00/train-3/texture/config/inpainting/log
+SSD-TS/results/old/01_structure.png
+SSD-TS/results/old/color_prior_lut_mural_opt.png
+SSD-TS/results/old/confidence_heatmap.png
+SSD-TS/results/old/confidence_map.png

@@ -3,7 +3,7 @@
 test_brushnet.py - 壁画颜色修复推理脚本（BrushNet + Mu-Denoiser 版）
 
 运行命令：
-python test/texture+b+p/config/inpainting/test_brushnet.py -opt test/texture+b+p/config/inpainting/options/test/ir-sde-brushnet.yml
+python test_brushnet.py -opt options/test/ir-sde-brushnet.yml
 
 功能：
 - 加载训练好的 BrushNet + Mu-Denoiser 模型
