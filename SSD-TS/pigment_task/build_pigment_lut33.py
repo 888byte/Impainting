@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--max_workers", type=int, default=40)
     ap.add_argument("--max_inflight", type=int, default=200)
     ap.add_argument("--save_every", type=int, default=300)
+    ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--heartbeat_sec", type=int, default=30)
     ap.add_argument("--retries", type=int, default=5)
     ap.add_argument("--timeout_sec", type=int, default=90)
     ap.add_argument("--python_exe", type=str, default="python")
@@ -219,6 +221,8 @@ def save_all(args: argparse.Namespace, grid: np.ndarray, state: dict) -> None:
             max_workers=int(args.max_workers),
             max_inflight=int(args.max_inflight),
             save_every=int(args.save_every),
+            log_every=int(args.log_every),
+            heartbeat_sec=int(args.heartbeat_sec),
             retries=int(args.retries),
             timeout_sec=int(args.timeout_sec),
         ),
@@ -264,6 +268,10 @@ def main() -> None:
 
     point_iter = pending_points(grid, state["done"])
     inflight: dict = {}
+    initial_submitted = 0
+    log_every = max(1, int(args.log_every))
+    heartbeat_sec = max(1, int(args.heartbeat_sec))
+    last_heartbeat = time.time()
 
     try:
         with ThreadPoolExecutor(max_workers=int(args.max_workers)) as executor:
@@ -274,9 +282,29 @@ def main() -> None:
                     break
                 fut = executor.submit(task, args, *pt)
                 inflight[fut] = pt
+                initial_submitted += 1
+
+            print(
+                f"[Launch] submitted initial={initial_submitted} | workers={int(args.max_workers)} "
+                f"| inflight_cap={int(args.max_inflight)} | save_every={int(args.save_every)} "
+                f"| log_every={log_every} | heartbeat={heartbeat_sec}s"
+            )
 
             while inflight:
-                done_futs, _ = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+                done_futs, _ = wait(
+                    inflight.keys(),
+                    timeout=float(heartbeat_sec),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futs:
+                    elapsed = (time.time() - started) / 60.0
+                    print(
+                        f"[Heartbeat] total_done={int(state['done'].sum())}/{total} "
+                        f"| completed_this_run={completed_this_run} | inflight={len(inflight)} "
+                        f"| failures={failures} | elapsed={elapsed:.1f} min"
+                    )
+                    last_heartbeat = time.time()
+                    continue
                 for fut in done_futs:
                     pt = inflight.pop(fut)
                     try:
@@ -289,6 +317,13 @@ def main() -> None:
                         state["lut_cret"][i, j, k] = cret
                         state["done"][i, j, k] = 1
                         completed_this_run += 1
+                        if completed_this_run == 1 or completed_this_run % log_every == 0:
+                            elapsed = (time.time() - started) / 60.0
+                            print(
+                                f"[Progress] total_done={int(state['done'].sum())}/{total} "
+                                f"| completed_this_run={completed_this_run} | inflight={len(inflight)} "
+                                f"| failures={failures} | elapsed={elapsed:.1f} min"
+                            )
                     except Exception as exc:
                         failures += 1
                         print(f"[Fail] idx={pt[:3]} rgb={pt[3:]} err={str(exc)[:200]}")
@@ -308,6 +343,14 @@ def main() -> None:
                             break
                         fut2 = executor.submit(task, args, *pt2)
                         inflight[fut2] = pt2
+                if time.time() - last_heartbeat >= heartbeat_sec:
+                    elapsed = (time.time() - started) / 60.0
+                    print(
+                        f"[Heartbeat] total_done={int(state['done'].sum())}/{total} "
+                        f"| completed_this_run={completed_this_run} | inflight={len(inflight)} "
+                        f"| failures={failures} | elapsed={elapsed:.1f} min"
+                    )
+                    last_heartbeat = time.time()
     finally:
         save_all(args, grid, state)
         elapsed = (time.time() - started) / 60.0

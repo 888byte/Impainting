@@ -147,6 +147,8 @@ python pigment_task/build_pigment_lut33.py \
   --device cuda \
   --max_workers 24 \
   --max_inflight 96 \
+  --log_every 50 \
+  --heartbeat_sec 30 \
   --timeout_sec 240 \
   --retries 8 \
   --save_every 500 \
@@ -167,6 +169,8 @@ python pigment_task/build_pigment_lut33.py \
   --device cuda \
   --max_workers 32 \
   --max_inflight 128 \
+  --log_every 50 \
+  --heartbeat_sec 30 \
   --timeout_sec 300 \
   --retries 8 \
   --save_every 500 \
@@ -187,6 +191,8 @@ python pigment_task/build_pigment_lut33.py \
   --device cuda \
   --max_workers 32 \
   --max_inflight 128 \
+  --log_every 50 \
+  --heartbeat_sec 30 \
   --timeout_sec 360 \
   --retries 8 \
   --save_every 800 \
@@ -262,6 +268,18 @@ python pigment_task/build_pigment_lut33.py \
 - 断点续存盘频率。
 - 生成时间长时，建议不要太大。
 - 常用值：`300`、`500`、`800`。
+
+`--log_every`
+
+- 每完成多少个网格点打印一次阶段进度。
+- 如果你想让控制台更频繁地反馈，可以改小，比如 `20` 或 `10`。
+- 如果你更想减少日志量，可以设成 `100` 或更大。
+
+`--heartbeat_sec`
+
+- 当一段时间内还没有任何网格点完成时，脚本会按这个间隔打印心跳。
+- 这个参数不影响质量，只影响控制台是否看起来“卡住”。
+- 推荐值：`15` 到 `30` 秒。
 
 ### 怎么调参数
 
