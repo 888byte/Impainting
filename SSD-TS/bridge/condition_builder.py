@@ -1,6 +1,8 @@
-﻿"""Unified bridge API for true, pred, retrieval, posterior, and posterior+retrieval conditions."""
+"""Unified bridge API for true, pred, retrieval, posterior, and posterior+retrieval conditions."""
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -74,9 +76,17 @@ def build_pred_condition(x_curr_norm_lab: torch.Tensor, conditioner, color_encod
     return build_cond_from_pred_embeds(conditioner, embeds_pred), embeds_pred
 
 
-def load_library_npz(path: str) -> Dict[str, np.ndarray]:
+@lru_cache(maxsize=8)
+def _load_library_npz_cached(path: str) -> Dict[str, np.ndarray]:
     lib = np.load(path, allow_pickle=True)
-    return {k: lib[k] for k in lib.files}
+    try:
+        return {k: lib[k] for k in lib.files}
+    finally:
+        lib.close()
+
+
+def load_library_npz(path: str) -> Dict[str, np.ndarray]:
+    return _load_library_npz_cached(os.path.abspath(path))
 
 
 @torch.no_grad()

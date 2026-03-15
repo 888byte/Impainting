@@ -145,10 +145,11 @@ python pigment_task/build_pigment_lut33.py \
   --grid_size 49 \
   --kalman_rts \
   --device cuda \
-  --max_workers 24 \
-  --max_inflight 96 \
-  --log_every 50 \
-  --heartbeat_sec 30 \
+  --engine batch \
+  --batch_size 2048 \
+  --min_batch_size 256 \
+  --log_every 20 \
+  --heartbeat_sec 15 \
   --timeout_sec 240 \
   --retries 8 \
   --save_every 500 \
@@ -167,10 +168,11 @@ python pigment_task/build_pigment_lut33.py \
   --grid_size 49 \
   --kalman_rts \
   --device cuda \
-  --max_workers 32 \
-  --max_inflight 128 \
-  --log_every 50 \
-  --heartbeat_sec 30 \
+  --engine batch \
+  --batch_size 4096 \
+  --min_batch_size 256 \
+  --log_every 20 \
+  --heartbeat_sec 15 \
   --timeout_sec 300 \
   --retries 8 \
   --save_every 500 \
@@ -189,10 +191,11 @@ python pigment_task/build_pigment_lut33.py \
   --grid_size 65 \
   --kalman_rts \
   --device cuda \
-  --max_workers 32 \
-  --max_inflight 128 \
-  --log_every 50 \
-  --heartbeat_sec 30 \
+  --engine batch \
+  --batch_size 4096 \
+  --min_batch_size 256 \
+  --log_every 20 \
+  --heartbeat_sec 15 \
   --timeout_sec 360 \
   --retries 8 \
   --save_every 800 \
