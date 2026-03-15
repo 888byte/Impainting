@@ -380,6 +380,17 @@ def main():
         original_degraded = Y_GT.clone()  # [B, 3, H, W] 原始褪色图
 
         # ============================================================
+        # DEBUG: 设为 True 可禁用所有 BrushNet 条件，测试纯 SDE 反向
+        # ============================================================
+        DEBUG_NO_BRUSHNET = True
+        if DEBUG_NO_BRUSHNET:
+            color_prior = None
+            confidence = None
+            original_degraded = None
+            if g == 0:
+                logger.info("[DEBUG] BrushNet conditions DISABLED for debugging")
+
+        # ============================================================
         # 第五步：推理
         # ============================================================
         noisy_state = sde.noise_state(Y_GT * mask)
