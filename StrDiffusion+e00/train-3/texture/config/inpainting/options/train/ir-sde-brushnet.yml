@@ -15,7 +15,7 @@ sde:
 
 #### Degradation
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
 #### BrushNet
 brushnet:
@@ -60,12 +60,12 @@ datasets:
   train:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
-    dataroot_GT: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/cropped_images
-    dataroot_mask: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?train/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
     gt_mode: full
 
-    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut33.npz
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
     lut_alpha: 0.7
     lut_beta: 0.3
     lut_inpaint_method: telea
