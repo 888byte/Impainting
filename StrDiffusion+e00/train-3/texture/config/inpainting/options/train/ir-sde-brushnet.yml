@@ -76,8 +76,8 @@ datasets:
     debug_mode: false
 
     use_shuffle: true
-    n_workers: 32
-    batch_size: 32
+    n_workers: 16
+    batch_size: 16
     GT_size: 256
     use_flip: true
     use_rot: true

@@ -249,7 +249,21 @@ def load_resume_arrays(args: argparse.Namespace, grid: np.ndarray):
 
 
 def save_all(args: argparse.Namespace, grid: np.ndarray, state: dict) -> None:
+    """
+    保存 LUT 数据和完成状态到 npz 文件
+    
+    关键修复：
+    - 必须同时保存 done 数组到 npz 文件中，这样恢复时才能继续
+    - 否则每次运行都会从零开始，导致 LUT 不完整
+    
+    Args:
+        args: 命令行参数
+        grid: 网格坐标点
+        state: 包含 LUT 数据和 done 标记的字典
+    """
     np.save(state['done_npy'], state['done'])
+    
+    # 修复：将 done 数组也保存到 npz 文件中
     _atomic_save_npz(
         state['out_npz'],
         grid=grid,
@@ -259,6 +273,7 @@ def save_all(args: argparse.Namespace, grid: np.ndarray, state: dict) -> None:
         lut_std=state['lut_std'],
         lut_cdiff=state['lut_cdiff'],
         lut_cret=state['lut_cret'],
+        done=state['done'],  # 关键修复：添加 done 数组到 npz
         meta=dict(
             axis_order=args.lut_order,
             ckpt=args.ckpt,

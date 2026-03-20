@@ -12,7 +12,7 @@ Pipeline:
 5) Save recolored full image.
 
 Example:
-  python t6.py --img_path 1.png --lut_npz pigment_lut33.npz \
+  python t6.py --img_path 1.png --lut_npz pigment_lut49_xhq.npz \
   --use_lut lab --keep_luminance \
   --delta_smooth guided --gf_radius 16 --gf_eps 0.01 \
   --ms_down 1 --ms_sigma 2.0
@@ -211,6 +211,9 @@ def apply_lut_mural(img_rgb: np.ndarray,
 
 
 def main():
+    import sys
+    print_flush = lambda *args, **kwargs: (print(*args, **kwargs), sys.stdout.flush())
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--img_path", type=str, required=True)
     parser.add_argument("--lut_npz", type=str, required=True)
@@ -239,12 +242,24 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    img_bgr = cv2.imread(args.img_path)
-    if img_bgr is None:
-        raise FileNotFoundError(f"Cannot read image: {args.img_path}")
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    print_flush(f"Loading image: {args.img_path}")
+    # 使用 PIL 直接读取为 RGB 格式
+    from PIL import Image
+    img_pil = Image.open(args.img_path)
+    img_rgb = np.array(img_pil)
+    if img_rgb.ndim == 2:  # 如果是灰度图，转为 RGB
+        img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_GRAY2RGB)
+    print_flush(f"Image loaded: {img_rgb.shape[1]}x{img_rgb.shape[0]}, shape: {img_rgb.shape}")
 
+    print_flush(f"Loading LUT: {args.lut_npz}")
     grid, lut_lab, lut_rgb = load_lut_npz(args.lut_npz)
+    print_flush(f"LUT loaded successfully")
+
+    print_flush("Applying LUT to image...")
+    print_flush(f"  - use_lut: {args.use_lut}")
+    print_flush(f"  - keep_luminance: {args.keep_luminance}")
+    print_flush(f"  - delta_smooth: {args.delta_smooth}")
+    print_flush(f"  - chunk size: {args.chunk}")
 
     out_rgb = apply_lut_mural(
         img_rgb=img_rgb,
@@ -262,10 +277,16 @@ def main():
         ms_sigma=args.ms_sigma
     )
 
-    out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+    print_flush("LUT application completed")
+
+    print_flush("Saving output as RGB...")
     out_path = os.path.join(args.output_dir, "mural_lut_full.png")
-    cv2.imwrite(out_path, out_bgr)
-    print(f"Saved: {out_path}")
+    print_flush(f"Saving output to: {out_path}")
+    # 使用 PIL 保存为 RGB 格式
+    from PIL import Image
+    img_pil = Image.fromarray(out_rgb)
+    img_pil.save(out_path)
+    print_flush(f"✓ Saved: {out_path}")
 
 
 if __name__ == "__main__":
