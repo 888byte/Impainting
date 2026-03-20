@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
-"""????????????
+"""官方骨架兼容的推理入口。
 
-????:
+启动方式:
     python test.py -opt options/test/ir-sde.yml
     python test.py -opt options/test/ir-sde-brushnet.yml
     python test.py -opt options/test/ir-sde-brushnet.yml --set texture_core.enabled=false
 
-Mask ??:
-    - mural ???????? mask ?????????
-    - dataset ??:
-        mask_hole  = 1 ???????
-        mask_known = 1 ??????
-    - ????????? mask_known
-    - BrushNet / MGLC / ????????? mask_hole
+Mask 语义:
+    - mural 推理模式下，输入 mask 白色表示待修复区域
+    - dataset 输出:
+        mask_hole  = 1 表示待修复区域
+        mask_known = 1 表示已知区域
+    - 官方结构链继续使用 mask_known
+    - BrushNet / MGLC / 最终纹理网络只使用 mask_hole
 
-????:
-    - ??????????? YAML ??
-    - mural ????mask_root ???? degradation.mask_root
-    - ? dataroot_degraded ???????? dataroot_GT ???????
+读取规则:
+    - 保留官方配置骨架，不改 YAML 字段
+    - mural 模式下，mask_root 优先使用 degradation.mask_root
+    - 若 dataroot_degraded 为空，则回退使用 dataroot_GT 作为样本图目录
 """
 
 import argparse
@@ -239,8 +239,9 @@ def main():
     logger.info(option.dict2str(opt))
 
     dataset_items = sorted(opt["datasets"].items())
+    CONFIG_MISSING_DATASETS = '配置中没有 datasets。'
     if not dataset_items:
-        raise RuntimeError("????? datasets?")
+        raise RuntimeError(CONFIG_MISSING_DATASETS)
 
     test_loaders = []
     for _, dataset_opt_raw in dataset_items:
@@ -293,4 +294,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
-"""????????
+"""壁画推理数据集。
 
-??:
-    ? options/test/ir-sde-brushnet.yml ???:
+用法:
+    在 options/test/ir-sde-brushnet.yml 中配置:
         datasets:
           test:
             mode: mural_inference
             dataroot_degraded: /path/to/degraded
             dataroot_mask: /path/to/mask
-            dataroot_GT: /path/to/gt    # ??
+            dataroot_GT: /path/to/gt    # 可选
 
-Mask ??:
-    - ?? mask ??/255 ???????
-    - ?? mask_hole: 1 ???????
-    - ?? mask_known: 1 ??????
+Mask 语义:
+    - 输入 mask 白色/255 表示待修复区域
+    - 输出 mask_hole: 1 表示待修复区域
+    - 输出 mask_known: 1 表示已知区域
 
-????:
-    - ???????????? stem
-    - mask ???? <stem>_mask.*
-    - ???? <stem>_mask.*?????? <stem>.*
-    - GT / color_prior / confidence ??? stem ??
+命名规则:
+    - 样本主键始终使用输入图像 stem
+    - mask 默认匹配 <stem>_mask.*
+    - 若找不到 <stem>_mask.*，兼容回退到 <stem>.*
+    - GT / color_prior / confidence 保持同 stem 匹配
 """
 
 import os
@@ -30,20 +30,27 @@ import numpy as np
 import torch
 import torch.utils.data as data
 
+READ_IMAGE_MSG = '无法读取图像'
+READ_MASK_MSG = '无法读取掩码'
+READ_CONFIDENCE_MSG = '无法读取置信度图'
+NO_DEGRADED_MSG = 'dataroot_degraded 下没有可用图像。'
+NO_MASK_MSG = 'dataroot_mask 下没有可用掩码。'
+MISSING_MASK_MSG = '缺少对应掩码'
+
 
 IMG_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".bmp",
-    ".tif",
-    ".tiff",
-    ".JPG",
-    ".JPEG",
-    ".PNG",
-    ".BMP",
-    ".TIF",
-    ".TIFF",
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.bmp',
+    '.tif',
+    '.tiff',
+    '.JPG',
+    '.JPEG',
+    '.PNG',
+    '.BMP',
+    '.TIF',
+    '.TIFF',
 }
 
 
@@ -70,7 +77,7 @@ def _build_stem_map(paths: List[str]) -> Dict[str, str]:
 def _load_rgb_image(path: str, target_hw=None) -> np.ndarray:
     image = cv2.imread(path, cv2.IMREAD_COLOR)
     if image is None:
-        raise FileNotFoundError(f"??????: {path}")
+        raise FileNotFoundError(f"{READ_IMAGE_MSG}: {path}")
     if target_hw is not None and image.shape[:2] != target_hw:
         image = cv2.resize(image, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_LINEAR)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -80,7 +87,7 @@ def _load_rgb_image(path: str, target_hw=None) -> np.ndarray:
 def _load_mask(path: str, target_hw) -> np.ndarray:
     mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if mask is None:
-        raise FileNotFoundError(f"??????: {path}")
+        raise FileNotFoundError(f"{READ_MASK_MSG}: {path}")
     if mask.shape[:2] != target_hw:
         mask = cv2.resize(mask, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST)
     mask = (mask > 127).astype(np.float32)
@@ -90,7 +97,7 @@ def _load_mask(path: str, target_hw) -> np.ndarray:
 def _load_confidence(path: str, target_hw) -> np.ndarray:
     confidence = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if confidence is None:
-        raise FileNotFoundError(f"????????: {path}")
+        raise FileNotFoundError(f"{READ_CONFIDENCE_MSG}: {path}")
     if confidence.shape[:2] != target_hw:
         confidence = cv2.resize(
             confidence,
@@ -101,36 +108,32 @@ def _load_confidence(path: str, target_hw) -> np.ndarray:
 
 
 class MuralInferenceDataset(data.Dataset):
-    """????????????????"""
+    """用于最终增强版推理的真实数据集。"""
 
     def __init__(self, opt: dict):
         super().__init__()
         self.opt = opt
-        self.gt_mode = opt.get("gt_mode", "partial")
-        self.degraded_root = opt.get("dataroot_degraded")
-        self.mask_root = opt.get("dataroot_mask")
+        self.gt_mode = opt.get('gt_mode', 'partial')
+        self.degraded_root = opt.get('dataroot_degraded')
+        self.mask_root = opt.get('dataroot_mask')
 
         self.degraded_paths = _list_image_paths(self.degraded_root)
         if not self.degraded_paths:
-            raise FileNotFoundError("dataroot_degraded ????????")
+            raise FileNotFoundError(NO_DEGRADED_MSG)
 
         self.mask_map = _build_stem_map(_list_image_paths(self.mask_root))
         if not self.mask_map:
-            raise FileNotFoundError("dataroot_mask ????????")
+            raise FileNotFoundError(NO_MASK_MSG)
 
-        self.gt_map = _build_stem_map(_list_image_paths(opt.get("dataroot_GT")))
-        self.color_prior_map = _build_stem_map(
-            _list_image_paths(opt.get("dataroot_color_prior"))
-        )
-        self.confidence_map = _build_stem_map(
-            _list_image_paths(opt.get("dataroot_confidence"))
-        )
+        self.gt_map = _build_stem_map(_list_image_paths(opt.get('dataroot_GT')))
+        self.color_prior_map = _build_stem_map(_list_image_paths(opt.get('dataroot_color_prior')))
+        self.confidence_map = _build_stem_map(_list_image_paths(opt.get('dataroot_confidence')))
 
     def __len__(self) -> int:
         return len(self.degraded_paths)
 
     def _resolve_mask_path(self, stem: str) -> str:
-        preferred_keys = [f"{stem}_mask", stem]
+        preferred_keys = [f'{stem}_mask', stem]
         for key in preferred_keys:
             path = self.mask_map.get(key)
             if path is not None:
@@ -138,7 +141,7 @@ class MuralInferenceDataset(data.Dataset):
 
         example_keys = sorted(self.mask_map.keys())[:10]
         raise FileNotFoundError(
-            f"??????: image stem='{stem}', expected mask stem '{stem}_mask' "
+            f"{MISSING_MASK_MSG}: image stem='{stem}', expected mask stem '{stem}_mask' "
             f"(preferred) or '{stem}' in '{self.mask_root}'. Example keys: {example_keys}"
         )
 
@@ -154,30 +157,28 @@ class MuralInferenceDataset(data.Dataset):
         mask_known = 1.0 - mask_hole
 
         sample = {
-            "degraded": torch.from_numpy(np.transpose(degraded, (2, 0, 1))).float(),
-            "mask_hole": torch.from_numpy(mask_hole[None, ...]).float(),
-            "mask_known": torch.from_numpy(mask_known[None, ...]).float(),
-            "degraded_path": degraded_path,
-            "mask_path": mask_path,
-            "stem": stem,
-            "gt_mode": self.gt_mode,
+            'degraded': torch.from_numpy(np.transpose(degraded, (2, 0, 1))).float(),
+            'mask_hole': torch.from_numpy(mask_hole[None, ...]).float(),
+            'mask_known': torch.from_numpy(mask_known[None, ...]).float(),
+            'degraded_path': degraded_path,
+            'mask_path': mask_path,
+            'stem': stem,
+            'gt_mode': self.gt_mode,
         }
 
         if stem in self.gt_map:
             gt = _load_rgb_image(self.gt_map[stem], (height, width))
-            sample["GT"] = torch.from_numpy(np.transpose(gt, (2, 0, 1))).float()
-            sample["GT_path"] = self.gt_map[stem]
+            sample['GT'] = torch.from_numpy(np.transpose(gt, (2, 0, 1))).float()
+            sample['GT_path'] = self.gt_map[stem]
 
         if stem in self.color_prior_map:
             color_prior = _load_rgb_image(self.color_prior_map[stem], (height, width))
-            sample["color_prior"] = torch.from_numpy(
-                np.transpose(color_prior, (2, 0, 1))
-            ).float()
-            sample["color_prior_path"] = self.color_prior_map[stem]
+            sample['color_prior'] = torch.from_numpy(np.transpose(color_prior, (2, 0, 1))).float()
+            sample['color_prior_path'] = self.color_prior_map[stem]
 
         if stem in self.confidence_map:
             confidence = _load_confidence(self.confidence_map[stem], (height, width))
-            sample["confidence"] = torch.from_numpy(confidence[None, ...]).float()
-            sample["confidence_path"] = self.confidence_map[stem]
+            sample['confidence'] = torch.from_numpy(confidence[None, ...]).float()
+            sample['confidence_path'] = self.confidence_map[stem]
 
         return sample
