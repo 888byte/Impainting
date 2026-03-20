@@ -21,7 +21,7 @@ sde:
 #### 退化相关设置
 #### - mask_root 保留官方字段，legacy 模式仍可使用
 degradation:
-  mask_root: /path/to/masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
 
 #### 数据集配置
 datasets:
@@ -32,11 +32,11 @@ datasets:
     mode: mural_inference
 
     #### 褪色/退化输入图像目录
-    dataroot_degraded: /path/to/degraded_images
+    dataroot_degraded: /home/610-wws/Impainting/dataset/裁剪的图片/test/mask_merge
     #### 掩码目录，白色表示待修复区域
-    dataroot_mask: /path/to/masks
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
     #### 可选 GT 目录，仅用于评估和对照可视化
-    dataroot_GT: ~
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images
 
     #### 可选预生成先验目录；如果为空则推理时自动生成
     dataroot_color_prior: ~
@@ -45,15 +45,15 @@ datasets:
 
     #### full: 输出整图
     #### partial: 已知区域保留原输入，只替换待修复区域
-    gt_mode: partial
+    gt_mode: full
 
     #### LUT 配置，需与训练侧保持一致
-    lut_path: /path/to/pigment_lut33.npz
-    lut_alpha: 0.7
-    lut_beta: 0.3
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
+    lut_alpha: 0.85
+    lut_beta: 0.15
     lut_inpaint_method: telea
-    lut_strength: 0.7
-    lut_smooth_radius: 5
+    lut_strength: 2
+    lut_smooth_radius: 1
 
 #### 纹理网络 G
 network_G:
@@ -120,9 +120,9 @@ mu_denoiser:
 #### 权重路径
 #### - 三个路径都保留，兼容官方骨架
 path:
-  pretrain_model_G: /path/to/final_texture_generator.pth
-  pretrain_model_Gs: /path/to/structure_generator.pth
-  pretrain_model_D: /path/to/discriminator.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet/models/best_G.pth
+  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
   strict_load: false
   resume_state: ~
 
@@ -134,9 +134,9 @@ inference:
   #### auto: full 对应整图输出，partial 对应已知区保留
   compose_mode: auto
   #### 是否保存 reverse 过程状态图
-  save_states: false
+  save_states: true
   #### 是否保存 color_prior / confidence / mu_clean / raw_pred 等中间结果
   save_intermediates: true
   #### 判别器引导开关
   discriminator_guidance:
-    enabled: false
+    enabled: true
