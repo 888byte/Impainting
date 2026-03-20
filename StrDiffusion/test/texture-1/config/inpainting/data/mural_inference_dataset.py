@@ -1,19 +1,25 @@
 # -*- coding: utf-8 -*-
-"""壁画推理数据集。
+"""????????
 
-用法:
-    在 ``options/test/ir-sde-brushnet.yml`` 中设置:
+??:
+    ? options/test/ir-sde-brushnet.yml ???:
         datasets:
           test:
             mode: mural_inference
             dataroot_degraded: /path/to/degraded
             dataroot_mask: /path/to/mask
-            dataroot_GT: /path/to/gt    # 可选
+            dataroot_GT: /path/to/gt    # ??
 
-Mask 语义:
-    - 输入 mask 白色/255 表示待修复区域
-    - 输出 mask_hole: 1 表示待修复区域
-    - 输出 mask_known: 1 表示已知区域
+Mask ??:
+    - ?? mask ??/255 ???????
+    - ?? mask_hole: 1 ???????
+    - ?? mask_known: 1 ??????
+
+????:
+    - ???????????? stem
+    - mask ???? <stem>_mask.*
+    - ???? <stem>_mask.*?????? <stem>.*
+    - GT / color_prior / confidence ??? stem ??
 """
 
 import os
@@ -61,10 +67,12 @@ def _build_stem_map(paths: List[str]) -> Dict[str, str]:
     return mapping
 
 
-def _load_rgb_image(path: str) -> np.ndarray:
+def _load_rgb_image(path: str, target_hw=None) -> np.ndarray:
     image = cv2.imread(path, cv2.IMREAD_COLOR)
     if image is None:
-        raise FileNotFoundError(f"无法读取图像: {path}")
+        raise FileNotFoundError(f"??????: {path}")
+    if target_hw is not None and image.shape[:2] != target_hw:
+        image = cv2.resize(image, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_LINEAR)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return image.astype(np.float32) / 255.0
 
@@ -72,7 +80,7 @@ def _load_rgb_image(path: str) -> np.ndarray:
 def _load_mask(path: str, target_hw) -> np.ndarray:
     mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if mask is None:
-        raise FileNotFoundError(f"无法读取掩码: {path}")
+        raise FileNotFoundError(f"??????: {path}")
     if mask.shape[:2] != target_hw:
         mask = cv2.resize(mask, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST)
     mask = (mask > 127).astype(np.float32)
@@ -82,7 +90,7 @@ def _load_mask(path: str, target_hw) -> np.ndarray:
 def _load_confidence(path: str, target_hw) -> np.ndarray:
     confidence = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if confidence is None:
-        raise FileNotFoundError(f"无法读取置信度图: {path}")
+        raise FileNotFoundError(f"????????: {path}")
     if confidence.shape[:2] != target_hw:
         confidence = cv2.resize(
             confidence,
@@ -93,20 +101,22 @@ def _load_confidence(path: str, target_hw) -> np.ndarray:
 
 
 class MuralInferenceDataset(data.Dataset):
-    """用于最终增强版推理的真实数据集。"""
+    """????????????????"""
 
     def __init__(self, opt: dict):
         super().__init__()
         self.opt = opt
         self.gt_mode = opt.get("gt_mode", "partial")
+        self.degraded_root = opt.get("dataroot_degraded")
+        self.mask_root = opt.get("dataroot_mask")
 
-        self.degraded_paths = _list_image_paths(opt.get("dataroot_degraded"))
+        self.degraded_paths = _list_image_paths(self.degraded_root)
         if not self.degraded_paths:
-            raise FileNotFoundError("dataroot_degraded 下没有可用图像。")
+            raise FileNotFoundError("dataroot_degraded ????????")
 
-        self.mask_map = _build_stem_map(_list_image_paths(opt.get("dataroot_mask")))
+        self.mask_map = _build_stem_map(_list_image_paths(self.mask_root))
         if not self.mask_map:
-            raise FileNotFoundError("dataroot_mask 下没有可用掩码。")
+            raise FileNotFoundError("dataroot_mask ????????")
 
         self.gt_map = _build_stem_map(_list_image_paths(opt.get("dataroot_GT")))
         self.color_prior_map = _build_stem_map(
@@ -119,15 +129,28 @@ class MuralInferenceDataset(data.Dataset):
     def __len__(self) -> int:
         return len(self.degraded_paths)
 
+    def _resolve_mask_path(self, stem: str) -> str:
+        preferred_keys = [f"{stem}_mask", stem]
+        for key in preferred_keys:
+            path = self.mask_map.get(key)
+            if path is not None:
+                return path
+
+        example_keys = sorted(self.mask_map.keys())[:10]
+        raise FileNotFoundError(
+            f"??????: image stem='{stem}', expected mask stem '{stem}_mask' "
+            f"(preferred) or '{stem}' in '{self.mask_root}'. Example keys: {example_keys}"
+        )
+
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         degraded_path = self.degraded_paths[index]
         stem = os.path.splitext(os.path.basename(degraded_path))[0]
-        if stem not in self.mask_map:
-            raise KeyError(f"缺少同名掩码: {stem}")
 
         degraded = _load_rgb_image(degraded_path)
         height, width = degraded.shape[:2]
-        mask_hole = _load_mask(self.mask_map[stem], (height, width))
+
+        mask_path = self._resolve_mask_path(stem)
+        mask_hole = _load_mask(mask_path, (height, width))
         mask_known = 1.0 - mask_hole
 
         sample = {
@@ -135,23 +158,26 @@ class MuralInferenceDataset(data.Dataset):
             "mask_hole": torch.from_numpy(mask_hole[None, ...]).float(),
             "mask_known": torch.from_numpy(mask_known[None, ...]).float(),
             "degraded_path": degraded_path,
+            "mask_path": mask_path,
             "stem": stem,
             "gt_mode": self.gt_mode,
         }
 
         if stem in self.gt_map:
-            gt = _load_rgb_image(self.gt_map[stem])
+            gt = _load_rgb_image(self.gt_map[stem], (height, width))
             sample["GT"] = torch.from_numpy(np.transpose(gt, (2, 0, 1))).float()
             sample["GT_path"] = self.gt_map[stem]
 
         if stem in self.color_prior_map:
-            color_prior = _load_rgb_image(self.color_prior_map[stem])
+            color_prior = _load_rgb_image(self.color_prior_map[stem], (height, width))
             sample["color_prior"] = torch.from_numpy(
                 np.transpose(color_prior, (2, 0, 1))
             ).float()
+            sample["color_prior_path"] = self.color_prior_map[stem]
 
         if stem in self.confidence_map:
             confidence = _load_confidence(self.confidence_map[stem], (height, width))
             sample["confidence"] = torch.from_numpy(confidence[None, ...]).float()
+            sample["confidence_path"] = self.confidence_map[stem]
 
         return sample

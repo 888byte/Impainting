@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
-"""官方骨架兼容的推理入口。
+"""????????????
 
-启动方式:
+????:
     python test.py -opt options/test/ir-sde.yml
     python test.py -opt options/test/ir-sde-brushnet.yml
     python test.py -opt options/test/ir-sde-brushnet.yml --set texture_core.enabled=false
 
-Mask 语义:
-    - mural 推理模式下输入 mask 白色表示待修复区域
-    - dataset 输出:
-        mask_hole  = 1 表示待修复区域
-        mask_known = 1 表示已知区域
-    - 官方结构链继续使用 mask_known
-    - BrushNet / MGLC / 最终纹理网络使用 mask_hole
+Mask ??:
+    - mural ???????? mask ?????????
+    - dataset ??:
+        mask_hole  = 1 ???????
+        mask_known = 1 ??????
+    - ????????? mask_known
+    - BrushNet / MGLC / ????????? mask_hole
+
+????:
+    - ??????????? YAML ??
+    - mural ????mask_root ???? degradation.mask_root
+    - ? dataroot_degraded ???????? dataroot_GT ???????
 """
 
 import argparse
@@ -83,6 +88,25 @@ def _save_visuals_for_sample(visuals, sample_dir, img_name, suffix=None, save_ra
         util.save_img(gt_img, os.path.join(sample_dir, "gt.png"))
 
 
+def _resolve_runtime_dataset_opt(dataset_opt, opt):
+    """Resolve runtime roots without mutating the YAML file on disk."""
+    runtime_opt = dict(dataset_opt)
+    if runtime_opt.get("mode") != "mural_inference":
+        return runtime_opt
+
+    degradation_opt = opt.get("degradation", {})
+    mask_root = degradation_opt.get("mask_root")
+    if mask_root:
+        runtime_opt["dataroot_mask"] = mask_root
+
+    if not runtime_opt.get("dataroot_degraded"):
+        fallback_root = runtime_opt.get("dataroot_GT")
+        if fallback_root:
+            runtime_opt["dataroot_degraded"] = fallback_root
+
+    return runtime_opt
+
+
 def _run_legacy_test(test_loader, opt, logger, model, sde, s_sde):
     mask_root = opt["degradation"]["mask_root"]
     mask_loader = DataLoader(DatasetsetMask(mask_root), batch_size=1, shuffle=True)
@@ -127,7 +151,7 @@ def _run_legacy_test(test_loader, opt, logger, model, sde, s_sde):
 def _run_enhanced_test(test_loader, opt, logger, model, sde, s_sde):
     dataset_opt = test_loader.dataset.opt
     test_set_name = dataset_opt["name"]
-    need_gt = dataset_opt.get("dataroot_GT") is not None
+    need_gt = bool(dataset_opt.get("dataroot_GT"))
 
     for _, sample in enumerate(test_loader):
         img_name = sample["stem"][0]
@@ -216,14 +240,21 @@ def main():
 
     dataset_items = sorted(opt["datasets"].items())
     if not dataset_items:
-        raise RuntimeError("配置中没有 datasets。")
+        raise RuntimeError("????? datasets?")
 
     test_loaders = []
-    for _, dataset_opt in dataset_items:
+    for _, dataset_opt_raw in dataset_items:
+        dataset_opt = _resolve_runtime_dataset_opt(dataset_opt_raw, opt)
         test_set = create_dataset(dataset_opt)
         test_loader = create_dataloader(test_set, dataset_opt)
         test_loaders.append(test_loader)
         logger.info("Number of test images in [%s]: %d", dataset_opt["name"], len(test_set))
+        if dataset_opt.get("mode") == "mural_inference":
+            logger.info(
+                "Resolved mural roots: degraded=%s, mask=%s",
+                dataset_opt.get("dataroot_degraded"),
+                dataset_opt.get("dataroot_mask"),
+            )
 
     model = create_model(opt)
     device = model.device
@@ -262,3 +293,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

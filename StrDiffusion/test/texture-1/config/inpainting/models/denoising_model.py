@@ -48,6 +48,22 @@ def _ensure_batch_time_like(time, device):
     return time.to(device)
 
 
+def _validate_mask_pair(mask_known: Optional[torch.Tensor], mask_hole: Optional[torch.Tensor], where: str):
+    """Validate that mask_known and mask_hole are shape-aligned complements."""
+    if mask_known is None or mask_hole is None:
+        raise ValueError(f"{where}: mask_known and mask_hole must both be provided.")
+    if mask_known.shape != mask_hole.shape:
+        raise ValueError(
+            f"{where}: mask shape mismatch, mask_known={tuple(mask_known.shape)}, "
+            f"mask_hole={tuple(mask_hole.shape)}"
+        )
+    deviation = torch.max(torch.abs(mask_known + mask_hole - 1.0)).item()
+    if deviation > 1e-4:
+        raise ValueError(
+            f"{where}: mask_known and mask_hole must be complementary; max deviation={deviation:.6f}"
+        )
+
+
 class DenoisingModel(BaseModel):
     """Inference-only denoising model that keeps the official G/Gs/Dis layout."""
 
@@ -129,12 +145,18 @@ class DenoisingModel(BaseModel):
         self.state = state.to(self.device) if state is not None else None
         self.condition = LQ.to(self.device) if LQ is not None else None
         self.state_0 = GT.to(self.device) if GT is not None else None
-        self.mask = mask.to(self.device) if mask is not None else None
+        self.mask = mask.to(self.device).float() if mask is not None else None
         self.mask_hole = (
-            mask_hole.to(self.device)
+            mask_hole.to(self.device).float()
             if mask_hole is not None
             else (1.0 - self.mask if self.mask is not None else None)
         )
+        if self.mask is not None:
+            self.mask = self.mask.clamp(0.0, 1.0)
+        if self.mask_hole is not None:
+            self.mask_hole = self.mask_hole.clamp(0.0, 1.0)
+        if self.mask is not None and self.mask_hole is not None:
+            _validate_mask_pair(self.mask, self.mask_hole, "feed_data")
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device) if torch.is_tensor(S_GT) else S_GT
         self.S_LQ = S_LQ.to(self.device) if torch.is_tensor(S_LQ) else S_LQ
@@ -228,6 +250,7 @@ class DenoisingModel(BaseModel):
         """Mirror the training-side color path as closely as possible."""
         mask_known = self.mask
         mask_hole = self.mask_hole
+        _validate_mask_pair(mask_known, mask_hole, "_prepare_brushnet_inputs")
         degraded = self.original_degraded
 
         denoised_original = self._denoise_image(degraded)
@@ -325,6 +348,7 @@ class DenoisingModel(BaseModel):
                 or self.opt["network_G"]["which_model_G"] == "ConditionalUNetWithBrushNet"
             )
             if enhanced_mode:
+                _validate_mask_pair(self.mask, self.mask_hole, "test/enhanced")
                 prepared = self._prepare_brushnet_inputs()
                 self.color_prior = prepared["color_prior"]
                 self.confidence = prepared["confidence"]

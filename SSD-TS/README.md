@@ -2,6 +2,14 @@
 
 本项目的当前任务是：输入褪色后的 RGB 颜色或颜色序列，预测褪色前的原始颜色。现有实现保留 RGB 主链和 diffusion 主体，并支持训练期使用 Raman/XRD、推理期通过 `pred`、`retrieval`、`posterior`、`prototype` 等 bridge 显式工作。
 
+## 文档索引
+
+如果你需要快速理解“相对原始 SSD-TS baseline 到当前增强版到底改了什么”，优先看下面三份文档：
+
+- `改动总结.md`：主文档，按 baseline、改动动机、完整流程、论文写作映射展开。
+- `docs/BASELINE_DIFF_TABLE_CN.md`：大表格，对比 baseline 与当前实现的关键差异。
+- `docs/MODULE_NAMING_TABLE_CN.md`：模块命名建议表，只给建议名，不改现有代码。
+
 ## 当前真实状态
 
 - 默认入口：`preprocess.py`、`train.py`、`infer.py`、`evaluate.py`、`build_prototypes.py`

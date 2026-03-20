@@ -292,6 +292,20 @@ class IRSDE(SDE):
         os.makedirs(save_dir, exist_ok=True)
         tvutils.save_image(tensor.data, f"{save_dir}/state_{index}.png", normalize=False)
 
+    def _validate_enhanced_masks(self, mask_known, mask_hole):
+        if mask_known is None or mask_hole is None:
+            raise ValueError("Enhanced inference requires both mask_known and mask_hole.")
+        if mask_known.shape != mask_hole.shape:
+            raise ValueError(
+                f"Enhanced inference mask shape mismatch: mask_known={tuple(mask_known.shape)}, "
+                f"mask_hole={tuple(mask_hole.shape)}"
+            )
+        deviation = torch.max(torch.abs(mask_known + mask_hole - 1.0)).item()
+        if deviation > 1e-4:
+            raise ValueError(
+                f"mask_known and mask_hole must be complementary in enhanced inference; max deviation={deviation:.6f}"
+            )
+
     def _reverse_sde_enhanced(
         self,
         xt,
@@ -438,11 +452,17 @@ class IRSDE(SDE):
         T = self.T if T < 0 else T
 
         if kwargs.get("enhanced_inference", False):
-            mask_known = mask.to(self.device)
-            mask_hole = kwargs["mask_hole"].to(self.device)
+            if mask is None:
+                raise ValueError("Enhanced inference requires mask=mask_known in reverse_sde(...).")
+            if "mask_hole" not in kwargs or kwargs["mask_hole"] is None:
+                raise ValueError("Enhanced inference requires mask_hole in reverse_sde(...).")
+            mask_known = mask.to(self.device).float()
+            mask_hole = kwargs["mask_hole"].to(self.device).float()
+            self._validate_enhanced_masks(mask_known, mask_hole)
             degraded = kwargs.get("degraded")
             if degraded is not None:
                 degraded = degraded.to(self.device)
+            # BrushNet / MGLC must always receive the hole mask, never mask_known.
             brushnet_kwargs = {
                 "mask": mask_hole,
                 "color_prior": kwargs.get("color_prior").to(self.device)
