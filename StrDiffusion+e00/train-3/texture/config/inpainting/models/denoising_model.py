@@ -342,6 +342,8 @@ class DenoisingModel(BaseModel):
         return mu_clean
 
     def optimize_parameters(self, step, timesteps, sde=None):
+        self.log_dict = OrderedDict()
+
         # ============ 第一阶段：原始褪色图去噪 ============
         # 对原始褪色图（original_degraded）进行边缘保持去噪
         # 去噪是所有后续操作的基础
@@ -469,7 +471,10 @@ class DenoisingModel(BaseModel):
             self.optimizer_mu.zero_grad()
         
         # 主损失：模型输出 vs GT
-        loss = self.loss_fn(yt_1_expection, yt_1_optimum, self.mask)
+        loss_components = self.loss_fn.compute_components(
+            yt_1_expection, yt_1_optimum, self.mask
+        )
+        loss = loss_components["loss_total"]
         
         # 总损失 = 扩散损失 + Mu-Denoiser 损失（如果有）
         total_loss = loss
@@ -489,6 +494,24 @@ class DenoisingModel(BaseModel):
 
         # set log
         self.log_dict["loss"] = loss.item()
+        self.log_dict["loss_main"] = loss.item()
+        self.log_dict["loss_total"] = total_loss.item()
+        self.log_dict["loss_known"] = loss_components["loss_known"].item()
+        self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
+        self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
+        self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
+        self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
+        self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
+        self.log_dict["lr_main"] = float(self.optimizer.param_groups[0]["lr"])
+        if self.use_mu_denoiser:
+            self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
+        self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+        self.log_dict.update(self._compute_condition_stats(
+            color_prior=self.color_prior,
+            lut_transformed=lut_transformed,
+            mu_clean=mu_clean,
+            mask_known=self.mask,
+        ))
         
         # ============ 保存调试信息 ============
         # 调试顺序：
@@ -502,11 +525,44 @@ class DenoisingModel(BaseModel):
             'original_degraded': self.original_degraded.detach(),  # 原始褪色图
             'denoised_original': denoised_original.detach(),       # 双边滤波去噪后的原图
             'mu_clean': mu_clean.detach() if mu_clean is not self.condition else None,  # D_mu 去噪的 mu
+            'lut_transformed': lut_transformed.detach(),           # LUT 混合结果
             'color_changed': color_changed.detach(),               # LUT变换后（训练目标）
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
             'original_with_mask': (self.original_degraded * self.mask).detach(),  # 原图+mask涂黑
             'mask': self.mask.detach(),
+            'mask_known': self.mask.detach(),
+            'mask_hole': (1 - self.mask).detach(),
         }
+
+    def _masked_mean_std(self, tensor, mask):
+        if tensor is None or mask is None:
+            return 0.0, 0.0
+
+        tensor = tensor.detach()
+        mask = mask.detach()
+        if tensor.shape[1] != mask.shape[1]:
+            mask = mask.expand(-1, tensor.shape[1], -1, -1)
+
+        denom = mask.sum().clamp_min(1.0)
+        mean = (tensor * mask).sum() / denom
+        var = ((tensor - mean) ** 2 * mask).sum() / denom
+        std = torch.sqrt(var.clamp_min(0.0))
+        return float(mean.item()), float(std.item())
+
+    def _compute_condition_stats(self, color_prior, lut_transformed, mu_clean, mask_known):
+        mask_hole = 1 - mask_known
+        color_prior_mean, color_prior_std = self._masked_mean_std(color_prior, mask_hole)
+        lut_hole_mean, _ = self._masked_mean_std(lut_transformed, mask_hole)
+        mu_known_mean, mu_known_std = self._masked_mean_std(mu_clean, mask_known)
+        return OrderedDict(
+            [
+                ("stats_color_prior_hole_mean", color_prior_mean),
+                ("stats_color_prior_hole_std", color_prior_std),
+                ("stats_lut_hole_mean", lut_hole_mean),
+                ("stats_mu_known_mean", mu_known_mean),
+                ("stats_mu_known_std", mu_known_std),
+            ]
+        )
     
     def _denoise_image(self, image):
         """
@@ -634,6 +690,9 @@ class DenoisingModel(BaseModel):
 
     def get_current_log(self):
         return self.log_dict
+
+    def get_current_training_debug(self):
+        return getattr(self, "_debug_refiner_info", None)
 
     def get_current_visuals(self, need_GT=True):
         out_dict = OrderedDict()

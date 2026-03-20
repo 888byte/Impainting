@@ -355,7 +355,9 @@ class DenoisingModel(BaseModel):
                 mu_clean = prepared["mu_clean"]
                 sde.set_mu(mu_clean)
 
-                x_init = self.original_degraded * self.mask + self.color_prior * self.mask_hole
+                # Keep BrushNet prior as a condition only. The SDE initialization should
+                # follow the same mu-centered distribution used during training.
+                x_init = self.original_degraded * self.mask + mu_clean * self.mask_hole
                 self.state = sde.noise_state(x_init)
                 self.condition = self.original_degraded * self.mask
 
@@ -399,6 +401,7 @@ class DenoisingModel(BaseModel):
                     "denoised_original": prepared["denoised_original"],
                     "lut_transformed": prepared["lut_transformed"],
                     "mu_clean": mu_clean,
+                    "x_init": x_init,
                     "structure_gray": structure_gray,
                     "structure_edge": structure_edge,
                     "raw_pred": self.raw_output,

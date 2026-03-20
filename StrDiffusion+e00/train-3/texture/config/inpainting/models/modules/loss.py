@@ -17,17 +17,26 @@ class MatchingLoss(nn.Module):
         else:
             raise ValueError(f'invalid loss type {loss_type}')
 
-    def forward(self, predict, target, mask, weights=None):
-       
+    def compute_components(self, predict, target, mask, weights=None):
+        """Return the current loss decomposition without changing the training formula."""
         lossm = self.loss_fn(predict * (1 - mask), target * (1 - mask), reduction='none')
         lossm = einops.reduce(lossm, 'b ... -> b (...)', 'mean')
-        
+
         lossu = self.loss_fn(predict * mask, target * mask, reduction='none')
         lossu = einops.reduce(lossu, 'b ... -> b (...)', 'mean')
 
-        loss = lossu + 10 * lossm
+        loss_hole_weighted = 10 * lossm
+        loss = lossu + loss_hole_weighted
         if self.is_weighted and weights is not None:
             loss = weights * loss
 
-        return loss.mean()    
+        return {
+            'loss_total': loss.mean(),
+            'loss_known': lossu.mean(),
+            'loss_hole': lossm.mean(),
+            'loss_hole_weighted': loss_hole_weighted.mean(),
+        }
+
+    def forward(self, predict, target, mask, weights=None):
+        return self.compute_components(predict, target, mask, weights)['loss_total']
       

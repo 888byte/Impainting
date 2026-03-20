@@ -66,6 +66,86 @@ def init_dist(backend="nccl", **kwargs):
     )  # Initializes the default distributed process group
 
 
+def _as_float(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return float(value.detach().cpu().item())
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_tb_scalar_map(logs):
+    scalar_map = {}
+
+    def add(tag, key):
+        value = _as_float(logs.get(key))
+        if value is not None:
+            scalar_map[tag] = value
+
+    add("train/loss_main", "loss_main")
+    add("train/loss_total", "loss_total")
+    add("train/loss_hole", "loss_hole")
+    add("train/loss_known", "loss_known")
+    add("train/loss_hole_weighted", "loss_hole_weighted")
+    add("train/loss_mu_total", "loss_mu_total")
+    add("train/loss_mu_ss", "loss_mu_ss")
+    add("train/loss_mu_tv", "loss_mu_tv")
+    add("train/lr_main", "lr_main")
+    add("train/lr_mu", "lr_mu")
+    add("train/ema_total_loss", "ema_total_loss")
+    add("train/best_metric", "best_metric")
+    add("train/mask_hole_ratio", "mask_hole_ratio")
+    add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
+    add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
+    add("stats/lut_hole_mean", "stats_lut_hole_mean")
+    add("stats/mu_known_mean", "stats_mu_known_mean")
+    add("stats/mu_known_std", "stats_mu_known_std")
+
+    return scalar_map
+
+
+def _prepare_tb_image(tensor):
+    if tensor is None or not torch.is_tensor(tensor):
+        return None
+
+    image = tensor.detach().float().cpu()
+    if image.dim() == 4:
+        image = image[0]
+    if image.dim() == 2:
+        image = image.unsqueeze(0)
+    if image.dim() != 3:
+        return None
+    if image.shape[0] not in (1, 3):
+        image = image[:1]
+    return image.clamp(0.0, 1.0)
+
+
+def _log_tb_training_images(tb_logger, debug_info, current_step):
+    if not debug_info:
+        return
+
+    image_tags = {
+        "train_vis/original_degraded": "original_degraded",
+        "train_vis/denoised_original": "denoised_original",
+        "train_vis/lut_transformed": "lut_transformed",
+        "train_vis/color_changed": "color_changed",
+        "train_vis/color_prior": "color_prior",
+        "train_vis/mu_clean": "mu_clean",
+        "train_vis/mask_known": "mask_known",
+        "train_vis/mask_hole": "mask_hole",
+    }
+
+    for tag, key in image_tags.items():
+        image = _prepare_tb_image(debug_info.get(key))
+        if image is not None:
+            tb_logger.add_image(tag, image, current_step)
+
+
 def main():
     #### setup options of three networks
     parser = argparse.ArgumentParser()
@@ -156,6 +236,7 @@ def main():
                 )
                 from tensorboardX import SummaryWriter
             tb_logger = SummaryWriter(log_dir="log/{}/tb_logger/".format(opt["name"]))
+            tb_image_freq = int(opt.get("logger", {}).get("tb_image_freq", opt["logger"]["print_freq"] * 10))
     else:
         util.setup_logger(
             "base", opt["path"]["log"], "train", level=logging.INFO, screen=False
@@ -440,7 +521,9 @@ def main():
             logs = model.get_current_log()
 
             # 从logs中尽量稳健地取“总loss”
-            if "loss" in logs:
+            if "loss_total" in logs:
+                cur_loss = float(logs["loss_total"])
+            elif "loss" in logs:
                 cur_loss = float(logs["loss"])
             elif "l_total" in logs:
                 cur_loss = float(logs["l_total"])
@@ -456,6 +539,8 @@ def main():
                 ema_loss = cur_loss
             else:
                 ema_loss = ema_beta * ema_loss + (1.0 - ema_beta) * cur_loss
+            logs["ema_total_loss"] = float(ema_loss)
+            logs["best_metric"] = float(min(best_loss, ema_loss))
 
             # 仅rank0保存，避免多卡写冲突
             if rank <= 0:
@@ -470,14 +555,19 @@ def main():
                 # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
                 if ema_loss < best_loss:
                     best_loss = ema_loss
+                    logs["best_metric"] = float(best_loss)
                     # 构建日志信息：epoch/iter/lr/loss 在前，D_mu loss 在后
-                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best] loss: {:.4e}".format(
-                        epoch, current_step, model.get_current_learning_rate(), logs.get('loss', 0)
+                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best] loss_main: {:.4e} loss_total: {:.4e}".format(
+                        epoch,
+                        current_step,
+                        model.get_current_learning_rate(),
+                        logs.get('loss_main', logs.get('loss', 0)),
+                        logs.get('loss_total', logs.get('loss', 0)),
                     )
-                    if 'l_ss' in logs:
-                        log_msg += f" l_ss={logs['l_ss']:.4f}"
-                    if 'l_mu_total' in logs:
-                        log_msg += f" l_mu={logs['l_mu_total']:.4f}"
+                    if 'loss_mu_ss' in logs:
+                        log_msg += f" loss_mu_ss={logs['loss_mu_ss']:.4f}"
+                    if 'loss_mu_total' in logs:
+                        log_msg += f" loss_mu={logs['loss_mu_total']:.4f}"
                     logger.info(log_msg)
                     # 使用 "best" 标签，确保只保留一个best文件
                     # 生成: best_G.pth, best_D.pth, best.state
@@ -495,7 +585,14 @@ def main():
                     # tensorboard logger
                     if opt["use_tb_logger"] and "debug" not in opt["name"]:
                         if rank <= 0:
-                            tb_logger.add_scalar(k, v, current_step)
+                            tb_logger.add_scalar(f"raw/{k}", v, current_step)
+                if opt["use_tb_logger"] and "debug" not in opt["name"] and rank <= 0:
+                    for tag, value in _build_tb_scalar_map(logs).items():
+                        tb_logger.add_scalar(tag, value, current_step)
+                    if current_step % tb_image_freq == 0:
+                        _log_tb_training_images(
+                            tb_logger, model.get_current_training_debug(), current_step
+                        )
                 if rank <= 0:
                     logger.info(message)
 
