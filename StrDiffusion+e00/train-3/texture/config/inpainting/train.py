@@ -133,6 +133,7 @@ def _log_tb_training_images(tb_logger, debug_info, current_step):
 
     image_tags = {
         "train_vis/original_degraded": "original_degraded",
+        "train_vis/reference_degraded": "reference_degraded",
         "train_vis/denoised_original": "denoised_original",
         "train_vis/lut_transformed": "lut_transformed",
         "train_vis/color_changed": "color_changed",
@@ -417,8 +418,11 @@ def main():
             is_mural_mode = 'degraded' in train_data  # mural_inpainting 数据集特有
             
             if is_mural_mode:
-                # Mural Inpainting 模式：使用数据集提供的完整数据
-                Y_degraded = train_data["degraded"]  # 褪色图像（输入）
+                # Mural Inpainting 模式：
+                # degraded      -> 真实缺损外观输入（给条件链）
+                # degraded_full -> 完整褪色图（仅用于训练目标生成）
+                Y_degraded = train_data["degraded"]
+                Y_degraded_full = train_data.get("degraded_full", train_data["degraded"])
                 Y_GT = train_data["GT"]              # LUT变换后的GT（目标）
                 X_GT = train_data["GT_gray"]         # 灰度图
                 X_LQ = train_data["GT_edge"]         # 边缘图
@@ -431,6 +435,7 @@ def main():
                 # 原始模式：兼容旧数据集
                 Y_GT, X_GT, X_LQ = train_data["GT"], train_data["GT_gray"], train_data["GT_edge"]
                 Y_degraded = Y_GT  # 原始模式下 degraded = GT
+                Y_degraded_full = Y_GT
                 
                 # 从外部加载mask
                 try:
@@ -450,6 +455,7 @@ def main():
             
             # 确保数据在正确设备上
             Y_degraded = Y_degraded.to(device)
+            Y_degraded_full = Y_degraded_full.to(device)
             Y_GT = Y_GT.to(device)
             X_GT = X_GT.to(device)
             X_LQ = X_LQ.to(device)
@@ -485,7 +491,8 @@ def main():
             timesteps, states = sde.generate_random_states(x0=Y_GT, mu=mu_for_sde)
             model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
                            color_prior=color_prior, confidence=confidence, conf_lut=conf_lut,
-                           original_degraded=Y_degraded)  # 传递原始褪色图（无mask涂黑）
+                           original_degraded=Y_degraded,
+                           reference_degraded=Y_degraded_full)
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]

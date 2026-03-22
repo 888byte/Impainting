@@ -9,21 +9,25 @@ mural_inpainting_dataset.py - 壁画修复数据集
 2. Mode B (partial): 局部复原 - 仅Mask区域经过LUT映射，保留背景纹理
 3. Mode C (mixed): 混合模式 - 训练时随机选择Mode A或B
 
-数据对齐保证：
---------------
-- 第一阶段生成的颜色先验使用与GT相同的LUT
-- 确保训练时颜色先验与GT/Mask严格对应
+任务定义：
+--------
+- `degraded_full`：完整褪色图，只用于生成训练目标 GT
+- `degraded`：按 mask 合成后的真实缺损输入，用于模拟推理时的观测图
+- `color_prior/confidence`：基于真实缺损输入生成
+
+这样训练时的条件链与推理保持一致，而监督目标仍然来自完整参考图。
 
 输出格式：
 ----------
 {
-    'degraded': [3, H, W],      # 当前褪色图像（输入）
-    'gt': [3, H, W],            # 目标GT（根据模式生成）
-    'mask': [1, H, W],          # 修复区域掩码 (1=需要修复)
-    'color_prior': [3, H, W],   # 颜色先验图
-    'confidence': [1, H, W],    # 置信度图
-    'mode': str,                # 当前样本使用的模式
-    'path': str                 # 图像路径
+    'degraded': [3, H, W],       # 当前训练输入（已按 mask 合成真实缺损外观）
+    'degraded_full': [3, H, W],  # 完整褪色图（仅用于生成训练目标）
+    'gt': [3, H, W],             # 目标GT（根据模式生成）
+    'mask': [1, H, W],           # 修复区域掩码 (1=需要修复)
+    'color_prior': [3, H, W],    # 颜色先验图（基于真实缺损输入生成）
+    'confidence': [1, H, W],     # 置信度图
+    'mode': str,                 # 当前样本使用的模式
+    'path': str                  # 图像路径
 }
 
 Author: Auto-generated for BrushNet Integration
@@ -120,6 +124,8 @@ class MuralInpaintingDataset(Dataset):
         self.GT_size = opt.get('GT_size', 256)
         self.use_flip = opt.get('use_flip', True)
         self.use_rot = opt.get('use_rot', True)
+        self.observed_hole_fill = str(opt.get('observed_hole_fill', 'white')).lower()
+        self.observed_hole_fill_value = int(opt.get('observed_hole_fill_value', 255))
         
         # 加载图像路径
         self.image_paths = self._get_image_paths(opt.get('dataroot_GT', ''))
@@ -144,6 +150,35 @@ class MuralInpaintingDataset(Dataset):
         print(f"  - GT模式: {self.gt_mode}")
         print(f"  - 图像尺寸: {self.GT_size}")
         print(f"  - Debug模式: {self.debug_mode}")
+
+    def _build_observed_input(self, degraded_img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """
+        构造训练时的“真实缺损输入”。
+
+        训练目标仍然来自完整褪色图，但提供给 prior/LUT/Mu-Denoiser 的输入
+        需要尽量模拟推理时已经真实缺损的观测图像。
+
+        Args:
+            degraded_img: [H, W, 3] uint8 完整褪色图
+            mask: [H, W] uint8 掩码，255=缺失区域
+
+        Returns:
+            observed: [H, W, 3] uint8 合成后的缺损输入
+        """
+        observed = degraded_img.copy()
+        hole = mask > 127
+
+        if self.observed_hole_fill == 'white':
+            observed[hole] = self.observed_hole_fill_value
+        elif self.observed_hole_fill == 'black':
+            observed[hole] = 0
+        else:
+            raise ValueError(
+                f"不支持的 observed_hole_fill: {self.observed_hole_fill}，"
+                "请使用 'white' 或 'black'"
+            )
+
+        return observed
     
     def _get_image_paths(self, root: str) -> List[str]:
         """获取目录下所有图像文件路径"""
@@ -316,16 +351,18 @@ class MuralInpaintingDataset(Dataset):
         self, 
         img: np.ndarray, 
         mask: np.ndarray,
+        observed_img: np.ndarray,
         color_prior: np.ndarray,
         gt: np.ndarray,
         confidence: np.ndarray,
         conf_lut: np.ndarray = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """数据增强（包含 confidence 和 conf_lut）"""
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """数据增强（包含 observed_img、confidence 和 conf_lut）"""
         # 水平翻转
         if self.use_flip and random.random() > 0.5:
             img = np.fliplr(img).copy()
             mask = np.fliplr(mask).copy()
+            observed_img = np.fliplr(observed_img).copy()
             color_prior = np.fliplr(color_prior).copy()
             gt = np.fliplr(gt).copy()
             confidence = np.fliplr(confidence).copy()
@@ -338,13 +375,14 @@ class MuralInpaintingDataset(Dataset):
             if k > 0:
                 img = np.rot90(img, k).copy()
                 mask = np.rot90(mask, k).copy()
+                observed_img = np.rot90(observed_img, k).copy()
                 color_prior = np.rot90(color_prior, k).copy()
                 gt = np.rot90(gt, k).copy()
                 confidence = np.rot90(confidence, k).copy()
                 if conf_lut is not None:
                     conf_lut = np.rot90(conf_lut, k).copy()
         
-        return img, mask, color_prior, gt, confidence, conf_lut
+        return img, mask, observed_img, color_prior, gt, confidence, conf_lut
     
     def _generate_gt(
         self, 
@@ -417,7 +455,8 @@ class MuralInpaintingDataset(Dataset):
         
         Returns:
             dict 包含：
-                - 'degraded': [3, H, W] 褪色图像
+                - 'degraded': [3, H, W] 当前训练输入（真实缺损外观）
+                - 'degraded_full': [3, H, W] 完整褪色图
                 - 'gt': [3, H, W] 目标GT
                 - 'mask': [1, H, W] 修复掩码
                 - 'color_prior': [3, H, W] 颜色先验
@@ -449,8 +488,10 @@ class MuralInpaintingDataset(Dataset):
         degraded_img, mask = self._random_crop(degraded_img, mask)
         
         # ============================================================
-        # Step 3: 确定GT模式
+        # Step 3: 构造真实缺损输入，并确定 GT 模式
         # ============================================================
+        observed_degraded = self._build_observed_input(degraded_img, mask)
+
         if self.gt_mode == 'mixed':
             current_mode = 'full' if random.random() > 0.5 else 'partial'
         else:
@@ -460,7 +501,7 @@ class MuralInpaintingDataset(Dataset):
         # Step 4: 生成颜色先验和置信度（遵循 gt_mode）
         # ============================================================
         # 获取LUT映射结果
-        prior_result = self.color_prior_gen.generate(degraded_img, mask, method=self.prior_method)
+        prior_result = self.color_prior_gen.generate(observed_degraded, mask, method=self.prior_method)
         lut_mapped = prior_result['color_prior']     # [H, W, 3] float32 - 全图LUT+修复
         confidence = prior_result['confidence']       # [H, W] float32
         conf_lut = prior_result['conf_lut']           # [H, W] float32 - LUT原始置信度
@@ -473,7 +514,7 @@ class MuralInpaintingDataset(Dataset):
             # Partial 模式: Prior 只在mask区域使用LUT（使用羽化融合）
             lut_mapped_uint8 = np.clip(lut_mapped, 0, 255).astype(np.uint8)
             color_prior_blended = self._feather_blend(
-                original=degraded_img,
+                original=observed_degraded,
                 transformed=lut_mapped_uint8,
                 mask=mask,
                 feather_radius=7
@@ -488,8 +529,8 @@ class MuralInpaintingDataset(Dataset):
         # ============================================================
         # Step 6: 数据增强（同时增强 confidence 和 conf_lut）
         # ============================================================
-        degraded_img, mask, color_prior, gt, confidence, conf_lut = self._augment_with_confidence(
-            degraded_img, mask, color_prior, gt, confidence, conf_lut
+        degraded_img, mask, observed_degraded, color_prior, gt, confidence, conf_lut = self._augment_with_confidence(
+            degraded_img, mask, observed_degraded, color_prior, gt, confidence, conf_lut
         )
         
         # ============================================================
@@ -497,7 +538,8 @@ class MuralInpaintingDataset(Dataset):
         # ============================================================
         if self.debug_mode and index < 5:  # 只保存前5个样本
             self._save_debug(index, {
-                'degraded': degraded_img,
+                'degraded': observed_degraded,
+                'degraded_full': degraded_img,
                 'gt': gt,
                 'mask': mask,
                 'color_prior': color_prior,
@@ -507,7 +549,8 @@ class MuralInpaintingDataset(Dataset):
         # ============================================================
         # Step 8: 转换为张量
         # ============================================================
-        degraded_tensor = self._to_tensor(degraded_img)           # [3, H, W]
+        degraded_tensor = self._to_tensor(observed_degraded)      # [3, H, W]
+        degraded_full_tensor = self._to_tensor(degraded_img)      # [3, H, W]
         gt_tensor = self._to_tensor(gt)                           # [3, H, W]
         color_prior_tensor = self._to_tensor(
             np.clip(color_prior, 0, 255).astype(np.uint8)
@@ -540,6 +583,7 @@ class MuralInpaintingDataset(Dataset):
         
         return {
             'degraded': degraded_tensor,
+            'degraded_full': degraded_full_tensor,
             'GT': gt_tensor,  # 与原数据集兼容
             'gt': gt_tensor,
             'GT_gray': gt_gray_tensor,   # 灰度图（与原训练代码兼容）

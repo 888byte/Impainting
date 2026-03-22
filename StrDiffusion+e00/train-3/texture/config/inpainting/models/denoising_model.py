@@ -371,7 +371,8 @@ class DenoisingModel(BaseModel):
 
 
     def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, 
-                  color_prior=None, confidence=None, conf_lut=None, original_degraded=None):
+                  color_prior=None, confidence=None, conf_lut=None,
+                  original_degraded=None, reference_degraded=None):
         """
         加载训练数据
         
@@ -386,7 +387,8 @@ class DenoisingModel(BaseModel):
             color_prior: [可选] 颜色先验图，用于BrushNet
             confidence: [可选] 置信度图，用于BrushNet
             conf_lut: [可选] LUT置信度图
-            original_degraded: [可选] 原始褪色图（无 mask 涂黑），用于去噪
+            original_degraded: [可选] 当前观测输入（真实缺损外观），用于条件链
+            reference_degraded: [可选] 完整褪色参考图，仅用于训练目标生成
         """
         self.state = state.to(self.device)    # noisy_state
         self.condition = LQ.to(self.device)   # LQ（可能带 mask 涂黑）
@@ -396,12 +398,17 @@ class DenoisingModel(BaseModel):
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
         
-        # 原始褪色图（用于第一阶段去噪）
+        # 当前观测输入：模拟真实推理时已经存在缺损的输入图像
         if original_degraded is not None:
             self.original_degraded = original_degraded.to(self.device)
         else:
-            # 如果没有提供，回退到 condition
             self.original_degraded = self.condition
+
+        # 完整参考图：只用于构造训练目标，不参与推理时的条件生成
+        if reference_degraded is not None:
+            self.reference_degraded = reference_degraded.to(self.device)
+        else:
+            self.reference_degraded = self.original_degraded
         
         # BrushNet条件
         if color_prior is not None:
@@ -427,7 +434,7 @@ class DenoisingModel(BaseModel):
         CRITICAL: 确保 generate_random_states 和 optimize_parameters 用同一个 mu_clean
         
         Args:
-            y_degraded: [B, 3, H, W] 原始褪色图
+            y_degraded: [B, 3, H, W] 当前观测输入
             mask_known: [B, 1, H, W] SDE mask (1=known, 0=hole)
             confidence: [B, 1, H, W] 可选置信度
         
@@ -450,79 +457,42 @@ class DenoisingModel(BaseModel):
     def optimize_parameters(self, step, timesteps, sde=None):
         self.log_dict = OrderedDict()
 
-        # ============ 第一阶段：原始褪色图去噪 ============
-        # 对原始褪色图（original_degraded）进行边缘保持去噪
-        # 去噪是所有后续操作的基础
+        # ============ 第一阶段：分离“条件链输入”和“训练目标输入” ============
+        # original_degraded  : 当前观测输入（真实缺损外观）
+        # reference_degraded : 完整褪色参考图（只用于生成训练目标）
         with torch.no_grad():
             denoised_original = self._denoise_image(self.original_degraded)
-        
-        # ============ 第二阶段：对去噪后的图像应用LUT颜色变换 ============
-        # 根据配置的 gt_mode 决定变换方式：
-        # - full: 全图LUT变换
-        # - partial: 仅mask区域LUT变换，非mask区域保持去噪后的原色
-        with torch.no_grad():
-            if self.lut_processor is not None:
-                # 应用 LUT 变换，获取颜色映射和置信度
-                lut_transformed, lut_confidence = self.lut_processor.apply_to_tensor(denoised_original)
-                # lut_confidence: [B, 1, H, W] 每个像素的LUT置信度 (0-1)
-                
-                # ============ 平滑处理（导向滤波）============
-                # 以去噪后的原图为引导，平滑 LUT 结果，减少颜色割裂
-                if self.lut_smooth_radius > 0:
-                    lut_transformed = self._guided_smooth(
-                        lut_transformed, 
-                        guide=denoised_original, 
-                        radius=self.lut_smooth_radius
-                    )
-                
-                # ============ 置信度加权 LUT 混合 ============
-                # 使用 LUT 置信度进行逐像素加权混合：
-                # - 高置信度像素：使用更多 LUT 颜色
-                # - 低置信度像素：保持更多原色
-                # 最终权重 = lut_strength * lut_confidence
-                effective_weight = self.lut_strength * lut_confidence  # [B, 1, H, W]
-                
-                # 逐像素混合：原色 * (1 - weight) + LUT * weight
-                lut_transformed = (
-                    denoised_original * (1 - effective_weight) + 
-                    lut_transformed * effective_weight
-                )
-                
-                if self.gt_mode == 'full':
-                    # 全图 LUT 变换
-                    color_changed = lut_transformed
-                else:  # partial 或其他模式
-                    # 仅 mask 区域 LUT 变换
-                    # mask: 1=已知区域, 0=缺失区域
-                    # 缺失区域（mask=0）使用 LUT 变换，已知区域保持去噪原色
-                    color_changed = denoised_original * self.mask + lut_transformed * (1 - self.mask)
+            if self.reference_degraded.data_ptr() == self.original_degraded.data_ptr():
+                denoised_reference = denoised_original
             else:
-                # 没有 LUT 处理器，直接使用去噪后的图像
-                color_changed = denoised_original
-                lut_transformed = denoised_original
-                lut_confidence = torch.ones_like(denoised_original[:, :1])
+                denoised_reference = self._denoise_image(self.reference_degraded)
+
+            # 条件链：严格模拟推理时的真实缺损输入
+            lut_transformed, lut_confidence = self._build_lut_transformed(denoised_original)
+
+            # 训练目标：始终来自完整参考图，避免把真实缺损输入错误写进监督信号
+            target_lut_transformed, _ = self._build_lut_transformed(denoised_reference)
+            if self.gt_mode == 'full':
+                color_changed = target_lut_transformed
+            else:
+                color_changed = denoised_reference * self.mask + target_lut_transformed * (1 - self.mask)
         
         # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
         training_target = color_changed
         
         # ============ 重要：同步更新 color_prior 的非 mask 区域 ============
-        # 问题：原始 self.color_prior 来自 ColorPriorGenerator，使用旧的 LUT 逻辑
-        # 解决：非 mask 区域（已知区域）使用新的 lut_transformed 结果
-        #       mask 区域保留原始的传统填充结果（cv2.inpaint）
-        # 
-        # self.mask: 1=已知区域, 0=缺失区域（需要修复）
+        # 使用“真实缺损输入”对应的 LUT 结果更新已知区域，使训练和推理一致
         if self.color_prior is not None:
-            # 非mask区域用lut_transformed，mask区域保留原始prior的填充结果
             self.color_prior = (
-                lut_transformed * self.mask +           # 已知区域：新LUT逻辑
-                self.color_prior * (1 - self.mask)      # 缺失区域：保留传统填充
+                lut_transformed * self.mask +
+                self.color_prior * (1 - self.mask)
             )
         
         # ============ Self-Supervised Mu-Denoiser 训练 ============
         # 在 SDE 训练前，对 mu 进行自监督去噪
         mu_denoiser_loss = None
         if self.use_mu_denoiser and self.is_train:
-            # 使用 original_degraded（未涂黑的原始图）进行去噪
+            # 使用真实缺损输入进行去噪训练，和推理保持一致
             # 注意：self.mask 已经是 SDE 语义 (1=known, 0=hole)
             y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
                 y_degraded=self.original_degraded,
@@ -628,13 +598,14 @@ class DenoisingModel(BaseModel):
         # 5. Original+Mask: 原图 + mask 涂黑
         # 6. Mask
         self._debug_refiner_info = {
-            'original_degraded': self.original_degraded.detach(),  # 原始褪色图
-            'denoised_original': denoised_original.detach(),       # 双边滤波去噪后的原图
-            'mu_clean': mu_clean.detach() if mu_clean is not self.condition else None,  # D_mu 去噪的 mu
-            'lut_transformed': lut_transformed.detach(),           # LUT 混合结果
-            'color_changed': color_changed.detach(),               # LUT变换后（训练目标）
+            'original_degraded': self.original_degraded.detach(),   # 当前观测输入（真实缺损外观）
+            'reference_degraded': self.reference_degraded.detach(), # 完整参考图
+            'denoised_original': denoised_original.detach(),        # 条件链去噪结果
+            'mu_clean': mu_clean.detach() if mu_clean is not self.condition else None,
+            'lut_transformed': lut_transformed.detach(),            # 条件链 LUT 结果
+            'color_changed': color_changed.detach(),                # 训练目标
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
-            'original_with_mask': (self.original_degraded * self.mask).detach(),  # 原图+mask涂黑
+            'original_with_mask': self.condition.detach(),
             'mask': self.mask.detach(),
             'mask_known': self.mask.detach(),
             'mask_hole': (1 - self.mask).detach(),
@@ -669,6 +640,36 @@ class DenoisingModel(BaseModel):
                 ("stats_mu_known_std", mu_known_std),
             ]
         )
+
+    def _build_lut_transformed(self, denoised_image):
+        """
+        对输入图像执行训练/推理共享的 LUT 后处理。
+
+        Args:
+            denoised_image: [B, 3, H, W]，已经完成预去噪的输入
+
+        Returns:
+            lut_transformed: [B, 3, H, W]
+            lut_confidence: [B, 1, H, W]
+        """
+        if self.lut_processor is None:
+            return denoised_image, torch.ones_like(denoised_image[:, :1])
+
+        lut_transformed, lut_confidence = self.lut_processor.apply_to_tensor(denoised_image)
+
+        if self.lut_smooth_radius > 0:
+            lut_transformed = self._guided_smooth(
+                lut_transformed,
+                guide=denoised_image,
+                radius=self.lut_smooth_radius
+            )
+
+        effective_weight = self.lut_strength * lut_confidence
+        lut_transformed = (
+            denoised_image * (1 - effective_weight) +
+            lut_transformed * effective_weight
+        )
+        return lut_transformed, lut_confidence
     
     def _denoise_image(self, image):
         """

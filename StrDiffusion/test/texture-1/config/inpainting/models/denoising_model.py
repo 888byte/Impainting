@@ -394,6 +394,7 @@ class DenoisingModel(BaseModel):
                     self.output = pred_full
 
                 self.debug_outputs = {
+                    "original_degraded": self.original_degraded,
                     "mask_hole": self.mask_hole,
                     "mask_known": self.mask,
                     "color_prior": self.color_prior,

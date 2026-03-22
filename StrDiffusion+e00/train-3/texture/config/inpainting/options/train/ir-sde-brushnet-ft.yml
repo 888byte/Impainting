@@ -1,0 +1,145 @@
+#### BrushNet + MGLC-Tex finetune config
+#### Usage:
+####   python train.py -opt ./texture/config/inpainting/options/train/ir-sde-brushnet-ft.yml
+#### Before running:
+####   1. Replace path.pretrain_model_G with your last-stage final/latest weight.
+####   2. Keep resume_state as ~ for a clean finetune stage.
+
+name: ir-sde-brushnet-ft
+use_tb_logger: true
+model: denoising
+distortion: inpainting
+gpu_ids: [0]
+
+#### SDE
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+
+#### Degradation
+degradation:
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+
+#### BrushNet
+brushnet:
+  enabled: true
+  in_nc: 8
+  nf: 64
+  depth: 4
+  lite: false
+
+#### Texture core
+texture_core:
+  enabled: true
+  name: MGLCBlock
+  insert_mid: true
+  insert_dec: true
+  backend: sem_lite
+  branch_mode: both
+  use_mask_gate: true
+  gate_hidden: 16
+  boundary_width: 3
+  zero_init_last: true
+
+#### Baseline compatibility fix
+restore_S_guidance: true
+
+#### Self-Supervised Mu-Denoiser
+mu_denoiser:
+  enabled: true
+  in_nc: 5
+  dim: 32
+  num_blocks: 2
+  num_heads: 4
+  predict_residual: true
+  blind_ratio: 0.1
+  lambda_ss: 1.0
+  lambda_tv: 0.01
+  lr: !!float 5e-5
+
+#### Dataset
+datasets:
+  train:
+    name: MuralInpainting_Dataset
+    mode: mural_inpainting
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+
+    gt_mode: full
+
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
+    lut_alpha: 0.85
+    lut_beta: 0.15
+    lut_inpaint_method: telea
+    lut_strength: 2
+    lut_smooth_radius: 1
+
+    prior_method: fast
+    debug_mode: false
+
+    #### Simulate real missing inputs during training.
+    #### white: fill masked pixels with 255 before prior/LUT/mu generation.
+    observed_hole_fill: white
+    observed_hole_fill_value: 255
+
+    use_shuffle: true
+    n_workers: 32
+    batch_size: 16
+    GT_size: 256
+    use_flip: true
+    use_rot: true
+    color: RGB
+
+#### Network
+network_G:
+  which_model_G: ConditionalUNetWithBrushNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+
+#### Paths
+path:
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/experiments/ir-sde-brushnet/models/latest_G.pth
+  strict_load: false
+  resume_state: ~
+
+#### Training
+train:
+  optimizer: Adam
+  lr_G: !!float 5e-6
+  lr_scheme: MultiStepLR
+  beta1: 0.9
+  beta2: 0.999
+  niter: 30000
+  warmup_iter: 1000
+  lr_steps: [10000, 20000, 27000]
+  lr_gamma: 0.5
+  eta_min: !!float 1e-7
+
+  is_weighted: False
+  loss_type: l1
+  weight: 1.0
+
+  manual_seed: 0
+
+#### Debug
+debug:
+  enabled: false
+  log_dir: debug_logs/
+  save_freq: 10
+  save_items:
+    - input_image
+    - transformed_gt
+    - generated_prior
+    - confidence_map
+    - masked_input
+
+#### Logger
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 2000
+  use_tb_logger: true
