@@ -111,6 +111,7 @@ class DenoisingModel(BaseModel):
         #else:
             #self.rank = -1  # non dist training
         train_opt = opt["train"]
+        self.train_opt = train_opt
         
 
         # define network and load pretrained models
@@ -146,6 +147,7 @@ class DenoisingModel(BaseModel):
         
         # ============ 初始化 Self-Supervised Mu-Denoiser ============
         mu_denoiser_opt = opt.get('mu_denoiser', {})
+        self.mu_denoiser_opt = mu_denoiser_opt
         self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
         
         if self.use_mu_denoiser:
@@ -173,6 +175,9 @@ class DenoisingModel(BaseModel):
         else:
             self.mu_denoiser = None
             self.mu_denoiser_trainer = None
+            self.optimizer_mu = None
+            self.scheduler_mu = None
+            self._optimizer_mu_init_lr = None
             if mu_denoiser_opt.get('enabled', False) and not HAS_MU_DENOISER:
                 logger.warning("[Model] Mu-Denoiser 配置已启用但模块未找到")
         
@@ -233,7 +238,8 @@ class DenoisingModel(BaseModel):
                     lr=mu_denoiser_opt.get('lr', 1e-4),
                     betas=(0.9, 0.999),
                 )
-                # 不加入 self.optimizers，因为我们单独管理它
+                self._optimizer_mu_init_lr = mu_denoiser_opt.get('lr', 1e-4)
+                self.scheduler_mu = self._build_mu_scheduler(train_opt)
                 logger.info(f"[Model] Mu-Denoiser 优化器已创建: lr={mu_denoiser_opt.get('lr', 1e-4)}")
 
             # schedulers
@@ -262,6 +268,106 @@ class DenoisingModel(BaseModel):
 
             self.ema = EMA(self.model, beta=0.995, update_every=10).to(self.device)
             self.log_dict = OrderedDict()
+
+    def _build_mu_scheduler(self, train_opt):
+        if not self.use_mu_denoiser or self.optimizer_mu is None:
+            return None
+
+        if train_opt["lr_scheme"] == "MultiStepLR":
+            return lr_scheduler.MultiStepLR_Restart(
+                self.optimizer_mu,
+                train_opt["lr_steps"],
+                restarts=train_opt["restarts"],
+                weights=train_opt["restart_weights"],
+                gamma=train_opt["lr_gamma"],
+                clear_state=train_opt["clear_state"],
+            )
+        if train_opt["lr_scheme"] == "TrueCosineAnnealingLR":
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer_mu,
+                T_max=train_opt["niter"],
+                eta_min=train_opt["eta_min"],
+            )
+        raise NotImplementedError("Unsupported lr scheme for Mu-Denoiser.")
+
+    def _set_optimizer_mu_lr(self, lr_value):
+        if self.optimizer_mu is None:
+            return
+        for param_group in self.optimizer_mu.param_groups:
+            param_group["lr"] = lr_value
+
+    def _sync_mu_lr_to_iter(self, cur_iter, warmup_iter=-1):
+        if self.optimizer_mu is None or self._optimizer_mu_init_lr is None:
+            return
+
+        if warmup_iter is not None and warmup_iter > 0 and cur_iter < warmup_iter:
+            self._set_optimizer_mu_lr(self._optimizer_mu_init_lr / warmup_iter * cur_iter)
+            return
+
+        train_opt = self.train_opt
+        if train_opt["lr_scheme"] == "MultiStepLR":
+            gamma = train_opt["lr_gamma"]
+            step_count = sum(1 for step in train_opt["lr_steps"] if cur_iter >= step)
+            self._set_optimizer_mu_lr(self._optimizer_mu_init_lr * (gamma ** step_count))
+            return
+
+        if train_opt["lr_scheme"] == "TrueCosineAnnealingLR":
+            eta_min = train_opt["eta_min"]
+            t_max = max(1, train_opt["niter"])
+            cosine = math.cos(math.pi * min(cur_iter, t_max) / t_max)
+            lr_value = eta_min + (self._optimizer_mu_init_lr - eta_min) * (1 + cosine) / 2
+            self._set_optimizer_mu_lr(lr_value)
+            return
+
+        raise NotImplementedError("Unsupported lr scheme for Mu-Denoiser.")
+
+    def update_learning_rate(self, cur_iter, warmup_iter=-1):
+        super(DenoisingModel, self).update_learning_rate(cur_iter, warmup_iter)
+        if self.scheduler_mu is not None:
+            self.scheduler_mu.step()
+            if warmup_iter is not None and warmup_iter > 0 and cur_iter < warmup_iter:
+                self._set_optimizer_mu_lr(self._optimizer_mu_init_lr / warmup_iter * cur_iter)
+
+    def save_training_state(self, epoch, iter_step, label=None, extra_state=None):
+        state = {"epoch": epoch, "iter": iter_step, "schedulers": [], "optimizers": []}
+        for scheduler in self.schedulers:
+            state["schedulers"].append(scheduler.state_dict())
+        for optimizer in self.optimizers:
+            state["optimizers"].append(optimizer.state_dict())
+
+        if self.use_mu_denoiser and self.optimizer_mu is not None:
+            state["optimizer_mu"] = self.optimizer_mu.state_dict()
+        if self.use_mu_denoiser and self.scheduler_mu is not None:
+            state["scheduler_mu"] = self.scheduler_mu.state_dict()
+
+        if extra_state:
+            state.update(extra_state)
+
+        save_label = label if label is not None else str(iter_step)
+        save_filename = "{}.state".format(save_label)
+        save_path = os.path.join(self.opt["path"]["training_state"], save_filename)
+        torch.save(state, save_path)
+
+    def resume_training(self, resume_state):
+        super(DenoisingModel, self).resume_training(resume_state)
+
+        if not self.use_mu_denoiser or self.optimizer_mu is None:
+            return
+
+        if "optimizer_mu" in resume_state:
+            self.optimizer_mu.load_state_dict(resume_state["optimizer_mu"])
+        else:
+            logger.warning("[Model] resume_state 中缺少 optimizer_mu，将按当前迭代同步 Mu-Denoiser 学习率。")
+
+        if self.scheduler_mu is not None:
+            if "scheduler_mu" in resume_state:
+                self.scheduler_mu.load_state_dict(resume_state["scheduler_mu"])
+            else:
+                logger.warning("[Model] resume_state 中缺少 scheduler_mu，将按当前迭代推断 Mu-Denoiser 学习率。")
+                self._sync_mu_lr_to_iter(
+                    int(float(resume_state["iter"])),
+                    self.train_opt.get("warmup_iter", -1),
+                )
 
 
     def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, 

@@ -97,8 +97,10 @@ def _build_tb_scalar_map(logs):
     add("train/loss_mu_tv", "loss_mu_tv")
     add("train/lr_main", "lr_main")
     add("train/lr_mu", "lr_mu")
+    add("train/ema_texture_loss", "ema_texture_loss")
     add("train/ema_total_loss", "ema_total_loss")
     add("train/best_metric", "best_metric")
+    add("train/best_total_metric", "best_total_metric")
     add("train/mask_hole_ratio", "mask_hole_ratio")
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
     add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
@@ -256,8 +258,12 @@ def main():
     save_freq = 5000
 
     # 2) 训练loss最优保存（best），用EMA平滑避免抖动
-    best_loss = float("inf")
-    ema_loss = None
+    # best:     以主纹理损失为准，更贴近最终修复质量
+    # best_total: 以总损失为准，便于追踪包含 D_mu 的整体最优点
+    best_texture_loss = float("inf")
+    best_total_loss = float("inf")
+    ema_texture_loss = None
+    ema_total_loss = None
     ema_beta = 0.98  # 越大越平滑（0.98~0.995都可）
 
     # 3) 确保 training_state 目录存在（避免 save_training_state 失败）
@@ -357,6 +363,14 @@ def main():
         start_epoch = int(float(resume_state["epoch"]))
         current_step = int(float(resume_state["iter"]))
         model.resume_training(resume_state)  # handle optimizers and schedulers
+        best_texture_loss = float(resume_state.get("best_texture_loss", best_texture_loss))
+        best_total_loss = float(resume_state.get("best_total_loss", best_total_loss))
+        ema_texture_loss = resume_state.get("ema_texture_loss", ema_texture_loss)
+        ema_total_loss = resume_state.get("ema_total_loss", ema_total_loss)
+        if ema_texture_loss is not None:
+            ema_texture_loss = float(ema_texture_loss)
+        if ema_total_loss is not None:
+            ema_total_loss = float(ema_total_loss)
     else:
         current_step = 0
         start_epoch = 0
@@ -520,27 +534,45 @@ def main():
             # 统一在每个iter取一次log，后面打印/保存都复用，避免重复调用
             logs = model.get_current_log()
 
-            # 从logs中尽量稳健地取“总loss”
-            if "loss_total" in logs:
-                cur_loss = float(logs["loss_total"])
+            # 主纹理损失：用于 best checkpoint
+            if "loss_main" in logs:
+                cur_texture_loss = float(logs["loss_main"])
             elif "loss" in logs:
-                cur_loss = float(logs["loss"])
+                cur_texture_loss = float(logs["loss"])
             elif "l_total" in logs:
-                cur_loss = float(logs["l_total"])
+                cur_texture_loss = float(logs["l_total"])
             else:
-                # 把所有以 l_ 开头的项加起来作为总loss
-                cur_loss = 0.0
+                cur_texture_loss = 0.0
                 for k, v in logs.items():
                     if str(k).startswith("l_"):
-                        cur_loss += float(v)
+                        cur_texture_loss += float(v)
+
+            # 总损失：用于观测整体优化过程
+            if "loss_total" in logs:
+                cur_total_loss = float(logs["loss_total"])
+            elif "loss" in logs:
+                cur_total_loss = float(logs["loss"])
+            elif "l_total" in logs:
+                cur_total_loss = float(logs["l_total"])
+            else:
+                cur_total_loss = 0.0
+                for k, v in logs.items():
+                    if str(k).startswith("l_"):
+                        cur_total_loss += float(v)
 
             # EMA平滑（用于挑 best）
-            if ema_loss is None:
-                ema_loss = cur_loss
+            if ema_texture_loss is None:
+                ema_texture_loss = cur_texture_loss
             else:
-                ema_loss = ema_beta * ema_loss + (1.0 - ema_beta) * cur_loss
-            logs["ema_total_loss"] = float(ema_loss)
-            logs["best_metric"] = float(min(best_loss, ema_loss))
+                ema_texture_loss = ema_beta * ema_texture_loss + (1.0 - ema_beta) * cur_texture_loss
+            if ema_total_loss is None:
+                ema_total_loss = cur_total_loss
+            else:
+                ema_total_loss = ema_beta * ema_total_loss + (1.0 - ema_beta) * cur_total_loss
+            logs["ema_texture_loss"] = float(ema_texture_loss)
+            logs["ema_total_loss"] = float(ema_total_loss)
+            logs["best_metric"] = float(min(best_texture_loss, ema_texture_loss))
+            logs["best_total_metric"] = float(min(best_total_loss, ema_total_loss))
 
             # 仅rank0保存，避免多卡写冲突
             if rank <= 0:
@@ -550,14 +582,23 @@ def main():
                     # 使用iter作为标签，确保权重和state文件对应
                     # 生成: {iter}_G.pth, {iter}_D.pth, {iter}.state
                     model.save(str(current_step))
-                    model.save_training_state(epoch, current_step, label=str(current_step))
+                    model.save_training_state(
+                        epoch,
+                        current_step,
+                        label=str(current_step),
+                        extra_state={
+                            "best_texture_loss": float(best_texture_loss),
+                            "best_total_loss": float(best_total_loss),
+                            "ema_texture_loss": float(ema_texture_loss),
+                            "ema_total_loss": float(ema_total_loss),
+                        },
+                    )
 
                 # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
-                if ema_loss < best_loss:
-                    best_loss = ema_loss
-                    logs["best_metric"] = float(best_loss)
-                    # 构建日志信息：epoch/iter/lr/loss 在前，D_mu loss 在后
-                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best] loss_main: {:.4e} loss_total: {:.4e}".format(
+                if ema_texture_loss < best_texture_loss:
+                    best_texture_loss = ema_texture_loss
+                    logs["best_metric"] = float(best_texture_loss)
+                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best-texture] loss_main: {:.4e} loss_total: {:.4e}".format(
                         epoch,
                         current_step,
                         model.get_current_learning_rate(),
@@ -569,10 +610,46 @@ def main():
                     if 'loss_mu_total' in logs:
                         log_msg += f" loss_mu={logs['loss_mu_total']:.4f}"
                     logger.info(log_msg)
-                    # 使用 "best" 标签，确保只保留一个best文件
-                    # 生成: best_G.pth, best_D.pth, best.state
                     model.save("best")
-                    model.save_training_state(epoch, current_step, label="best")
+                    model.save_training_state(
+                        epoch,
+                        current_step,
+                        label="best",
+                        extra_state={
+                            "best_texture_loss": float(best_texture_loss),
+                            "best_total_loss": float(best_total_loss),
+                            "ema_texture_loss": float(ema_texture_loss),
+                            "ema_total_loss": float(ema_total_loss),
+                        },
+                    )
+
+                if ema_total_loss < best_total_loss:
+                    best_total_loss = ema_total_loss
+                    logs["best_total_metric"] = float(best_total_loss)
+                    log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best-total] loss_main: {:.4e} loss_total: {:.4e}".format(
+                        epoch,
+                        current_step,
+                        model.get_current_learning_rate(),
+                        logs.get('loss_main', logs.get('loss', 0)),
+                        logs.get('loss_total', logs.get('loss', 0)),
+                    )
+                    if 'loss_mu_ss' in logs:
+                        log_msg += f" loss_mu_ss={logs['loss_mu_ss']:.4f}"
+                    if 'loss_mu_total' in logs:
+                        log_msg += f" loss_mu={logs['loss_mu_total']:.4f}"
+                    logger.info(log_msg)
+                    model.save("best_total")
+                    model.save_training_state(
+                        epoch,
+                        current_step,
+                        label="best_total",
+                        extra_state={
+                            "best_texture_loss": float(best_texture_loss),
+                            "best_total_loss": float(best_total_loss),
+                            "ema_texture_loss": float(ema_texture_loss),
+                            "ema_total_loss": float(ema_total_loss),
+                        },
+                    )
             #———————————————————检查点保存—————————————————————————
             #———————————————————检查点保存—————————————————————————
 
@@ -613,7 +690,17 @@ def main():
         #———————————————————检查点保存—————————————————————————
         #———————————————————检查点保存—————————————————————————
         try:
-            model.save_training_state(total_epochs, current_step, label="latest")
+            model.save_training_state(
+                total_epochs,
+                current_step,
+                label="latest",
+                extra_state={
+                    "best_texture_loss": float(best_texture_loss),
+                    "best_total_loss": float(best_total_loss),
+                    "ema_texture_loss": float(ema_texture_loss) if ema_texture_loss is not None else None,
+                    "ema_total_loss": float(ema_total_loss) if ema_total_loss is not None else None,
+                },
+            )
         except Exception as e:
             logger.info(f"[warn] save_training_state(latest) failed: {e}")
         #———————————————————检查点保存—————————————————————————
