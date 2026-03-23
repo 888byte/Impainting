@@ -44,7 +44,9 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_in_nc: int = 8,
         brushnet_enabled: bool = True,
         brushnet_lite: bool = False,
+        brushnet_prior_dropout_prob: float = 0.0,
         texture_core_opt: Optional[dict] = None,
+        main_guidance_opt: Optional[dict] = None,
         restore_S_guidance: bool = False,
     ) -> None:
         super().__init__()
@@ -53,8 +55,12 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.nf = nf
         self.brushnet_enabled = brushnet_enabled
         self.restore_S_guidance = restore_S_guidance
+        self.brushnet_prior_dropout_prob = float(brushnet_prior_dropout_prob)
+        if not 0.0 <= self.brushnet_prior_dropout_prob <= 1.0:
+            raise ValueError("brushnet_prior_dropout_prob must be in [0, 1]")
 
         texture_core_opt = texture_core_opt or {}
+        main_guidance_opt = main_guidance_opt or {}
         insert_mid = texture_core_opt.get("insert_mid", True)
         insert_dec = texture_core_opt.get("insert_dec", False)
         texture_core_enabled = bool(texture_core_opt.get("enabled", False))
@@ -81,6 +87,27 @@ class ConditionalUNetWithBrushNet(nn.Module):
         )
 
         self.init_conv = default_conv(in_nc * 2, nf, 7)
+        self.main_guidance_proj = None
+        self.main_guidance_use_observed = bool(
+            main_guidance_opt.get("use_observed_input", True)
+        )
+        self.main_guidance_use_mask = bool(main_guidance_opt.get("use_mask", True))
+        self.main_guidance_enabled = bool(main_guidance_opt.get("enabled", False))
+        if self.main_guidance_enabled:
+            guidance_in_nc = 0
+            if self.main_guidance_use_observed:
+                guidance_in_nc += in_nc
+            if self.main_guidance_use_mask:
+                guidance_in_nc += 1
+            if guidance_in_nc <= 0:
+                raise ValueError(
+                    "main_guidance.enabled is true, but no guidance input is enabled"
+                )
+            self.main_guidance_proj = default_conv(guidance_in_nc, nf, 3)
+            if main_guidance_opt.get("zero_init", True):
+                nn.init.zeros_(self.main_guidance_proj.weight)
+                if self.main_guidance_proj.bias is not None:
+                    nn.init.zeros_(self.main_guidance_proj.bias)
 
         self.downs = nn.ModuleList([])
         self.guides = nn.ModuleList([])
@@ -199,6 +226,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         mask: Optional[torch.Tensor] = None,
         color_prior: Optional[torch.Tensor] = None,
         confidence: Optional[torch.Tensor] = None,
+        observed_degraded: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run the active generator.
 
@@ -210,6 +238,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
             mask: [B, 1, H, W] repair-region mask in BrushNet semantics.
             color_prior: [B, 3, H, W] color prior.
             confidence: [B, 1, H, W] confidence map.
+            observed_degraded: [B, 3, H, W] observed damaged input fed to the
+                main trunk so the trunk does not rely on color_prior alone.
 
         Returns:
             Tuple[Tensor, Tensor], both [B, 3, H, W].
@@ -223,6 +253,12 @@ class ConditionalUNetWithBrushNet(nn.Module):
         H, W = x.shape[2:]
         x = self.check_image_size(x, H, W)
         t = self.time_mlp(time)
+        mask_padded = self.check_image_size(mask, H, W) if mask is not None else None
+        observed_padded = (
+            self.check_image_size(observed_degraded, H, W)
+            if observed_degraded is not None
+            else None
+        )
 
         brushnet_features = None
         brushnet_mid = None
@@ -233,15 +269,26 @@ class ConditionalUNetWithBrushNet(nn.Module):
             and color_prior is not None
             and confidence is not None
         ):
-            mask = self.check_image_size(mask, H, W)
             color_prior = self.check_image_size(color_prior, H, W)
             confidence = self.check_image_size(confidence, H, W)
+            if self.training and self.brushnet_prior_dropout_prob > 0.0:
+                color_prior, confidence = self._apply_prior_dropout(
+                    color_prior, confidence, mask_padded
+                )
 
-            bn_output = self.brushnet(xt, mask, color_prior, confidence, time)
+            bn_output = self.brushnet(xt, mask_padded, color_prior, confidence, time)
             brushnet_features = bn_output["down_features"]
             brushnet_mid = bn_output["mid_feature"]
 
         x = self.init_conv(x)
+        if self.main_guidance_proj is not None:
+            guidance_inputs = []
+            if self.main_guidance_use_observed and observed_padded is not None:
+                guidance_inputs.append(observed_padded)
+            if self.main_guidance_use_mask and mask_padded is not None:
+                guidance_inputs.append(mask_padded)
+            if guidance_inputs:
+                x = x + self.main_guidance_proj(torch.cat(guidance_inputs, dim=1))
         x_res = x.clone()
 
         skips = []
@@ -279,7 +326,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         # MGLC-Tex does not duplicate BrushNet conditioning. It only refines
         # features after BrushNet fusion.
         if self.mglc_mid is not None:
-            x = self.mglc_mid(x, mask)
+            x = self.mglc_mid(x, mask_padded)
 
         for blocks in self.ups:
             b1, b2, attn, upsample = blocks
@@ -293,7 +340,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
             x = upsample(x)
 
         if self.mglc_dec is not None:
-            x = self.mglc_dec(x, mask)
+            x = self.mglc_dec(x, mask_padded)
 
         x = torch.cat([x, x_res], dim=1)
         x = self.final_res_block(x, t)
@@ -301,12 +348,35 @@ class ConditionalUNetWithBrushNet(nn.Module):
         x = x[..., :H, :W]
         return x, x
 
+    def _apply_prior_dropout(
+        self,
+        color_prior: torch.Tensor,
+        confidence: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Drop hole-region prior content on random samples during training.
+
+        This keeps color_prior as a color guide instead of the only content
+        provider for the repair region.
+        """
+        if mask is None:
+            return color_prior, confidence
+
+        batch = color_prior.shape[0]
+        drop_flag = (
+            torch.rand(batch, 1, 1, 1, device=color_prior.device)
+            < self.brushnet_prior_dropout_prob
+        ).float()
+        keep_mask = 1.0 - drop_flag * mask
+        return color_prior * keep_mask, confidence * keep_mask
+
 
 def create_brushnet_unet(opt: dict) -> nn.Module:
     """Factory helper for the active BrushNet generator."""
     network_opt = opt.get("network_G", {}).get("setting", {})
     brushnet_opt = opt.get("brushnet", {})
     texture_core_opt = opt.get("texture_core", {})
+    main_guidance_opt = opt.get("main_guidance", {})
     restore_S_guidance = opt.get("restore_S_guidance", False)
 
     return ConditionalUNetWithBrushNet(
@@ -317,7 +387,9 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         brushnet_in_nc=brushnet_opt.get("in_nc", 8),
         brushnet_enabled=brushnet_opt.get("enabled", True),
         brushnet_lite=brushnet_opt.get("lite", False),
+        brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
         texture_core_opt=texture_core_opt,
+        main_guidance_opt=main_guidance_opt,
         restore_S_guidance=restore_S_guidance,
     )
 

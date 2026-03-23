@@ -29,6 +29,7 @@ def define_G(opt):
 
         brushnet_opt = opt.get("brushnet", {})
         texture_core_opt = opt.get("texture_core", {})
+        main_guidance_opt = opt.get("main_guidance", {})
         restore_s_guidance = opt.get("restore_S_guidance", False)
         net_g = ConditionalUNetWithBrushNet(
             in_nc=setting.get("in_nc", 3),
@@ -38,7 +39,9 @@ def define_G(opt):
             brushnet_in_nc=brushnet_opt.get("in_nc", 8),
             brushnet_enabled=brushnet_opt.get("enabled", True),
             brushnet_lite=brushnet_opt.get("lite", False),
+            brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
             texture_core_opt=texture_core_opt,
+            main_guidance_opt=main_guidance_opt,
             restore_S_guidance=restore_s_guidance,
         )
     else:

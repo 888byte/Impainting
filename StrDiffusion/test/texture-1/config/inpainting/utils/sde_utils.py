@@ -471,6 +471,7 @@ class IRSDE(SDE):
                 "confidence": kwargs.get("confidence").to(self.device)
                 if kwargs.get("confidence") is not None
                 else None,
+                "observed_degraded": degraded,
             }
             brushnet_kwargs = {
                 key: value for key, value in brushnet_kwargs.items() if value is not None

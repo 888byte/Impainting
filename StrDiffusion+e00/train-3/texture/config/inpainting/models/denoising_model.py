@@ -534,7 +534,10 @@ class DenoisingModel(BaseModel):
         if hasattr(self, 'mask') and self.mask is not None:
             # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
             brushnet_kwargs['mask'] = 1 - self.mask
-        
+        if hasattr(self, 'original_degraded') and self.original_degraded is not None:
+            # 主干显式感知真实缺损输入，避免 hole 区只能依赖 color_prior。
+            brushnet_kwargs['observed_degraded'] = self.original_degraded
+
         noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
         # ============ 传递BrushNet条件完成 ============
         
