@@ -475,19 +475,10 @@ def main():
             else:
                 mask_for_sde = mask  # 原始数据集的mask已经是 1=已知
             
-            # ============ 使用 D_mu 获取干净的 mu ============
-            # CRITICAL: generate_random_states 和 optimize_parameters 必须使用同一个 mu
-            # 否则会造成分布错配（states 用噪声 mu 采样，但训练时用干净 mu）
-            if hasattr(model, 'compute_mu_clean_no_grad'):
-                mu_for_sde = model.compute_mu_clean_no_grad(
-                    Y_degraded.to(device), 
-                    mask_for_sde.to(device), 
-                    confidence.to(device) if confidence is not None else None
-                )
-            else:
-                # 回退到原始行为
-                mu_for_sde = Y_degraded * mask_for_sde
-            
+            # Texture 主干恢复到原版 StrDiffusion 语义：
+            # mu/cond 必须始终等于“观测输入 * known-mask”，而不是辅助分支的 mu_clean。
+            mu_for_sde = Y_degraded * mask_for_sde
+
             timesteps, states = sde.generate_random_states(x0=Y_GT, mu=mu_for_sde)
             model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
                            color_prior=color_prior, confidence=confidence, conf_lut=conf_lut,

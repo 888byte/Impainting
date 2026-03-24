@@ -353,15 +353,16 @@ class DenoisingModel(BaseModel):
                 self.color_prior = prepared["color_prior"]
                 self.confidence = prepared["confidence"]
                 mu_clean = prepared["mu_clean"]
-                sde.set_mu(mu_clean)
-
-                # Keep BrushNet prior as a condition only. The SDE initialization should
-                # follow the same mu-centered distribution used during training.
-                x_init = self.original_degraded * self.mask + mu_clean * self.mask_hole
-                self.state = sde.noise_state(x_init)
                 self.condition = self.original_degraded * self.mask
+                sde.set_mu(self.condition)
+                x_init = self.condition
+                self.state = sde.noise_state(x_init)
 
-                structure_gray, structure_edge = self._build_structure_targets(mu_clean)
+                # Structure guidance stays auxiliary. It should come from the
+                # denoised observed input, not from mu_clean.
+                structure_gray, structure_edge = self._build_structure_targets(
+                    prepared["denoised_original"]
+                )
                 structure_state = None
                 if S_sde is not None:
                     S_sde.set_mu(structure_edge * self.mask)
@@ -380,7 +381,6 @@ class DenoisingModel(BaseModel):
                     S_LQs=structure_edge,
                     enhanced_inference=True,
                     gt_mode=self.gt_mode,
-                    degraded=self.original_degraded,
                     mask_hole=self.mask_hole,
                     color_prior=self.color_prior,
                     confidence=self.confidence,

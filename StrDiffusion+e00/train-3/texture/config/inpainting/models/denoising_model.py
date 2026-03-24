@@ -429,29 +429,20 @@ class DenoisingModel(BaseModel):
 
     def compute_mu_clean_no_grad(self, y_degraded, mask_known, confidence=None):
         """
-        计算干净的 mu（无梯度版本），用于 train.py 的 generate_random_states
-        
-        CRITICAL: 确保 generate_random_states 和 optimize_parameters 用同一个 mu_clean
-        
-        Args:
-            y_degraded: [B, 3, H, W] 当前观测输入
-            mask_known: [B, 1, H, W] SDE mask (1=known, 0=hole)
-            confidence: [B, 1, H, W] 可选置信度
-        
-        Returns:
-            mu_clean: [B, 3, H, W] 去噪后的 mu (已乘 mask)
+        保留该辅助接口供调试/对比使用，但不再驱动 texture SDE 主干。
+
+        Texture 主干的 mu 已恢复为原版 StrDiffusion 语义：
+        ``observed_degraded * mask_known``。
         """
         if not self.use_mu_denoiser or self.mu_denoiser is None:
-            # 回退到原始行为
             return y_degraded * mask_known
-        
+
         with torch.no_grad():
             mu_clean = self.mu_denoiser_trainer.inference(
                 y_degraded, mask_known, confidence
             )
-            # mu 只保留已知区域（和原始 mu 语义一致）
             mu_clean = mu_clean * mask_known
-        
+
         return mu_clean
 
     def optimize_parameters(self, step, timesteps, sde=None):
@@ -514,8 +505,9 @@ class DenoisingModel(BaseModel):
             # 回退到原始行为
             mu_clean = self.condition
         
-        # 更新 SDE 的条件（用 mu_clean 替换原始的 self.condition）
-        sde.set_mu(mu_clean)
+        # Texture 主干恢复到原版 StrDiffusion 语义：
+        # cond/mu 必须始终等于 masked observed input，而不是辅助分支的 mu_clean。
+        sde.set_mu(self.condition)
         
         # 使用 GT 计算最优逆步骤
         yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
@@ -534,9 +526,6 @@ class DenoisingModel(BaseModel):
         if hasattr(self, 'mask') and self.mask is not None:
             # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
             brushnet_kwargs['mask'] = 1 - self.mask
-        if hasattr(self, 'original_degraded') and self.original_degraded is not None:
-            # 主干显式感知真实缺损输入，避免 hole 区只能依赖 color_prior。
-            brushnet_kwargs['observed_degraded'] = self.original_degraded
 
         noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
         # ============ 传递BrushNet条件完成 ============
@@ -585,6 +574,8 @@ class DenoisingModel(BaseModel):
         if self.use_mu_denoiser:
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+        texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
+        self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,
             lut_transformed=lut_transformed,

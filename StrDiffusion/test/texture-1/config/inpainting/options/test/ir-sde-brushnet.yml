@@ -86,11 +86,12 @@ brushnet:
   # 训练时用于抑制主干直接抄 prior；推理阶段该值不生效，仅保留镜像配置。
   prior_dropout_prob: 0.0
 
-#### 主干显式观测输入引导
-#### - 让 texture 主干直接看到真实缺损输入和 hole mask
-#### - 这样 color_prior 只作为颜色指导，不再承担主要内容提供
+#### 主干观测引导兼容字段
+#### - 默认保持关闭
+#### - 当前主干修复语义固定回归原版 StrDiffusion：
+####   cond/mu = observed_masked input
 main_guidance:
-  enabled: true
+  enabled: false
   use_observed_input: true
   use_mask: true
   zero_init: true

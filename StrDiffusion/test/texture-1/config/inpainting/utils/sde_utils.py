@@ -459,9 +459,6 @@ class IRSDE(SDE):
             mask_known = mask.to(self.device).float()
             mask_hole = kwargs["mask_hole"].to(self.device).float()
             self._validate_enhanced_masks(mask_known, mask_hole)
-            degraded = kwargs.get("degraded")
-            if degraded is not None:
-                degraded = degraded.to(self.device)
             # BrushNet / MGLC must always receive the hole mask, never mask_known.
             brushnet_kwargs = {
                 "mask": mask_hole,
@@ -471,7 +468,6 @@ class IRSDE(SDE):
                 "confidence": kwargs.get("confidence").to(self.device)
                 if kwargs.get("confidence") is not None
                 else None,
-                "observed_degraded": degraded,
             }
             brushnet_kwargs = {
                 key: value for key, value in brushnet_kwargs.items() if value is not None
