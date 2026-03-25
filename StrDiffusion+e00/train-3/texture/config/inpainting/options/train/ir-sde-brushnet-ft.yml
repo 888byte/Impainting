@@ -1,6 +1,6 @@
 #### BrushNet + MGLC-Tex finetune config
 #### Usage:
-####   python train.py -opt ./texture/config/inpainting/options/train/ir-sde-brushnet-ft.yml
+####   python train.py -opt ./options/train/ir-sde-brushnet-ft.yml
 #### Before running:
 ####   1. Replace path.pretrain_model_G with your last-stage final/latest weight.
 ####   2. Keep resume_state as ~ for a clean finetune stage.
@@ -113,7 +113,7 @@ network_G:
 
 #### Paths
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/experiments/ir-sde-brushnet/models/latest_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet/models/latest_G.pth
   strict_load: false
   resume_state: ~
 
@@ -124,9 +124,9 @@ train:
   lr_scheme: MultiStepLR
   beta1: 0.9
   beta2: 0.999
-  niter: 30000
+  niter: 50000
   warmup_iter: 1000
-  lr_steps: [10000, 20000, 27000]
+  lr_steps: [15000, 29000, 40000]
   lr_gamma: 0.5
   eta_min: !!float 1e-7
 
