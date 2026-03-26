@@ -77,8 +77,11 @@ datasets:
     dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
     dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
+    #### full: 整图颜色恢复 + 修补
+    #### partial: 已知区尽量保留，仅 hole 区使用 LUT 目标
     gt_mode: full
 
+    #### 必须显式提供 LUT 文件，不再回退旧默认值
     lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
     lut_alpha: 0.85
     lut_beta: 0.15
@@ -86,7 +89,10 @@ datasets:
     lut_strength: 2
     lut_smooth_radius: 1
 
-    prior_method: fast
+    #### fast: 更快
+    #### quality: 更稳，正式训练推荐使用
+    prior_method: quality
+    #### dataset 侧调试图保存开关
     debug_mode: false
 
     #### Simulate real missing inputs during training.

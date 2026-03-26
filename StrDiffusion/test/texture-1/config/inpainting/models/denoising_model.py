@@ -88,6 +88,7 @@ class DenoisingModel(BaseModel):
         )
         self.save_intermediates = bool(self.inference_opt.get("save_intermediates", False))
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
+        self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
 
         self.lut_processor = None
@@ -257,12 +258,21 @@ class DenoisingModel(BaseModel):
 
         color_prior = self.color_prior
         confidence = self.confidence
+        prior_debug = {}
         if color_prior is None or confidence is None:
             if self.color_prior_generator is None:
                 raise RuntimeError("缺少 ColorPriorGenerator，无法自动生成 color_prior/confidence。")
-            generated_prior, generated_confidence = self.color_prior_generator.generate_tensor(
-                degraded, mask_hole, device=self.device
+            generated = self.color_prior_generator.generate_tensor(
+                degraded,
+                mask_hole,
+                device=self.device,
+                method=self.prior_method,
+                debug=self.save_intermediates,
             )
+            if self.save_intermediates:
+                generated_prior, generated_confidence, prior_debug = generated
+            else:
+                generated_prior, generated_confidence = generated
             color_prior = generated_prior if color_prior is None else color_prior
             confidence = generated_confidence if confidence is None else confidence
 
@@ -277,7 +287,12 @@ class DenoisingModel(BaseModel):
                     guide=denoised_original,
                     radius=self.dataset_opt.get("lut_smooth_radius", 5),
                 )
-            effective_weight = self.dataset_opt.get("lut_strength", 1.0) * lut_confidence
+            # Keep the LUT mix as a convex blend. If lut_strength > 1 and the
+            # confidence is already high, unclamped weights extrapolate colors
+            # and can create a strong yellow/warm bias at inference time.
+            effective_weight = torch.clamp(
+                self.dataset_opt.get("lut_strength", 1.0) * lut_confidence, 0.0, 1.0
+            )
             lut_transformed = (
                 denoised_original * (1 - effective_weight)
                 + lut_transformed * effective_weight
@@ -303,7 +318,27 @@ class DenoisingModel(BaseModel):
             "color_prior": color_prior,
             "confidence": confidence,
             "mu_clean": mu_clean,
+            "prior_debug": prior_debug,
         }
+
+    def _build_training_target_like(self) -> Optional[torch.Tensor]:
+        """Build a visualization target that follows the training GT construction rule."""
+        if self.color_prior_generator is None or self.state_0 is None or self.mask_hole is None:
+            return None
+
+        reference = self.state_0[0].detach().float().cpu().permute(1, 2, 0).clamp(0.0, 1.0).numpy()
+        reference = (reference * 255.0).round().astype(np.uint8)
+        mask_hole = self.mask_hole[0, 0].detach().float().cpu().clamp(0.0, 1.0).numpy()
+        mask_hole = (mask_hole * 255.0).round().astype(np.uint8)
+        target = self.color_prior_generator.build_target(
+            reference,
+            mask_hole,
+            mode=self.gt_mode,
+            feather_radius=7,
+        )
+        target = torch.from_numpy(target.astype(np.float32) / 255.0)
+        target = target.permute(2, 0, 1).unsqueeze(0).to(self.device)
+        return target
 
     def _save_intermediate_outputs(self, save_dir: str):
         """Save debugging tensors to image files when enabled."""
@@ -353,6 +388,8 @@ class DenoisingModel(BaseModel):
                 self.color_prior = prepared["color_prior"]
                 self.confidence = prepared["confidence"]
                 mu_clean = prepared["mu_clean"]
+                prior_debug = prepared.get("prior_debug", {})
+                target_like = self._build_training_target_like()
                 self.condition = self.original_degraded * self.mask
                 sde.set_mu(self.condition)
                 x_init = self.condition
@@ -398,6 +435,11 @@ class DenoisingModel(BaseModel):
                     "mask_hole": self.mask_hole,
                     "mask_known": self.mask,
                     "color_prior": self.color_prior,
+                    "color_prior_lut": prior_debug.get("color_prior_lut"),
+                    "color_prior_inpainted": prior_debug.get("color_prior_inpainted"),
+                    "conf_lut_prior": prior_debug.get("conf_lut"),
+                    "conf_inpaint_prior": prior_debug.get("conf_inpaint"),
+                    "training_target_like": target_like,
                     "confidence": self.confidence,
                     "denoised_original": prepared["denoised_original"],
                     "lut_transformed": prepared["lut_transformed"],

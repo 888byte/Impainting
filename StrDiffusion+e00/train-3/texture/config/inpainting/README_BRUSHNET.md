@@ -1,200 +1,170 @@
-# 壁画修复系统 - BrushNet集成指南
+# 壁画修复训练说明
 
-## 📋 概述
+## 1. 当前训练目标
 
-本项目实现了一个双阶段壁画图像修复与颜色复原系统：
+当前 `train-3` 纹理训练链在原版 StrDiffusion 主干上扩展了以下辅助模块：
 
-- **第一阶段**：利用预训练LUT生成颜色先验图和置信度图
-- **第二阶段**：改进的BrushNet架构指导StrDiffusion完成修复
+- `BrushNet`
+- `MGLC-Tex`
+- `Mu-Denoiser`
+- `restore_S_guidance`
 
-## 📁 新增文件结构
+但核心原则已经固定：
 
-```
-StrDiffusion+e00/train-2/texture/config/inpainting/
-├── lut_processor.py              # LUT三线性插值处理器
-├── color_prior_generator.py      # 颜色先验与置信度生成器
-├── pigment_lut33.npz             # [需用户提供] LUT文件
-├── debug_logs/                   # Debug输出目录
+- texture 主干修复语义回到原版 StrDiffusion  
+  `mu / cond = observed_degraded * mask_known`
+- `BrushNet / color_prior / confidence / Mu-Denoiser / MGLC` 只做辅助引导
+- `Gs / Dis` 官方结构链不改
+
+## 2. 目录结构
+
+```text
+StrDiffusion+e00/train-3/texture/config/inpainting/
+├── train.py
+├── lut_processor.py
+├── color_prior_generator.py
 ├── data/
-│   └── mural_inpainting_dataset.py  # 壁画修复数据集
+│   ├── __init__.py
+│   └── mural_inpainting_dataset.py
 ├── models/
-│   ├── pixel_brushnet.py         # 像素空间BrushNet
-│   ├── zero_conv.py              # Zero-Convolution
-│   └── brushnet_wrapper.py       # UNet与BrushNet集成包装器
+│   ├── denoising_model.py
+│   ├── brushnet_wrapper.py
+│   ├── pixel_brushnet.py
+│   ├── zero_conv.py
+│   └── modules/
+│       └── mglc_block.py
 ├── options/train/
-│   └── ir-sde-brushnet.yml       # BrushNet训练配置
-└── README_BRUSHNET.md            # 本文档
+│   ├── ir-sde-brushnet.yml
+│   └── ir-sde-brushnet-ft.yml
+└── README_BRUSHNET.md
 ```
 
-## 🔧 配置说明
+## 3. 启动方式
 
-### 1. LUT文件配置
+标准训练：
 
-将 `pigment_lut33.npz` 放置到项目目录，并在配置文件中设置路径：
-
-```yaml
-lut:
-  path: ./pigment_lut33.npz
-  alpha: 0.7  # LUT置信度权重
-  beta: 0.3   # 修复置信度权重
+```bash
+python train.py -opt ./texture/config/inpainting/options/train/ir-sde-brushnet.yml
 ```
 
-### 2. GT生成模式
+继续做干净的 finetune：
 
-支持三种模式，在配置文件中设置：
+```bash
+python train.py -opt ./texture/config/inpainting/options/train/ir-sde-brushnet-ft.yml
+```
+
+当前不再使用 `train_brushnet.py`。  
+训练入口统一为 `train.py`。
+
+## 4. LUT 与 prior 配置
+
+训练配置里必须显式写出：
+
+- `datasets.train.lut_path`
+- `datasets.train.prior_method`
+- `datasets.train.gt_mode`
+
+当前不再允许 `mural_inpainting` 数据集静默回退到旧的 `pigment_lut33.npz` 默认路径。  
+如果 `lut_path` 缺失，会直接报错。
+
+`prior_method` 支持：
+
+- `fast`
+- `quality`
+
+正式训练建议：
 
 ```yaml
 datasets:
   train:
-    gt_mode: mixed  # 可选: full, partial, mixed
+    lut_path: /path/to/your_lut.npz
+    prior_method: quality
 ```
 
-| 模式 | 说明 |
-|------|------|
-| `full` | 全图LUT映射，模型学习恢复整张图颜色 |
-| `partial` | 仅Mask区域LUT映射，保留背景纹理 |
-| `mixed` | 随机选择（各50%），增强泛化能力 |
+## 5. `full` 与 `partial`
 
-### 3. BrushNet配置
+训练目标支持两种模式：
 
-```yaml
-brushnet:
-  enabled: true   # 启用/禁用BrushNet
-  in_nc: 8        # 输入通道: Noisy(3) + Mask(1) + Prior(3) + Conf(1)
-  nf: 64          # 与主UNet对齐
-  depth: 4        # 与主UNet对齐
-  lite: false     # 轻量版（资源受限时使用）
-```
+- `gt_mode: full`
+  整图颜色恢复 + 修补
+- `gt_mode: partial`
+  已知区尽量保留，仅在 hole 区使用 LUT 目标
 
-## 🚀 训练启动
+评价结果时必须先确认当前模式，不能混用标准。
 
-### 使用BrushNet配置训练（推荐）
+## 6. 当前训练数据流
 
-```bash
-cd d:\code\ky\bihua\Impainting\StrDiffusion+e00\train-2\texture\config\inpainting
-python train_brushnet.py -opt options/train/ir-sde-brushnet.yml
-```
+训练时会同时维护两路输入：
 
-### 使用原始train.py（需要GT数据集模式）
+- `original_degraded`
+  真实缺损外观输入，模拟推理输入
+- `reference_degraded`
+  完整参考图，仅用于构造训练目标
 
-如果使用原始 `train.py`，需要保持 `mode: GT`：
+关键点：
 
-```bash
-python train.py -opt options/train/ir-sde.yml
-```
+- texture 主干条件  
+  `condition = original_degraded * mask_known`
+- 训练目标  
+  通过 `ColorPriorGenerator.build_target(...)` 从完整参考图构造
+- `color_prior / confidence`
+  由真实缺损输入生成，只做辅助引导
 
-### 开启Debug模式
+## 7. TensorBoard 重点看什么
 
-修改配置文件：
+训练排查时，优先看：
 
-```yaml
-debug:
-  enabled: true
-  log_dir: debug_logs/
-  save_freq: 500
-```
+- `train/texture_condition_gap`
+- `train/ema_texture_loss`
+- `train/loss_main`
+- `train/loss_hole_weighted`
+- `train/loss_total`
 
-Debug模式将保存以下张量可视化：
-- `input_image.png` - 输入褪色图像
-- `transformed_gt.png` - 变换后的GT
-- `generated_prior.png` - 生成的颜色先验
-- `confidence_map.png` - 置信度图
-- `masked_input.png` - 掩码后的输入
+重点图像：
 
-## 🧪 单元测试
+- `train_vis/original_degraded`
+- `train_vis/reference_degraded`
+- `train_vis/color_prior`
+- `train_vis/lut_transformed`
+- `train_vis/mu_clean`
+- `train_vis/mask_hole`
+- `train_vis/mask_known`
 
-### 测试LUT处理器
+判断规则：
 
-```bash
-python lut_processor.py
-```
+- `texture_condition_gap` 应长期接近 `0`
+- `original_degraded` 应为真实缺损输入
+- `reference_degraded` 应为完整参考图
+- `color_prior` 只应作为辅助参考，不应反客为主
 
-### 测试颜色先验生成器
+## 8. 常见问题
 
-```bash
-python color_prior_generator.py
-```
+### 8.1 结果整体发黄
 
-### 测试PixelBrushNet
+当前训练和推理都已对 LUT 混合权重做 `clamp`。  
+如果仍然发黄，优先检查：
 
-```bash
-python models/pixel_brushnet.py
-```
+- LUT 文件本身是否偏暖
+- `color_prior_lut` 与 `color_prior_inpainted` 哪一环先带偏
 
-### 测试集成包装器
+### 8.2 为什么 `lut_transformed` 洞里还是白的
 
-```bash
-python models/brushnet_wrapper.py
-```
+这是正常定义。  
+`lut_transformed` 只是观测图的 LUT 结果，不负责补洞。  
+hole 区真正的颜色参考来自 `color_prior`。
 
-## 📐 架构说明
+### 8.3 为什么 `final` 和 `gt.png` 差很多
 
-### PixelBrushNet输入
+先确认你比较的是不是训练目标同分布结果。  
+训练真正学的是 `build_target(...)` 生成的目标，不一定等于你手头保存的原始完整图。
 
-| 通道 | 名称 | 范围 |
-|------|------|------|
-| 0-2 | Noisy_Image | [0, 1] |
-| 3 | Mask | {0, 1} |
-| 4-6 | Color_Prior | [0, 1] |
-| 7 | Confidence | [0, 1] |
+## 9. 推荐实验习惯
 
-### 特征注入机制
-
-```
-BrushNet Encoder        Main UNet
-    │                      │
-    ▼                      ▼
- Layer 1 ──Zero-Conv──► + Layer 1
-    │                      │
-    ▼                      ▼
- Layer 2 ──Zero-Conv──► + Layer 2
-    │                      │
-   ...                    ...
-    │                      │
-    ▼                      ▼
-   Mid   ──Zero-Conv──► + Mid
-```
-
-## ⚠️ 注意事项
-
-1. **不影响原始代码**：所有新增文件独立于原有代码，原始 `train.py` 和 `ir-sde.yml` 保持不变
-
-2. **LUT文件**：必须提供 `pigment_lut33.npz`，包含以下键：
-   - `grid`: 网格坐标
-   - `lut_rgb`: RGB映射表
-   - `lut_conf`: 置信度映射表
-
-3. **显存需求**：BrushNet增加约30%显存占用，可使用 `lite: true` 减少开销
-
-4. **数据对齐**：确保训练数据的颜色先验与GT使用相同LUT生成
-
-## 📊 性能参考
-
-| 配置 | 显存 (256x256) | 训练速度 |
-|------|----------------|----------|
-| 原始UNet | ~6GB | 1x |
-| UNet + BrushNet | ~8GB | 0.8x |
-| UNet + BrushNetLite | ~7GB | 0.9x |
-
-## 🔍 问题排查
-
-### LUT文件未找到
-
-```
-FileNotFoundError: LUT文件不存在
-```
-
-**解决**：确认 `pigment_lut33.npz` 路径正确
-
-### 颜色断层
-
-如果颜色先验出现明显断层，检查：
-1. LUT网格密度是否足够（建议 >= 33）
-2. 三线性插值是否正确启用
-
-### 显存不足
-
-尝试：
-1. 减小 `batch_size`
-2. 启用 `brushnet.lite: true`
-3. 减小 `GT_size`
+- 新一轮代码修正后，重新开一个实验名
+- 用干净的 `pretrain_model_G` 做 finetune
+- 不直接沿用已经在错误分布下训练过的 `resume_state`
+- 固定 bad case，周期性导出：
+  - `color_prior`
+  - `raw_pred`
+  - `final`
+  做阶段对比

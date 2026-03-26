@@ -62,7 +62,12 @@ def create_dataset(dataset_opt):
     elif mode == 'mural_inpainting':
         from data.mural_inpainting_dataset import MuralInpaintingDataset as D
         # 从 dataset_opt 中读取配置（配置现在在 datasets.train 下）
-        lut_path = dataset_opt.get('lut_path', './pigment_lut33.npz')
+        lut_path = dataset_opt.get('lut_path')
+        if not lut_path:
+            raise ValueError(
+                "mural_inpainting 数据集必须显式提供 datasets.*.lut_path，"
+                "不再回退到旧的 pigment_lut33.npz 默认路径。"
+            )
         gt_mode = dataset_opt.get('gt_mode', 'mixed')
         prior_method = dataset_opt.get('prior_method', 'fast')  # 新增：prior方法选择
         debug_mode = dataset_opt.get('debug_mode', False)

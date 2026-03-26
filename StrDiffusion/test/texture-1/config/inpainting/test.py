@@ -168,7 +168,7 @@ def _run_enhanced_test(test_loader, opt, logger, model, sde, s_sde):
         model.feed_data(
             state=None,
             LQ=condition,
-            GT=gt if gt is not None else degraded,
+            GT=gt,
             mask=mask_known,
             S_sde=s_sde,
             S_GT=None,

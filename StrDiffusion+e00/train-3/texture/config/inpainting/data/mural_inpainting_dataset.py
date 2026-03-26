@@ -401,28 +401,12 @@ class MuralInpaintingDataset(Dataset):
         Returns:
             gt: [H, W, 3] 目标GT
         """
-        if mode == 'full':
-            # Mode A: 全图LUT映射
-            color_prior, _ = self.color_prior_gen.lut.trilinear_interpolate(degraded_img)
-            gt = np.clip(color_prior, 0, 255).astype(np.uint8)
-            
-        elif mode == 'partial':
-            # Mode B: 仅Mask区域LUT映射（使用羽化融合避免硬边界）
-            color_prior, _ = self.color_prior_gen.lut.trilinear_interpolate(degraded_img)
-            lut_transformed = np.clip(color_prior, 0, 255).astype(np.uint8)
-            
-            # 使用羽化融合创建平滑过渡
-            gt = self._feather_blend(
-                original=degraded_img,
-                transformed=lut_transformed,
-                mask=mask,
-                feather_radius=7  # 羽化半径
-            )
-            
-        else:
-            raise ValueError(f"未知的GT模式: {mode}")
-        
-        return gt
+        return self.color_prior_gen.build_target(
+            degraded_img,
+            mask,
+            mode=mode,
+            feather_radius=7,
+        )
     
     def _to_tensor(self, img: np.ndarray) -> torch.Tensor:
         """转换为PyTorch张量 [H, W, C] uint8 -> [C, H, W] float32 [0, 1]"""
@@ -624,7 +608,7 @@ if __name__ == "__main__":
         }
     }
     
-    LUT_PATH = './pigment_lut33.npz'
+    LUT_PATH = './example_lut.npz'
     
     # 检查LUT文件
     if not os.path.exists(LUT_PATH):

@@ -4,7 +4,7 @@ lut_processor.py - 颜色映射表（LUT）三线性插值处理模块
 
 功能说明：
 ---------
-本模块实现对预训练颜色映射表（pigment_lut33.npz）的加载与应用。
+本模块实现对预训练颜色映射表（LUT `.npz` 文件）的加载与应用。
 核心算法使用三线性插值（Trilinear Interpolation），避免最近邻查找导致的颜色断层。
 
 LUT 数据结构：
@@ -45,7 +45,7 @@ class LUTProcessor:
         初始化LUT处理器
         
         Args:
-            lut_path: pigment_lut33.npz 文件路径
+            lut_path: LUT `.npz` 文件路径
             
         Raises:
             FileNotFoundError: 如果LUT文件不存在
@@ -54,7 +54,7 @@ class LUTProcessor:
         if not os.path.exists(lut_path):
             raise FileNotFoundError(
                 f"[LUTProcessor] LUT文件不存在: {lut_path}\n"
-                f"请确保 pigment_lut33.npz 已放置在正确位置。"
+                f"请确保 LUT `.npz` 文件已放置在正确位置。"
             )
         
         # 加载LUT数据
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     import sys
     
     # 测试用占位LUT路径
-    LUT_PATH = "./pigment_lut33.npz"
+    LUT_PATH = "./example_lut.npz"
     
     print("=" * 60)
     print("LUT Processor 单元测试")

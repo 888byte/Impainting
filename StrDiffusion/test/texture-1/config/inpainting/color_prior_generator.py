@@ -78,7 +78,7 @@ class ColorPriorGenerator:
         初始化颜色先验生成器
         
         Args:
-            lut_path: pigment_lut33.npz 文件路径
+            lut_path: LUT `.npz` 文件路径
             alpha: LUT置信度权重 (默认0.7)
             beta: 修复置信度权重 (默认0.3)
             inpaint_method: 修复方法 'telea' 或 'ns' (默认'telea')
@@ -113,6 +113,52 @@ class ColorPriorGenerator:
         print(f"  - β (修复权重): {self.beta}")
         print(f"  - 修复方法: {inpaint_method}")
         print(f"  - 大面积阈值: {self.large_mask_threshold * 100:.0f}%")
+
+    def feather_blend(
+        self,
+        original: np.ndarray,
+        transformed: np.ndarray,
+        mask: np.ndarray,
+        feather_radius: int = 7,
+    ) -> np.ndarray:
+        """Blend ``transformed`` into ``original`` inside ``mask`` with a soft edge."""
+        mask_float = (mask.astype(np.float32) / 255.0)
+        if feather_radius > 0:
+            kernel = 2 * feather_radius + 1
+            mask_float = cv2.GaussianBlur(mask_float, (kernel, kernel), sigmaX=0, sigmaY=0)
+        mask_float = np.clip(mask_float, 0.0, 1.0)
+        mask_3ch = mask_float[:, :, np.newaxis]
+        blended = (
+            original.astype(np.float32) * (1.0 - mask_3ch)
+            + transformed.astype(np.float32) * mask_3ch
+        )
+        return np.clip(blended, 0.0, 255.0).astype(np.uint8)
+
+    def build_target(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        mode: str = 'full',
+        feather_radius: int = 7,
+    ) -> np.ndarray:
+        """Build the training target using the same rules as the mural dataset.
+
+        Args:
+            image: [H, W, 3] uint8 reference degraded image.
+            mask: [H, W] uint8 hole mask, 255 = hole.
+            mode: 'full' or 'partial'.
+            feather_radius: soft blending radius used by partial mode.
+
+        Returns:
+            [H, W, 3] uint8 target image aligned with training supervision.
+        """
+        lut_only, _ = self.lut.trilinear_interpolate(image)
+        lut_only = np.clip(lut_only, 0, 255).astype(np.uint8)
+        if mode == 'full':
+            return lut_only
+        if mode == 'partial':
+            return self.feather_blend(image, lut_only, mask, feather_radius=feather_radius)
+        raise ValueError(f"未知的目标模式: {mode}")
     
     def _calculate_mask_ratio(self, mask: np.ndarray) -> float:
         """
@@ -544,7 +590,9 @@ class ColorPriorGenerator:
         self,
         image_tensor,
         mask_tensor,
-        device=None
+        device=None,
+        method: str = 'fast',
+        debug: bool = False,
     ):
         """
         对PyTorch张量生成颜色先验和置信度图
@@ -557,6 +605,7 @@ class ColorPriorGenerator:
         Returns:
             color_prior: [B, 3, H, W] torch.Tensor，范围 [0, 1]
             confidence: [B, 1, H, W] torch.Tensor，范围 [0, 1]
+            debug_tensors: 仅当 debug=True 时返回，包含中间量张量
         """
         import torch
         
@@ -577,11 +626,20 @@ class ColorPriorGenerator:
         # 批量处理
         color_priors = []
         confidences = []
+        debug_buffers = {
+            'color_prior_lut': [],
+            'color_prior_inpainted': [],
+            'conf_lut': [],
+            'conf_inpaint': [],
+        } if debug else None
         
         for i in range(B):
-            result = self.generate(img_np[i], mask_np[i])
+            result = self.generate(img_np[i], mask_np[i], method=method, debug=debug)
             color_priors.append(result['color_prior'])
             confidences.append(result['confidence'])
+            if debug:
+                for key in debug_buffers.keys():
+                    debug_buffers[key].append(result[key])
         
         # 转回tensor
         color_prior = np.stack(color_priors, axis=0)   # [B, H, W, 3]
@@ -593,7 +651,22 @@ class ColorPriorGenerator:
         color_prior = torch.from_numpy(color_prior.astype(np.float32)).to(device)
         confidence = torch.from_numpy(confidence.astype(np.float32)).to(device)
         
-        return color_prior, confidence
+        if not debug:
+            return color_prior, confidence
+
+        debug_tensors = {}
+        for key, values in debug_buffers.items():
+            stacked = np.stack(values, axis=0)
+            if stacked.ndim == 4:
+                stacked = np.transpose(stacked, (0, 3, 1, 2))
+                if key.startswith('color_prior'):
+                    stacked = stacked / 255.0
+            elif stacked.ndim == 3:
+                stacked = stacked[:, np.newaxis, :, :]
+            debug_tensors[key] = torch.from_numpy(stacked.astype(np.float32)).to(device)
+
+        return color_prior, confidence, debug_tensors
+
 
 
 # =============================================================================
@@ -603,7 +676,7 @@ if __name__ == "__main__":
     import sys
     
     # 测试用占位LUT路径
-    LUT_PATH = "./pigment_lut33.npz"
+    LUT_PATH = "./example_lut.npz"
     
     print("=" * 60)
     print("Color Prior Generator 单元测试")

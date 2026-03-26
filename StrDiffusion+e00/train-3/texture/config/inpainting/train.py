@@ -102,6 +102,7 @@ def _build_tb_scalar_map(logs):
     add("train/best_metric", "best_metric")
     add("train/best_total_metric", "best_total_metric")
     add("train/mask_hole_ratio", "mask_hole_ratio")
+    add("train/texture_condition_gap", "texture_condition_gap")
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
     add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
     add("stats/lut_hole_mean", "stats_lut_hole_mean")
@@ -450,7 +451,10 @@ def main():
                 conf_lut = None
                 if color_prior_gen is not None:
                     color_prior, confidence = color_prior_gen.generate_tensor(
-                        Y_GT, 1 - mask, device=device
+                        Y_GT,
+                        1 - mask,
+                        device=device,
+                        method=opt["datasets"]["train"].get("prior_method", "quality"),
                     )
             
             # 确保数据在正确设备上
