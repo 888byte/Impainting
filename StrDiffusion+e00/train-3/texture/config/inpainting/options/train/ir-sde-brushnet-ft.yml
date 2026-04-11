@@ -119,9 +119,9 @@ network_G:
 
 #### Paths
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet/models/latest_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft/models/40000_G.pth
   strict_load: false
-  resume_state: ~
+  resume_state: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft/training_state/40000.state
 
 #### Training
 train:
