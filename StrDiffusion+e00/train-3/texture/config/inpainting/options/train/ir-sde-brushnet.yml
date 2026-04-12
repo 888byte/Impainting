@@ -95,6 +95,9 @@ datasets:
     n_workers: 32
     batch_size: 16
     GT_size: 256
+    min_hole_ratio: 0.01
+    max_hole_ratio: 0.75
+    max_crop_retry: 20
     use_flip: true
     use_rot: true
     color: RGB

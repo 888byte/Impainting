@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import einops
-import numpy as np
-import sys
 
 class MatchingLoss(nn.Module):
     def __init__(self, loss_type='l1', is_weighted=False):
@@ -18,12 +15,20 @@ class MatchingLoss(nn.Module):
             raise ValueError(f'invalid loss type {loss_type}')
 
     def compute_components(self, predict, target, mask, weights=None):
-        """Return the current loss decomposition without changing the training formula."""
-        lossm = self.loss_fn(predict * (1 - mask), target * (1 - mask), reduction='none')
-        lossm = einops.reduce(lossm, 'b ... -> b (...)', 'mean')
+        """Return known/hole losses normalized by their valid pixel areas."""
+        if mask.shape[1] != predict.shape[1]:
+            mask_3c = mask.expand(-1, predict.shape[1], -1, -1)
+        else:
+            mask_3c = mask
+        mask_3c = mask_3c.to(dtype=predict.dtype, device=predict.device)
+        hole_3c = 1 - mask_3c
 
-        lossu = self.loss_fn(predict * mask, target * mask, reduction='none')
-        lossu = einops.reduce(lossu, 'b ... -> b (...)', 'mean')
+        diff = self.loss_fn(predict, target, reduction='none')
+        known_denom = mask_3c.sum(dim=(1, 2, 3)).clamp_min(1.0)
+        hole_denom = hole_3c.sum(dim=(1, 2, 3)).clamp_min(1.0)
+
+        lossu = (diff * mask_3c).sum(dim=(1, 2, 3)) / known_denom
+        lossm = (diff * hole_3c).sum(dim=(1, 2, 3)) / hole_denom
 
         loss_hole_weighted = 10 * lossm
         loss = lossu + loss_hole_weighted

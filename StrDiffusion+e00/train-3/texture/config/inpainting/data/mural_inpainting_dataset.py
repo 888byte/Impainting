@@ -126,6 +126,10 @@ class MuralInpaintingDataset(Dataset):
         self.use_rot = opt.get('use_rot', True)
         self.observed_hole_fill = str(opt.get('observed_hole_fill', 'white')).lower()
         self.observed_hole_fill_value = int(opt.get('observed_hole_fill_value', 255))
+        self.max_crop_retry = int(opt.get('max_crop_retry', 20))
+        self.min_hole_ratio = float(opt.get('min_hole_ratio', 0.01))
+        self.max_hole_ratio = float(opt.get('max_hole_ratio', 0.75))
+        self._crop_retry_fail_count = 0
         
         # 加载图像路径
         self.image_paths = self._get_image_paths(opt.get('dataroot_GT', ''))
@@ -261,24 +265,47 @@ class MuralInpaintingDataset(Dataset):
         img: np.ndarray, 
         mask: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """随机裁剪"""
+        """Random crop with lightweight hole-ratio retry; output interface unchanged."""
         h, w = img.shape[:2]
         crop_size = self.GT_size
         
         if h < crop_size or w < crop_size:
-            # 图像太小，先resize
+            # Resize small images first.
             scale = max(crop_size / h, crop_size / w) * 1.1
             new_h, new_w = int(h * scale), int(w * scale)
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
             h, w = new_h, new_w
-        
-        # 随机起点
-        y = random.randint(0, h - crop_size)
-        x = random.randint(0, w - crop_size)
-        
-        return img[y:y+crop_size, x:x+crop_size], mask[y:y+crop_size, x:x+crop_size]
-    
+
+        last_img_crop = None
+        last_mask_crop = None
+        last_ratio = None
+        max_retry = max(1, self.max_crop_retry)
+
+        for _ in range(max_retry):
+            y = random.randint(0, h - crop_size)
+            x = random.randint(0, w - crop_size)
+            img_crop = img[y:y + crop_size, x:x + crop_size]
+            mask_crop = mask[y:y + crop_size, x:x + crop_size]
+            hole_ratio = float(np.mean(mask_crop > 127))
+
+            last_img_crop = img_crop
+            last_mask_crop = mask_crop
+            last_ratio = hole_ratio
+
+            if self.min_hole_ratio <= hole_ratio <= self.max_hole_ratio:
+                return img_crop, mask_crop
+
+        self._crop_retry_fail_count += 1
+        if self.debug_mode or self._crop_retry_fail_count <= 5:
+            print(
+                "[MuralInpaintingDataset] crop retry fallback: "
+                f"hole_ratio={last_ratio:.4f}, expected "
+                f"[{self.min_hole_ratio:.4f}, {self.max_hole_ratio:.4f}], "
+                f"max_crop_retry={max_retry}"
+            )
+        return last_img_crop, last_mask_crop
+
     def _feather_blend(
         self,
         original: np.ndarray,

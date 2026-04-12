@@ -105,9 +105,14 @@ def _build_tb_scalar_map(logs):
     add("train/texture_condition_gap", "texture_condition_gap")
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
     add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
-    add("stats/lut_hole_mean", "stats_lut_hole_mean")
+    add("stats/color_prior_hole_white_ratio", "stats_color_prior_hole_white_ratio")
+    add("stats/confidence_hole_mean", "stats_confidence_hole_mean")
+    add("stats/condition_known_mean", "stats_condition_known_mean")
+    add("stats/condition_known_std", "stats_condition_known_std")
     add("stats/mu_known_mean", "stats_mu_known_mean")
     add("stats/mu_known_std", "stats_mu_known_std")
+    add("train/condition_target_gap", "condition_target_gap")
+    add("train/degraded_target_gap", "degraded_target_gap")
 
     return scalar_map
 
@@ -135,13 +140,17 @@ def _log_tb_training_images(tb_logger, debug_info, current_step):
     image_tags = {
         "train_vis/original_degraded": "original_degraded",
         "train_vis/reference_degraded": "reference_degraded",
-        "train_vis/denoised_original": "denoised_original",
-        "train_vis/lut_transformed": "lut_transformed",
-        "train_vis/color_changed": "color_changed",
+        "train_vis/denoised_observed_mask_aware": "denoised_observed_mask_aware",
+        "train_vis/condition_lut": "condition_lut",
+        "train_vis/condition_mu": "condition_mu",
+        "train_vis/mu_clean_lut": "mu_clean_lut",
+        "train_vis/training_target": "training_target",
         "train_vis/color_prior": "color_prior",
-        "train_vis/mu_clean": "mu_clean",
+        "train_vis/confidence": "confidence",
         "train_vis/mask_known": "mask_known",
         "train_vis/mask_hole": "mask_hole",
+        "train_vis/structure_gray_from_target": "structure_gray_from_target",
+        "train_vis/structure_edge_from_target": "structure_edge_from_target",
     }
 
     for tag, key in image_tags.items():
@@ -149,6 +158,22 @@ def _log_tb_training_images(tb_logger, debug_info, current_step):
         if image is not None:
             tb_logger.add_image(tag, image, current_step)
 
+
+
+def _build_structure_from_target(training_target, device):
+    """Build S_GT(gray) and S_LQ(edge) from the target-domain training target."""
+    gray_list = []
+    edge_list = []
+    for batch_idx in range(training_target.shape[0]):
+        rgb = training_target[batch_idx].detach().cpu().permute(1, 2, 0).numpy()
+        rgb_uint8 = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+        gray = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2GRAY)
+        edge = cv2.Canny(gray, 50, 150)
+        gray_list.append(torch.from_numpy(gray.astype(np.float32) / 255.0).unsqueeze(0))
+        edge_list.append(torch.from_numpy(edge.astype(np.float32) / 255.0).unsqueeze(0))
+    structure_gray = torch.stack(gray_list, dim=0).to(device)
+    structure_edge = torch.stack(edge_list, dim=0).to(device)
+    return structure_gray, structure_edge
 
 def main():
     #### setup options of three networks
@@ -471,23 +496,112 @@ def main():
             if conf_lut is not None:
                 conf_lut = conf_lut.to(device)
             
-            # ============ SDE训练 ============
-            # 注意：mask约定为 1=已知, 0=缺失
-            # 对于mural数据集，mask来自数据集（1=缺失），需要取反
+            # ============ SDE?? ============
+            # Mask semantics:
+            #   mural dataset mask: 1=hole; mask_for_sde/self.mask: 1=known.
+            #   BrushNet receives 1-self.mask, i.e. 1=hole.
             if is_mural_mode:
-                mask_for_sde = 1 - mask  # 转换为 1=已知, 0=缺失
+                mask_for_sde = 1 - mask
+                complement_error = torch.max(torch.abs(mask_for_sde + mask - 1.0)).item()
+                assert complement_error < 1e-4, (
+                    f"mural mask and mask_for_sde must be complementary, error={complement_error:.6f}"
+                )
             else:
-                mask_for_sde = mask  # 原始数据集的mask已经是 1=已知
-            
-            # Texture 主干恢复到原版 StrDiffusion 语义：
-            # mu/cond 必须始终等于“观测输入 * known-mask”，而不是辅助分支的 mu_clean。
-            mu_for_sde = Y_degraded * mask_for_sde
+                mask_for_sde = mask
 
-            timesteps, states = sde.generate_random_states(x0=Y_GT, mu=mu_for_sde)
-            model.feed_data(states, Y_degraded*mask_for_sde, Y_GT, mask_for_sde, S_sde, X_GT, X_LQ, 
-                           color_prior=color_prior, confidence=confidence, conf_lut=conf_lut,
-                           original_degraded=Y_degraded,
-                           reference_degraded=Y_degraded_full)
+            mask_min = float(mask_for_sde.min().item())
+            mask_max = float(mask_for_sde.max().item())
+            assert mask_min >= -1e-4 and mask_max <= 1.0 + 1e-4, (
+                f"mask_for_sde must stay in [0,1], got min={mask_min:.6f}, max={mask_max:.6f}"
+            )
+            hole_ratio = float((1 - mask_for_sde).mean().item())
+
+            if is_mural_mode:
+                assert model.lut_processor is not None, "mural mode requires LUTProcessor for target-domain training_target/condition_lut"
+                # Mural target domain:
+                #   x0/GT/reverse target = LUT(denoised(degraded_full)).
+                # Condition/mu uses only inference-observable input:
+                #   condition_lut = LUT(mask-aware denoised(observed_degraded)).
+                with torch.no_grad():
+                    denoised_ref = model._denoise_image(Y_degraded_full, mask_known=None)
+                    training_target, _ = model._build_lut_transformed(denoised_ref)
+
+                    denoised_observed_mask_aware = model._denoise_image(
+                        Y_degraded, mask_known=mask_for_sde
+                    )
+                    condition_lut, _ = model._build_lut_transformed(
+                        denoised_observed_mask_aware
+                    )
+
+                    if color_prior is not None:
+                        color_prior_for_sde = (
+                            condition_lut * mask_for_sde
+                            + color_prior * (1 - mask_for_sde)
+                        )
+                    else:
+                        color_prior_for_sde = None
+
+                    if confidence is not None:
+                        confidence_for_sde = (
+                            torch.ones_like(mask_for_sde) * mask_for_sde
+                            + confidence * (1 - mask_for_sde)
+                        )
+                    else:
+                        confidence_for_sde = None
+
+                    # MuCleanr/Mu-Denoiser now cleans target-domain condition_lut.
+                    # If disabled or no usable weights are loaded/trained yet, the
+                    # helper falls back to condition_lut; the final SDE mu is masked.
+                    mu_clean_lut = model.compute_mu_clean_no_grad(
+                        condition_lut, mask_for_sde, confidence_for_sde
+                    )
+                    condition_mu = mu_clean_lut * mask_for_sde
+
+                timesteps, states = sde.generate_random_states(
+                    x0=training_target, mu=condition_mu
+                )
+
+                X_GT_for_sde, X_LQ_for_sde = _build_structure_from_target(
+                    training_target, device
+                )
+
+                model.feed_data(
+                    states, condition_mu, training_target, mask_for_sde,
+                    S_sde, X_GT_for_sde, X_LQ_for_sde,
+                    color_prior=color_prior_for_sde,
+                    confidence=confidence_for_sde,
+                    conf_lut=conf_lut,
+                    original_degraded=Y_degraded,
+                    reference_degraded=Y_degraded_full,
+                    condition_lut=condition_lut,
+                    mu_clean_lut=mu_clean_lut,
+                    denoised_observed_mask_aware=denoised_observed_mask_aware,
+                )
+            else:
+                # Legacy path remains unchanged: x0/GT/reverse target are Y_GT.
+                training_target = Y_GT
+                condition_lut = Y_GT
+                mu_clean_lut = Y_GT
+                denoised_observed_mask_aware = None
+                condition_mu = Y_GT * mask_for_sde
+                color_prior_for_sde = color_prior
+                confidence_for_sde = confidence
+
+                timesteps, states = sde.generate_random_states(
+                    x0=training_target, mu=condition_mu
+                )
+                model.feed_data(
+                    states, condition_mu, training_target, mask_for_sde,
+                    S_sde, X_GT, X_LQ,
+                    color_prior=color_prior_for_sde,
+                    confidence=confidence_for_sde,
+                    conf_lut=conf_lut,
+                    original_degraded=Y_degraded,
+                    reference_degraded=Y_degraded_full,
+                    condition_lut=condition_lut,
+                    mu_clean_lut=mu_clean_lut,
+                    denoised_observed_mask_aware=denoised_observed_mask_aware,
+                )
             model.optimize_parameters(current_step, timesteps, sde)
             model.update_learning_rate(
                 current_step, warmup_iter=opt["train"]["warmup_iter"]
@@ -502,11 +616,11 @@ def main():
                     # 新的调试格式：
                     # Input -> Denoised -> ColorChanged -> Prior -> Original+Mask -> Mask
                     original = debug_info.get('original_degraded', Y_degraded)
-                    denoised = debug_info.get('denoised_original', None)
-                    color_changed = debug_info.get('color_changed', Y_GT)
-                    prior = debug_info.get('color_prior', color_prior)
-                    orig_with_mask = debug_info.get('original_with_mask', Y_degraded * mask_for_sde)
-                    mask_img = debug_info.get('mask', mask_for_sde)
+                    denoised = debug_info.get('denoised_observed_mask_aware', debug_info.get('denoised_original', None))
+                    color_changed = debug_info.get('training_target', debug_info.get('color_changed', training_target))
+                    prior = debug_info.get('color_prior', color_prior_for_sde)
+                    orig_with_mask = debug_info.get('condition_mu', condition_mu)
+                    mask_img = debug_info.get('mask_known', mask_for_sde)
                     
                     # 计算去噪效果
                     if denoised is not None:
@@ -515,9 +629,9 @@ def main():
                 else:
                     original = Y_degraded
                     denoised = None
-                    color_changed = Y_GT
-                    prior = color_prior
-                    orig_with_mask = Y_degraded * mask_for_sde
+                    color_changed = training_target
+                    prior = color_prior_for_sde
+                    orig_with_mask = condition_mu
                     mask_img = mask_for_sde
                 
                 debug_logger.save_training_state_v2(
