@@ -283,33 +283,75 @@ class MuralInpaintingDataset(Dataset):
         best_score = float("inf")
         max_retry = max(1, self.max_crop_retry)
 
-        for _ in range(max_retry):
-            y = random.randint(0, h - crop_size)
-            x = random.randint(0, w - crop_size)
+        def _eval_crop(y: int, x: int):
             img_crop = img[y:y + crop_size, x:x + crop_size]
             mask_crop = mask[y:y + crop_size, x:x + crop_size]
             hole_ratio = float(np.mean(mask_crop > 127))
-
             if hole_ratio < self.min_hole_ratio:
                 score = self.min_hole_ratio - hole_ratio
             elif hole_ratio > self.max_hole_ratio:
                 score = hole_ratio - self.max_hole_ratio
             else:
-                return img_crop, mask_crop
+                score = 0.0
+            return img_crop, mask_crop, hole_ratio, score
 
+        def _try_candidate(y: int, x: int):
+            nonlocal best_img_crop, best_mask_crop, best_ratio, best_score
+            y = int(np.clip(y, 0, h - crop_size))
+            x = int(np.clip(x, 0, w - crop_size))
+            img_crop, mask_crop, hole_ratio, score = _eval_crop(y, x)
+            if score <= 0.0:
+                return img_crop, mask_crop, True
             if score < best_score:
                 best_score = score
                 best_img_crop = img_crop
                 best_mask_crop = mask_crop
                 best_ratio = hole_ratio
+            return None, None, False
+
+        # 1) Keep original random crop behavior first.
+        for _ in range(max_retry):
+            y = random.randint(0, h - crop_size)
+            x = random.randint(0, w - crop_size)
+            img_crop, mask_crop, ok = _try_candidate(y, x)
+            if ok:
+                return img_crop, mask_crop
+
+        # 2) If random crops miss the hole too often, sample crops that are
+        # anchored around actual hole pixels. This keeps the same output fields
+        # but avoids training batches with completely empty masks when the full
+        # mask does contain holes.
+        hole_ys, hole_xs = np.where(mask > 127)
+        if hole_ys.size > 0:
+            for _ in range(max_retry):
+                idx = random.randrange(hole_ys.size)
+                cy, cx = int(hole_ys[idx]), int(hole_xs[idx])
+                y = cy - random.randint(0, crop_size - 1)
+                x = cx - random.randint(0, crop_size - 1)
+                img_crop, mask_crop, ok = _try_candidate(y, x)
+                if ok:
+                    return img_crop, mask_crop
+
+        # 3) If the selected mask is too large, also try crops anchored around
+        # known pixels so the crop has enough context for inpainting.
+        known_ys, known_xs = np.where(mask <= 127)
+        if known_ys.size > 0:
+            for _ in range(max_retry):
+                idx = random.randrange(known_ys.size)
+                cy, cx = int(known_ys[idx]), int(known_xs[idx])
+                y = cy - random.randint(0, crop_size - 1)
+                x = cx - random.randint(0, crop_size - 1)
+                img_crop, mask_crop, ok = _try_candidate(y, x)
+                if ok:
+                    return img_crop, mask_crop
 
         self._crop_retry_fail_count += 1
         if self.debug_mode or self._crop_retry_fail_count <= 5:
             print(
-                "[MuralInpaintingDataset] crop retry fallback(best): "
+                "[MuralInpaintingDataset] crop retry fallback(best after guided): "
                 f"hole_ratio={best_ratio:.4f}, expected "
                 f"[{self.min_hole_ratio:.4f}, {self.max_hole_ratio:.4f}], "
-                f"max_crop_retry={max_retry}"
+                f"max_crop_retry={max_retry}, guided_retry={max_retry * 2}"
             )
         return best_img_crop, best_mask_crop
 
