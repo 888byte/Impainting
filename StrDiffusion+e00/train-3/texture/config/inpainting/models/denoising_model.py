@@ -580,6 +580,15 @@ class DenoisingModel(BaseModel):
         degraded_target_gap = (self.original_degraded * self.mask - training_target * self.mask).abs().mean()
         self.log_dict["degraded_target_gap"] = float(degraded_target_gap.item())
 
+        mask_3c = self.mask.expand(-1, condition_lut_for_mu.shape[1], -1, -1)
+        known_denom = mask_3c.sum().clamp_min(1.0)
+        condition_lut_delta_known = (
+            (condition_lut_for_mu - self.original_degraded).abs() * mask_3c
+        ).sum() / known_denom
+        target_lut_delta = (training_target - self.reference_degraded).abs().mean()
+        self.log_dict["stats_condition_lut_delta_known"] = float(condition_lut_delta_known.item())
+        self.log_dict["stats_target_lut_delta"] = float(target_lut_delta.item())
+
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,
             condition_lut=condition_lut_for_mu,

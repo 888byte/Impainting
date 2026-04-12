@@ -109,6 +109,8 @@ def _build_tb_scalar_map(logs):
     add("stats/confidence_hole_mean", "stats_confidence_hole_mean")
     add("stats/condition_known_mean", "stats_condition_known_mean")
     add("stats/condition_known_std", "stats_condition_known_std")
+    add("stats/condition_lut_delta_known", "stats_condition_lut_delta_known")
+    add("stats/target_lut_delta", "stats_target_lut_delta")
     add("stats/mu_known_mean", "stats_mu_known_mean")
     add("stats/mu_known_std", "stats_mu_known_std")
     add("train/condition_target_gap", "condition_target_gap")

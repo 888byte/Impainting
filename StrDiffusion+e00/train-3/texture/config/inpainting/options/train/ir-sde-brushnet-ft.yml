@@ -87,7 +87,7 @@ datasets:
     lut_alpha: 0.85
     lut_beta: 0.15
     lut_inpaint_method: telea
-    lut_strength: 0.7
+    lut_strength: 1.0
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
 
