@@ -313,12 +313,10 @@ class DenoisingModel(BaseModel):
                     guide=denoised_original,
                     radius=self.dataset_opt.get("lut_smooth_radius", 5),
                 )
-            # Keep the LUT mix as a convex blend. If lut_strength > 1 and the
-            # confidence is already high, unclamped weights extrapolate colors
-            # and can create a strong yellow/warm bias at inference time.
-            effective_weight = torch.clamp(
-                self.dataset_opt.get("lut_strength", 1.0) * lut_confidence, 0.0, 1.0
-            )
+            # Interpret lut_strength as max global blend strength. Do not let
+            # values >1 saturate the whole image to a full LUT jump.
+            strength = float(max(0.0, min(1.0, self.dataset_opt.get("lut_strength", 1.0))))
+            effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * strength
             lut_transformed = (
                 denoised_original * (1 - effective_weight)
                 + lut_transformed * effective_weight

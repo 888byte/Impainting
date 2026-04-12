@@ -672,10 +672,12 @@ class DenoisingModel(BaseModel):
                 radius=self.lut_smooth_radius
             )
 
-        # Clamp the effective LUT blend weight to [0, 1]. With lut_strength > 1,
-        # the old implementation could extrapolate colors instead of blending,
-        # which easily introduces a systematic warm/yellow cast.
-        effective_weight = torch.clamp(self.lut_strength * lut_confidence, 0.0, 1.0)
+        # Interpret lut_strength as the maximum global blend strength, not as a
+        # multiplier that can saturate high-confidence pixels to a full LUT jump.
+        # This prevents lut_strength=2 from turning the whole condition/target into
+        # an over-strong color cast while still keeping the LUT target-domain path.
+        strength = float(max(0.0, min(1.0, self.lut_strength)))
+        effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * strength
         lut_transformed = (
             denoised_image * (1 - effective_weight) +
             lut_transformed * effective_weight

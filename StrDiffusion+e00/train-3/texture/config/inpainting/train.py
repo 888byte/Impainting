@@ -642,6 +642,7 @@ def main():
                     color_prior=prior if prior is not None else Y_degraded,
                     original_with_mask=orig_with_mask,
                     mask=mask if is_mural_mode else (1 - mask),
+                    condition_lut=debug_info.get('condition_lut', condition_lut) if debug_info is not None else condition_lut,
                 )
             # ============ 调试保存完成 ============
 

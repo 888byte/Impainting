@@ -212,8 +212,8 @@ class DebugLogger:
         # 准备所有图像和标签
         # 顺序：输入 -> 去噪后 -> 颜色先验 -> GT+Mask -> Mask -> 置信度
         images = []
-        # 在 Denoised 标签中显示去噪提升指标
-        denoised_label = f'Denoised (diff:{denoise_diff:.4f}, var↓:{variance_reduction:.1f}%)'
+        # ??Denoised ?????????????????
+        denoised_label = f'Denoised (diff:{denoise_diff:.4f}, var??{variance_reduction:.1f}%)'
         labels = ['Input', denoised_label, 'Prior', 'GT+Mask', 'Mask', 'Confidence']
         
         if refined_gt is not None:
@@ -221,7 +221,7 @@ class DebugLogger:
         else:
             tensors = [input_image, input_image, color_prior, gt_with_mask, mask, confidence]
         
-        # 转换并添加标签
+        # ???????????
         for tensor, label in zip(tensors, labels):
             try:
                 is_mask = (label == 'Mask')
@@ -275,6 +275,7 @@ class DebugLogger:
         color_prior: torch.Tensor,
         original_with_mask: torch.Tensor,
         mask: torch.Tensor,
+        condition_lut: Optional[torch.Tensor] = None,
     ):
         """
         保存训练状态 V2 版本 - 新的 6 列格式
@@ -318,13 +319,25 @@ class DebugLogger:
         # 准备所有图像和标签
         images = []
         denoised_label = f'Denoised (d:{denoise_diff:.3f}, v↓:{variance_reduction:.1f}%)'
-        labels = ['Input', denoised_label, 'ColorChanged', 'Prior', 'Orig+Mask', 'Mask']
+        # v4 target-domain debug layout:
+        #   TrainingTarget = LUT(denoised(degraded_full))
+        #   CondLUT        = LUT(mask-aware denoised(observed_degraded))
+        #   ConditionMu    = CondLUT/MuCleanr output multiplied by known mask.
+        # Do not label ConditionMu as "Orig+Mask" because it is intentionally
+        # target-domain and no longer raw original_degraded * mask.
+        if condition_lut is None:
+            labels = ['Input', denoised_label, 'TrainingTarget', 'ColorPrior', 'ConditionMu', 'Mask']
+        else:
+            labels = ['Input', denoised_label, 'TrainingTarget', 'CondLUT', 'ColorPrior', 'ConditionMu', 'Mask']
         
-        # 如果没有 denoised，显示原图
+        # If denoised is missing, show the original input.
         if denoised is None:
             denoised = original
         
-        tensors = [original, denoised, color_changed, color_prior, original_with_mask, mask]
+        if condition_lut is None:
+            tensors = [original, denoised, color_changed, color_prior, original_with_mask, mask]
+        else:
+            tensors = [original, denoised, color_changed, condition_lut, color_prior, original_with_mask, mask]
         
         # 转换并添加标签
         for tensor, label in zip(tensors, labels):
