@@ -1,8 +1,9 @@
 """
 Self-Supervised Mu-Denoiser (D_mu) for Stage2 IR-SDE
 
-This module cleans the condition mean (mu) before feeding to the SDE,
-allowing the diffusion model to focus on color restoration instead of denoising.
+This module cleans the target-domain condition mean (mu) before feeding to the SDE.
+For mural mode the RGB input is condition_lut = LUT(denoised(observed_degraded)),
+not the raw degraded-domain image, so the SDE drift remains in the target color domain.
 
 Training: Uses blind-spot/Noise2Self approach (no clean GT required)
 - Sample blind spots in known (mask=1) regions
@@ -21,7 +22,7 @@ class MuDenoiser(nn.Module):
     Self-supervised mu denoiser used to clean mu in Stage2.
 
     Input: concat([rgb, mask_known, confidence]) => [B, 5, H, W]
-      - rgb: Y_degraded (0~1), original faded/degraded image
+      - rgb: target-domain condition_lut (0~1), e.g. LUT(denoised(observed_degraded))
       - mask_known: mask_for_sde (1=known, 0=hole) - SDE semantics!
       - confidence: optional LUT confidence, if None use ones
 
@@ -290,7 +291,7 @@ class MuDenoiserTrainer:
         Complete training step for self-supervised denoising.
         
         Args:
-            y_degraded: [B, 3, H, W] original degraded image (0~1)
+            y_degraded: [B, 3, H, W] target-domain condition_lut image (0~1)
             mask_known: [B, 1, H, W] known mask (1=known, 0=hole) - SDE semantics!
             confidence: [B, 1, H, W] optional LUT confidence
             lambda_ss: weight for self-supervised loss
@@ -345,7 +346,7 @@ class MuDenoiserTrainer:
         Inference without blind spots (for test/validation).
         
         Args:
-            y_degraded: [B, 3, H, W] degraded image
+            y_degraded: [B, 3, H, W] target-domain condition_lut image
             mask_known: [B, 1, H, W] known mask (SDE semantics)
             confidence: [B, 1, H, W] optional confidence
         

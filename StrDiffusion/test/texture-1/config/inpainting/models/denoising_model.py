@@ -107,6 +107,7 @@ class DenoisingModel(BaseModel):
 
         mu_opt = opt.get("mu_denoiser", {})
         self.use_mu_denoiser = bool(mu_opt.get("enabled", False) and HAS_MU_DENOISER)
+        self.mu_denoiser_has_weights = False
         self.mu_denoiser = None
         self.mu_denoiser_trainer = None
         if self.use_mu_denoiser:
@@ -171,24 +172,49 @@ class DenoisingModel(BaseModel):
         self.conf_lut = conf_lut.to(self.device) if conf_lut is not None else None
         self.sample_name = sample_name or "sample"
 
-    def _denoise_image(self, image: torch.Tensor) -> torch.Tensor:
-        """A lightweight edge-preserving smoothing used before LUT processing."""
+    def _denoise_image(self, image: torch.Tensor, mask_known: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """A lightweight edge-preserving smoothing used before LUT processing.
+
+        When mask_known is provided (1=known, 0=hole), normalized convolution
+        excludes white/black hole pixels from the smoothing support and fills
+        hole pixels from known-region neighborhoods for structure guidance.
+        """
         sigma_spatial = 2.0
         kernel_size = 5
+        padding = kernel_size // 2
         coords = torch.arange(kernel_size, dtype=image.dtype, device=image.device)
-        coords = coords - kernel_size // 2
+        coords = coords - padding
         gauss_1d = torch.exp(-(coords ** 2) / (2 * sigma_spatial ** 2))
         gauss_1d = gauss_1d / gauss_1d.sum()
         gauss_2d = gauss_1d.view(-1, 1) @ gauss_1d.view(1, -1)
         gauss_2d = gauss_2d.view(1, 1, kernel_size, kernel_size)
 
-        smoothed_channels = []
-        for channel_idx in range(image.shape[1]):
-            channel = image[:, channel_idx : channel_idx + 1]
-            smoothed_channels.append(F.conv2d(channel, gauss_2d, padding=kernel_size // 2))
-        smoothed = torch.cat(smoothed_channels, dim=1)
+        if mask_known is not None:
+            mask_known = mask_known.to(device=image.device, dtype=image.dtype).clamp(0.0, 1.0)
+            if mask_known.shape[1] != 1:
+                mask_known = mask_known[:, :1]
+            denom = F.conv2d(mask_known, gauss_2d, padding=padding).clamp_min(1e-6)
+            known_count = mask_known.sum(dim=(2, 3), keepdim=True).clamp_min(1.0)
+            known_mean = (image * mask_known).sum(dim=(2, 3), keepdim=True) / known_count
+            smoothed_channels = []
+            for channel_idx in range(image.shape[1]):
+                channel = image[:, channel_idx : channel_idx + 1]
+                smoothed_c = F.conv2d(channel * mask_known, gauss_2d, padding=padding) / denom
+                smoothed_c = torch.where(
+                    denom > 1e-5, smoothed_c, known_mean[:, channel_idx : channel_idx + 1]
+                )
+                smoothed_channels.append(smoothed_c)
+            smoothed = torch.cat(smoothed_channels, dim=1)
+            edge_input = image * mask_known + smoothed * (1 - mask_known)
+        else:
+            smoothed_channels = []
+            for channel_idx in range(image.shape[1]):
+                channel = image[:, channel_idx : channel_idx + 1]
+                smoothed_channels.append(F.conv2d(channel, gauss_2d, padding=padding))
+            smoothed = torch.cat(smoothed_channels, dim=1)
+            edge_input = image
 
-        gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+        gray = 0.299 * edge_input[:, 0:1] + 0.587 * edge_input[:, 1:2] + 0.114 * edge_input[:, 2:3]
         sobel_x = torch.tensor(
             [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
             dtype=image.dtype,
@@ -203,7 +229,7 @@ class DenoisingModel(BaseModel):
         grad_y = F.conv2d(gray, sobel_y, padding=1)
         grad_mag = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-8)
         edge_weight = 1 - torch.exp(-grad_mag / 0.1)
-        denoised = edge_weight * image + (1 - edge_weight) * smoothed
+        denoised = edge_weight * edge_input + (1 - edge_weight) * smoothed
         return torch.clamp(denoised, 0.0, 1.0)
 
     def _guided_smooth(self, image: torch.Tensor, guide: torch.Tensor, radius: int = 5):
@@ -254,7 +280,7 @@ class DenoisingModel(BaseModel):
         _validate_mask_pair(mask_known, mask_hole, "_prepare_brushnet_inputs")
         degraded = self.original_degraded
 
-        denoised_original = self._denoise_image(degraded)
+        denoised_original = self._denoise_image(degraded, mask_known=mask_known)
 
         color_prior = self.color_prior
         confidence = self.confidence
@@ -302,22 +328,40 @@ class DenoisingModel(BaseModel):
         color_prior = lut_transformed * mask_known + color_prior * mask_hole
         confidence = torch.ones_like(mask_known) * mask_known + confidence * mask_hole
 
-        if self.use_mu_denoiser:
-            mu_clean = self.mu_denoiser_trainer.inference(
-                degraded,
+        if self.save_intermediates:
+            mask_hole_3c = mask_hole.expand(-1, color_prior.shape[1], -1, -1)
+            hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+            cp_hole_mean = float((color_prior * mask_hole_3c).sum().item() / hole_denom.item())
+            cp_hole_std = float((((color_prior - cp_hole_mean) ** 2) * mask_hole_3c).sum().div(hole_denom).sqrt().item())
+            white_ratio = float((((color_prior > 0.95).all(dim=1, keepdim=True).float() * mask_hole).sum() / mask_hole.sum().clamp_min(1.0)).item())
+            conf_hole_mean = float((confidence * mask_hole).sum().div(mask_hole.sum().clamp_min(1.0)).item())
+            logger.info(
+                "[ColorPrior Debug] hole_mean=%.6f hole_std=%.6f hole_white_ratio=%.6f confidence_hole_mean=%.6f",
+                cp_hole_mean,
+                cp_hole_std,
+                white_ratio,
+                conf_hole_mean,
+            )
+
+        if self.use_mu_denoiser and getattr(self, "mu_denoiser_has_weights", False):
+            mu_clean_lut = self.mu_denoiser_trainer.inference(
+                lut_transformed,
                 mask_known,
                 confidence,
-            )
-            mu_clean = mu_clean * mask_known
+            ).clamp(0.0, 1.0)
         else:
-            mu_clean = degraded * mask_known
+            mu_clean_lut = lut_transformed
+        condition_mu = mu_clean_lut * mask_known
 
         return {
             "denoised_original": denoised_original,
             "lut_transformed": lut_transformed,
+            "condition_lut": lut_transformed,
+            "condition_mu": condition_mu,
             "color_prior": color_prior,
             "confidence": confidence,
-            "mu_clean": mu_clean,
+            "mu_clean_lut": mu_clean_lut,
+            "mu_clean": condition_mu,
             "prior_debug": prior_debug,
         }
 
@@ -390,7 +434,7 @@ class DenoisingModel(BaseModel):
                 mu_clean = prepared["mu_clean"]
                 prior_debug = prepared.get("prior_debug", {})
                 target_like = self._build_training_target_like()
-                self.condition = self.original_degraded * self.mask
+                self.condition = prepared["condition_mu"]
                 sde.set_mu(self.condition)
                 x_init = self.condition
                 self.state = sde.noise_state(x_init)
@@ -442,7 +486,10 @@ class DenoisingModel(BaseModel):
                     "training_target_like": target_like,
                     "confidence": self.confidence,
                     "denoised_original": prepared["denoised_original"],
+                    "condition_lut": prepared["condition_lut"],
                     "lut_transformed": prepared["lut_transformed"],
+                    "condition_mu": self.condition,
+                    "mu_clean_lut": prepared["mu_clean_lut"],
                     "mu_clean": mu_clean,
                     "x_init": x_init,
                     "structure_gray": structure_gray,
@@ -513,8 +560,14 @@ class DenoisingModel(BaseModel):
 
             if self.use_mu_denoiser:
                 if not mu_denoiser_state:
-                    raise RuntimeError("配置启用了 Mu-Denoiser，但 G checkpoint 中没有对应权重。")
-                self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
+                    logger.warning(
+                        "[Model] Mu-Denoiser is enabled but checkpoint has no mu_denoiser.* weights; "
+                        "falling back to LUT condition_mu."
+                    )
+                else:
+                    self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
+                    self.mu_denoiser_has_weights = True
+
 
         load_path_gs = self.opt["path"].get("pretrain_model_Gs")
         if load_path_gs:

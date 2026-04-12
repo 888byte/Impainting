@@ -184,13 +184,21 @@ class IRSDE(SDE):
     def get_score_from_noise(self, noise, t):
         return -noise / self.sigma_bar(t)
 
-    def score_fn(self, x, t, **kwargs):
+    def score_fn(self, x, t, S=None, **kwargs):
         # need to pre-set mu and score_model
-        noise = self.model(x, self.mu, t, **kwargs)
-        return self.get_score_from_noise(noise, t)
+        if S is None:
+            output = self.model(x, self.mu, t, **kwargs)
+        else:
+            output = self.model(x, self.mu, t, S, **kwargs)
+        if isinstance(output, (tuple, list)):
+            output = output[0]
+        return self.get_score_from_noise(output, t)
 
-    def noise_fn(self, x, t, S, **kwargs):
+    def noise_fn(self, x, t, S=None, **kwargs):
         # need to pre-set mu and score_model
+        # Returns raw model output (may be tuple). Caller should extract [0] if needed.
+        if S is None:
+            return self.model(x, self.mu, t, **kwargs)
         return self.model(x, self.mu, t, S, **kwargs)
 
     # optimum x_{t-1}

@@ -125,8 +125,6 @@ class DenoisingModel(BaseModel):
             self.model = DataParallel(self.model, device_ids=gpu_ids, output_device=gpu_ids[0])
             self.dis   = DataParallel(self.dis,   device_ids=gpu_ids, output_device=gpu_ids[0])
 
-        self.load()
-        
         # ============ 加载 LUT 处理器 ============
         # 用于对去噪后的图像应用颜色变换
         train_dataset_opt = opt.get('datasets', {}).get('train', {})
@@ -149,6 +147,7 @@ class DenoisingModel(BaseModel):
         mu_denoiser_opt = opt.get('mu_denoiser', {})
         self.mu_denoiser_opt = mu_denoiser_opt
         self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
+        self.mu_denoiser_has_weights = False
         
         if self.use_mu_denoiser:
             self.mu_denoiser = MuDenoiser(
@@ -180,6 +179,10 @@ class DenoisingModel(BaseModel):
             self._optimizer_mu_init_lr = None
             if mu_denoiser_opt.get('enabled', False) and not HAS_MU_DENOISER:
                 logger.warning("[Model] Mu-Denoiser 配置已启用但模块未找到")
+        
+        # Load checkpoints after Mu-Denoiser is constructed so optional
+        # mu_denoiser.* weights can be restored when present.
+        self.load()
         
         if self.is_train:
             self.model.train()
@@ -372,7 +375,9 @@ class DenoisingModel(BaseModel):
 
     def feed_data(self, state, LQ, GT, mask, S_sde, S_GT, S_LQ, 
                   color_prior=None, confidence=None, conf_lut=None,
-                  original_degraded=None, reference_degraded=None):
+                  original_degraded=None, reference_degraded=None,
+                  condition_lut=None, mu_clean_lut=None,
+                  denoised_observed_mask_aware=None):
         """
         加载训练数据
         
@@ -427,86 +432,71 @@ class DenoisingModel(BaseModel):
         else:
             self.conf_lut = None
 
-    def compute_mu_clean_no_grad(self, y_degraded, mask_known, confidence=None):
-        """
-        保留该辅助接口供调试/对比使用，但不再驱动 texture SDE 主干。
+        # Target-domain condition chain used by mural training/debug.
+        self.condition_lut = (
+            condition_lut.to(self.device) if condition_lut is not None else self.condition
+        )
+        self.mu_clean_lut = (
+            mu_clean_lut.to(self.device) if mu_clean_lut is not None else self.condition_lut
+        )
+        self.denoised_observed_mask_aware = (
+            denoised_observed_mask_aware.to(self.device)
+            if denoised_observed_mask_aware is not None
+            else None
+        )
 
-        Texture 主干的 mu 已恢复为原版 StrDiffusion 语义：
-        ``observed_degraded * mask_known``。
+    def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None):
         """
-        if not self.use_mu_denoiser or self.mu_denoiser is None:
-            return y_degraded * mask_known
+        Return target-domain MuCleanr output for the current condition_lut.
+
+        condition_lut is already LUT(denoised(observed_degraded)); MuCleanr must
+        never receive raw degraded-domain input for SDE mu construction.  If the
+        module is disabled or no usable weights have been loaded/trained yet,
+        fall back to condition_lut.  The caller applies mask_known before using
+        the result as SDE mu.
+        """
+        if (
+            not self.use_mu_denoiser
+            or self.mu_denoiser is None
+            or not getattr(self, "mu_denoiser_has_weights", False)
+        ):
+            return condition_lut
 
         with torch.no_grad():
-            mu_clean = self.mu_denoiser_trainer.inference(
-                y_degraded, mask_known, confidence
+            mu_clean_lut = self.mu_denoiser_trainer.inference(
+                condition_lut, mask_known, confidence
             )
-            mu_clean = mu_clean * mask_known
 
-        return mu_clean
+        return mu_clean_lut.clamp(0.0, 1.0)
 
     def optimize_parameters(self, step, timesteps, sde=None):
         self.log_dict = OrderedDict()
 
-        # ============ 第一阶段：分离“条件链输入”和“训练目标输入” ============
-        # original_degraded  : 当前观测输入（真实缺损外观）
-        # reference_degraded : 完整褪色参考图（只用于生成训练目标）
-        with torch.no_grad():
-            denoised_original = self._denoise_image(self.original_degraded)
-            if self.reference_degraded.data_ptr() == self.original_degraded.data_ptr():
-                denoised_reference = denoised_original
-            else:
-                denoised_reference = self._denoise_image(self.reference_degraded)
+        # train.py has already built the single mural target domain and passed it
+        # through feed_data(GT=...).  Do not recompute denoised/LUT targets here.
+        training_target = self.state_0
+        condition_lut_for_mu = getattr(self, "condition_lut", self.condition)
+        mu_clean_lut = getattr(self, "mu_clean_lut", condition_lut_for_mu)
+        mu_losses = {}
 
-            # 条件链：严格模拟推理时的真实缺损输入
-            lut_transformed, lut_confidence = self._build_lut_transformed(denoised_original)
-
-            # 训练目标：始终来自完整参考图，避免把真实缺损输入错误写进监督信号
-            target_lut_transformed, _ = self._build_lut_transformed(denoised_reference)
-            if self.gt_mode == 'full':
-                color_changed = target_lut_transformed
-            else:
-                color_changed = denoised_reference * self.mask + target_lut_transformed * (1 - self.mask)
-        
-        # 使用颜色变换后的图像作为训练目标（第二阶段的GT）
-        training_target = color_changed
-        
-        # ============ 重要：同步更新 color_prior 的非 mask 区域 ============
-        # 使用“真实缺损输入”对应的 LUT 结果更新已知区域，使训练和推理一致
-        if self.color_prior is not None:
-            self.color_prior = (
-                lut_transformed * self.mask +
-                self.color_prior * (1 - self.mask)
-            )
-        
-        # ============ Self-Supervised Mu-Denoiser 训练 ============
-        # 在 SDE 训练前，对 mu 进行自监督去噪
+        # ============ Self-Supervised Mu-Denoiser training ============
+        # MuCleanr now operates in target color domain: condition_lut, not raw degraded.
         mu_denoiser_loss = None
         if self.use_mu_denoiser and self.is_train:
-            # 使用真实缺损输入进行去噪训练，和推理保持一致
-            # 注意：self.mask 已经是 SDE 语义 (1=known, 0=hole)
             y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
-                y_degraded=self.original_degraded,
+                y_degraded=condition_lut_for_mu.detach(),
                 mask_known=self.mask,
                 confidence=self.confidence,
                 lambda_ss=self.lambda_ss,
                 lambda_tv=self.lambda_tv,
             )
-            
-            # CRITICAL: detach 防止扩散梯度影响 D_mu
-            # mu_clean 只保留已知区域（和原始 mu = Y_degraded * mask 语义一致）
-            mu_clean = (y_hat.detach()) * self.mask
+            mu_clean_lut = y_hat.detach().clamp(0.0, 1.0)
             mu_denoiser_loss = loss_mu
-            
-            # 记录 D_mu 损失
             for key, val in mu_losses.items():
                 self.log_dict[key] = val
-        else:
-            # 回退到原始行为
-            mu_clean = self.condition
-        
-        # Texture 主干恢复到原版 StrDiffusion 语义：
-        # cond/mu 必须始终等于 masked observed input，而不是辅助分支的 mu_clean。
+
+        # Texture SDE mu is exactly the feed_data condition_mu built in train.py:
+        # target-domain condition_lut * mask, or MuCleanr(condition_lut) * mask.
         sde.set_mu(self.condition)
         
         # 使用 GT 计算最优逆步骤
@@ -527,7 +517,8 @@ class DenoisingModel(BaseModel):
             # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
             brushnet_kwargs['mask'] = 1 - self.mask
 
-        noise, _ = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
+        model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
+        noise = model_output[0] if isinstance(model_output, (tuple, list)) else model_output
         # ============ 传递BrushNet条件完成 ============
         
         score = sde.get_score_from_noise(noise, timesteps)
@@ -559,6 +550,7 @@ class DenoisingModel(BaseModel):
         if self.use_mu_denoiser:
             torch.nn.utils.clip_grad_norm_(self.mu_denoiser.parameters(), max_norm=1.0)
             self.optimizer_mu.step()
+            self.mu_denoiser_has_weights = True
 
         # set log
         self.log_dict["loss"] = loss.item()
@@ -574,35 +566,45 @@ class DenoisingModel(BaseModel):
         if self.use_mu_denoiser:
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+
+        # condition_mu is target-domain LUT/MuCleanr output masked to known area.
         texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
         self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
+        condition_target_gap = (self.condition - training_target * self.mask).abs().mean()
+        self.log_dict["condition_target_gap"] = float(condition_target_gap.item())
+        degraded_target_gap = (self.original_degraded * self.mask - training_target * self.mask).abs().mean()
+        self.log_dict["degraded_target_gap"] = float(degraded_target_gap.item())
+
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,
-            lut_transformed=lut_transformed,
-            mu_clean=mu_clean,
+            condition_lut=condition_lut_for_mu,
+            mu_clean_lut=mu_clean_lut,
+            confidence=self.confidence,
             mask_known=self.mask,
         ))
-        
-        # ============ 保存调试信息 ============
-        # 调试顺序：
-        # 1. Input: 原始褪色图（未变色，未去噪）
-        # 2. Denoised: 去噪后的原图
-        # 3. ColorChanged: LUT颜色变换后的图像（训练目标）
-        # 4. Prior: 颜色先验
-        # 5. Original+Mask: 原图 + mask 涂黑
-        # 6. Mask
+
+        denoised_observed = getattr(self, "denoised_observed_mask_aware", None)
         self._debug_refiner_info = {
-            'original_degraded': self.original_degraded.detach(),   # 当前观测输入（真实缺损外观）
-            'reference_degraded': self.reference_degraded.detach(), # 完整参考图
-            'denoised_original': denoised_original.detach(),        # 条件链去噪结果
-            'mu_clean': mu_clean.detach() if mu_clean is not self.condition else None,
-            'lut_transformed': lut_transformed.detach(),            # 条件链 LUT 结果
-            'color_changed': color_changed.detach(),                # 训练目标
+            'original_degraded': self.original_degraded.detach(),
+            'reference_degraded': self.reference_degraded.detach(),
+            'denoised_observed_mask_aware': denoised_observed.detach() if denoised_observed is not None else None,
+            'condition_lut': condition_lut_for_mu.detach(),
+            'condition_mu': self.condition.detach(),
+            'mu_clean_lut': mu_clean_lut.detach(),
+            'training_target': training_target.detach(),
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
-            'original_with_mask': self.condition.detach(),
-            'mask': self.mask.detach(),
+            'confidence': self.confidence.detach() if self.confidence is not None else None,
             'mask_known': self.mask.detach(),
             'mask_hole': (1 - self.mask).detach(),
+            'structure_gray_from_target': self.S_GT.detach(),
+            'structure_edge_from_target': self.S_LQ.detach(),
+            # Backward-compatible debug aliases.
+            'denoised_original': denoised_observed.detach() if denoised_observed is not None else None,
+            'lut_transformed': condition_lut_for_mu.detach(),
+            'mu_clean': (mu_clean_lut * self.mask).detach(),
+            'color_changed': training_target.detach(),
+            'original_with_mask': self.condition.detach(),
+            'mask': self.mask.detach(),
         }
 
     def _masked_mean_std(self, tensor, mask):
@@ -620,16 +622,28 @@ class DenoisingModel(BaseModel):
         std = torch.sqrt(var.clamp_min(0.0))
         return float(mean.item()), float(std.item())
 
-    def _compute_condition_stats(self, color_prior, lut_transformed, mu_clean, mask_known):
+    def _compute_condition_stats(self, color_prior, condition_lut, mu_clean_lut, confidence, mask_known):
         mask_hole = 1 - mask_known
         color_prior_mean, color_prior_std = self._masked_mean_std(color_prior, mask_hole)
-        lut_hole_mean, _ = self._masked_mean_std(lut_transformed, mask_hole)
-        mu_known_mean, mu_known_std = self._masked_mean_std(mu_clean, mask_known)
+        condition_known_mean, condition_known_std = self._masked_mean_std(condition_lut, mask_known)
+        mu_known_mean, mu_known_std = self._masked_mean_std(mu_clean_lut, mask_known)
+        confidence_hole_mean, _ = self._masked_mean_std(confidence, mask_hole)
+
+        color_prior_white_ratio = 0.0
+        if color_prior is not None:
+            cp = color_prior.detach()
+            white_pixels = (cp > 0.95).all(dim=1, keepdim=True).float()
+            denom = mask_hole.detach().sum().clamp_min(1.0)
+            color_prior_white_ratio = float((white_pixels * mask_hole.detach()).sum().item() / denom.item())
+
         return OrderedDict(
             [
                 ("stats_color_prior_hole_mean", color_prior_mean),
                 ("stats_color_prior_hole_std", color_prior_std),
-                ("stats_lut_hole_mean", lut_hole_mean),
+                ("stats_color_prior_hole_white_ratio", color_prior_white_ratio),
+                ("stats_confidence_hole_mean", confidence_hole_mean),
+                ("stats_condition_known_mean", condition_known_mean),
+                ("stats_condition_known_std", condition_known_std),
                 ("stats_mu_known_mean", mu_known_mean),
                 ("stats_mu_known_std", mu_known_std),
             ]
@@ -668,59 +682,63 @@ class DenoisingModel(BaseModel):
         )
         return lut_transformed, lut_confidence
     
-    def _denoise_image(self, image):
+    def _denoise_image(self, image, mask_known=None):
         """
-        使用双边滤波对图像进行边缘保持去噪
-        
-        这是一个固定算法（不需要训练），在平坦区域平滑颜色，在边缘保持清晰
-        
+        Lightweight edge-preserving smoothing before LUT.
+
         Args:
-            image: [B, 3, H, W] RGB 图像 in [0, 1]
-        
-        Returns:
-            denoised: [B, 3, H, W] 去噪后的 RGB 图像 in [0, 1]
+            image: [B, 3, H, W] RGB in [0, 1].
+            mask_known: optional [B, 1, H, W], 1=known and 0=hole.  When
+                provided, normalized convolution prevents white/black hole
+                pixels from contributing to known-region smoothing.
         """
-        # 使用简单的高斯模糊作为去噪（可调整参数）
-        # 这是一个近似的边缘保持滤波
-        sigma_spatial = 2.0  # 空间平滑程度
+        sigma_spatial = 2.0
         kernel_size = 5
-        
-        # 创建高斯核
-        x = torch.arange(kernel_size, dtype=image.dtype, device=image.device) - kernel_size // 2
+        padding = kernel_size // 2
+
+        x = torch.arange(kernel_size, dtype=image.dtype, device=image.device) - padding
         gauss_1d = torch.exp(-x**2 / (2 * sigma_spatial**2))
         gauss_1d = gauss_1d / gauss_1d.sum()
         gauss_2d = gauss_1d.view(-1, 1) @ gauss_1d.view(1, -1)
         gauss_2d = gauss_2d.view(1, 1, kernel_size, kernel_size)
-        
-        # 对每个通道分别进行高斯平滑
-        padding = kernel_size // 2
-        smoothed = []
-        for c in range(3):
-            channel = image[:, c:c+1, :, :]
-            channel_smoothed = F.conv2d(channel, gauss_2d, padding=padding)
-            smoothed.append(channel_smoothed)
-        smoothed = torch.cat(smoothed, dim=1)
-        
-        # 计算边缘权重（高梯度区域保持原值）
-        gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
-        
-        # Sobel 梯度
-        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
-                               dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
-        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
-                               dtype=image.dtype, device=image.device).view(1, 1, 3, 3)
-        
+
+        if mask_known is not None:
+            mask_known = mask_known.to(device=image.device, dtype=image.dtype).clamp(0.0, 1.0)
+            if mask_known.shape[1] != 1:
+                mask_known = mask_known[:, :1]
+            denom = F.conv2d(mask_known, gauss_2d, padding=padding).clamp_min(1e-6)
+            known_count = mask_known.sum(dim=(2, 3), keepdim=True).clamp_min(1.0)
+            known_mean = (image * mask_known).sum(dim=(2, 3), keepdim=True) / known_count
+            smoothed_channels = []
+            for c in range(image.shape[1]):
+                channel = image[:, c:c + 1]
+                smoothed_c = F.conv2d(channel * mask_known, gauss_2d, padding=padding) / denom
+                smoothed_c = torch.where(denom > 1e-5, smoothed_c, known_mean[:, c:c + 1])
+                smoothed_channels.append(smoothed_c)
+            smoothed = torch.cat(smoothed_channels, dim=1)
+            edge_input = image * mask_known + smoothed * (1 - mask_known)
+        else:
+            smoothed_channels = []
+            for c in range(image.shape[1]):
+                channel = image[:, c:c + 1]
+                smoothed_channels.append(F.conv2d(channel, gauss_2d, padding=padding))
+            smoothed = torch.cat(smoothed_channels, dim=1)
+            edge_input = image
+
+        gray = 0.299 * edge_input[:, 0:1] + 0.587 * edge_input[:, 1:2] + 0.114 * edge_input[:, 2:3]
+        sobel_x = torch.tensor(
+            [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+            dtype=image.dtype, device=image.device
+        ).view(1, 1, 3, 3)
+        sobel_y = torch.tensor(
+            [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+            dtype=image.dtype, device=image.device
+        ).view(1, 1, 3, 3)
         grad_x = F.conv2d(gray, sobel_x, padding=1)
         grad_y = F.conv2d(gray, sobel_y, padding=1)
         grad_mag = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
-        
-        # 边缘权重：梯度大的地方保持原值
-        sigma_edge = 0.1
-        edge_weight = 1 - torch.exp(-grad_mag / sigma_edge)  # 边缘=1, 平坦=0
-        
-        # 混合：边缘区域保持原值，平坦区域使用平滑值
-        denoised = edge_weight * image + (1 - edge_weight) * smoothed
-        
+        edge_weight = 1 - torch.exp(-grad_mag / 0.1)
+        denoised = edge_weight * edge_input + (1 - edge_weight) * smoothed
         return torch.clamp(denoised, 0.0, 1.0)
 
     def _guided_smooth(self, image, guide, radius=5):
@@ -857,6 +875,7 @@ class DenoisingModel(BaseModel):
             if use_mu_denoiser and mu_denoiser is not None and len(mu_denoiser_state) > 0:
                 try:
                     mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
+                    self.mu_denoiser_has_weights = True
                     logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
                 except Exception as e:
                     logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
