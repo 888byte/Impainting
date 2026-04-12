@@ -322,8 +322,12 @@ class DenoisingModel(BaseModel):
                 + lut_transformed * effective_weight
             )
 
-        # 与训练一致: 已知区域使用新的 LUT 结果, 修复区域保留先验填充。
-        color_prior = lut_transformed * mask_known + color_prior * mask_hole
+        # ?????: known ????? CondLUT?hole ??? prior generator?
+        # ?? confidence ???? CondLUT??????/?? hole ???/?? prior ???
+        prior_hole_max_weight = float(self.dataset_opt.get("prior_hole_max_weight", 0.5))
+        prior_hole_weight = confidence.clamp(0.0, min(max(prior_hole_max_weight, 0.0), 1.0))
+        hole_prior = prior_hole_weight * color_prior + (1.0 - prior_hole_weight) * lut_transformed
+        color_prior = lut_transformed * mask_known + hole_prior * mask_hole
         confidence = torch.ones_like(mask_known) * mask_known + confidence * mask_hole
 
         if self.save_intermediates:

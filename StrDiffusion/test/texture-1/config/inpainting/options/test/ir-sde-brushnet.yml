@@ -54,6 +54,7 @@ datasets:
     lut_inpaint_method: telea
     lut_strength: 0.7
     lut_smooth_radius: 1
+    prior_hole_max_weight: 0.5
     #### 颜色先验生成方法：
     #### - fast: 更快
     #### - quality: 更稳，更适合正式推理

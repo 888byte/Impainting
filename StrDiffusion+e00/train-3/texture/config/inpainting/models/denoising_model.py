@@ -148,6 +148,7 @@ class DenoisingModel(BaseModel):
         self.mu_denoiser_opt = mu_denoiser_opt
         self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
         self.mu_denoiser_has_weights = False
+        self.mu_denoiser_loaded_weights = False
         
         if self.use_mu_denoiser:
             self.mu_denoiser = MuDenoiser(
@@ -445,15 +446,14 @@ class DenoisingModel(BaseModel):
             else None
         )
 
-    def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None):
+    def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
         """
         Return target-domain MuCleanr output for the current condition_lut.
 
         condition_lut is already LUT(denoised(observed_degraded)); MuCleanr must
-        never receive raw degraded-domain input for SDE mu construction.  If the
-        module is disabled or no usable weights have been loaded/trained yet,
-        fall back to condition_lut.  The caller applies mask_known before using
-        the result as SDE mu.
+        never receive raw degraded-domain input for SDE mu construction.
+        If MuDenoiser is training from scratch, keep SDE mu on plain CondLUT for
+        a warmup period so random early MuCleanr weights cannot tint condition_mu.
         """
         if (
             not self.use_mu_denoiser
@@ -461,6 +461,11 @@ class DenoisingModel(BaseModel):
             or not getattr(self, "mu_denoiser_has_weights", False)
         ):
             return condition_lut
+
+        if not getattr(self, "mu_denoiser_loaded_weights", False):
+            warmup_iter = int(self.mu_denoiser_opt.get("sde_warmup_iter", 1000))
+            if step is None or step < warmup_iter:
+                return condition_lut
 
         with torch.no_grad():
             mu_clean_lut = self.mu_denoiser_trainer.inference(
@@ -878,6 +883,7 @@ class DenoisingModel(BaseModel):
                 try:
                     mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
                     self.mu_denoiser_has_weights = True
+                    self.mu_denoiser_loaded_weights = True
                     logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
                 except Exception as e:
                     logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")

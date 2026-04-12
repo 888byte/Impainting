@@ -277,9 +277,10 @@ class MuralInpaintingDataset(Dataset):
             mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
             h, w = new_h, new_w
 
-        last_img_crop = None
-        last_mask_crop = None
-        last_ratio = None
+        best_img_crop = None
+        best_mask_crop = None
+        best_ratio = None
+        best_score = float("inf")
         max_retry = max(1, self.max_crop_retry)
 
         for _ in range(max_retry):
@@ -289,22 +290,28 @@ class MuralInpaintingDataset(Dataset):
             mask_crop = mask[y:y + crop_size, x:x + crop_size]
             hole_ratio = float(np.mean(mask_crop > 127))
 
-            last_img_crop = img_crop
-            last_mask_crop = mask_crop
-            last_ratio = hole_ratio
-
-            if self.min_hole_ratio <= hole_ratio <= self.max_hole_ratio:
+            if hole_ratio < self.min_hole_ratio:
+                score = self.min_hole_ratio - hole_ratio
+            elif hole_ratio > self.max_hole_ratio:
+                score = hole_ratio - self.max_hole_ratio
+            else:
                 return img_crop, mask_crop
+
+            if score < best_score:
+                best_score = score
+                best_img_crop = img_crop
+                best_mask_crop = mask_crop
+                best_ratio = hole_ratio
 
         self._crop_retry_fail_count += 1
         if self.debug_mode or self._crop_retry_fail_count <= 5:
             print(
-                "[MuralInpaintingDataset] crop retry fallback: "
-                f"hole_ratio={last_ratio:.4f}, expected "
+                "[MuralInpaintingDataset] crop retry fallback(best): "
+                f"hole_ratio={best_ratio:.4f}, expected "
                 f"[{self.min_hole_ratio:.4f}, {self.max_hole_ratio:.4f}], "
                 f"max_crop_retry={max_retry}"
             )
-        return last_img_crop, last_mask_crop
+        return best_img_crop, best_mask_crop
 
     def _feather_blend(
         self,
