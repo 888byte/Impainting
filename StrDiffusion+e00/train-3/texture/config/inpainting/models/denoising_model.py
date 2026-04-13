@@ -195,6 +195,26 @@ class DenoisingModel(BaseModel):
             self.loss_tri = nn.TripletMarginLoss().to(self.device)
             self.adversarial_loss = AdversarialLoss(type = 'hinge').to(self.device)
             self.weight = opt['train']['weight']
+            # Optional x0 reconstruction auxiliary loss.
+            #
+            # The original one-step SDE supervision optimizes x_t -> x_{t-1}.
+            # In mural inpainting the inference failure can still happen at the
+            # final x0 hole region: the one-step loss is low, but the accumulated
+            # reverse trajectory saturates the hole to white.  This auxiliary
+            # term does not change the SDE formula or network structure; it only
+            # decodes the current model-predicted noise back to an estimated x0
+            # using the existing forward relation and supervises it against the
+            # target-domain training_target.
+            self.x0_recon_loss_weight = float(train_opt.get("x0_recon_loss_weight", 0.0))
+            self.x0_recon_loss_start_iter = int(train_opt.get("x0_recon_loss_start_iter", 0))
+            self.x0_recon_clamp_b_min = float(train_opt.get("x0_recon_clamp_b_min", 1e-3))
+            if self.x0_recon_loss_weight > 0:
+                logger.info(
+                    "[Model] x0 reconstruction auxiliary loss enabled: "
+                    f"weight={self.x0_recon_loss_weight}, "
+                    f"start_iter={self.x0_recon_loss_start_iter}, "
+                    f"clamp_b_min={self.x0_recon_clamp_b_min}"
+                )
 
             # optimizers
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
@@ -446,6 +466,24 @@ class DenoisingModel(BaseModel):
             else None
         )
 
+    def _estimate_x0_from_noise(self, sde, xt, mu, noise, timesteps):
+        """Decode predicted noise to x0 under the current IRSDE forward relation.
+
+        Forward training state:
+            xt = mu + (x0 - mu) * B(t) + sigma_bar(t) * noise
+
+        This helper inverts that relation with the model-predicted ``noise``.
+        It is used only as an auxiliary loss/debug signal; it does not modify
+        the SDE drift/reverse equations.
+        """
+        timesteps = timesteps.to(self.device).long()
+        B = torch.exp(-sde.thetas_cumsum[timesteps].to(self.device) * sde.dt)
+        sigma_bar = sde.sigma_bar(timesteps).to(self.device)
+        B = B.to(dtype=xt.dtype, device=xt.device).clamp_min(self.x0_recon_clamp_b_min)
+        sigma_bar = sigma_bar.to(dtype=xt.dtype, device=xt.device)
+        mu = mu.to(dtype=xt.dtype, device=xt.device)
+        return mu + (xt - mu - sigma_bar * noise) / B
+
     def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
         """
         Return target-domain MuCleanr output for the current condition_lut.
@@ -539,9 +577,44 @@ class DenoisingModel(BaseModel):
             yt_1_expection, yt_1_optimum, self.mask
         )
         loss = loss_components["loss_total"]
+
+        # x0 reconstruction auxiliary loss.
+        # This directly supervises the model's implied final clean image in the
+        # target-domain, especially hole pixels, so a low one-step loss cannot
+        # hide a reverse trajectory that still ends as white holes.
+        x0_recon_loss = None
+        x0_recon_weighted = None
+        x0_loss_components = None
+        x0_hat = None
+        x0_hat_clamped = None
+        if (
+            self.x0_recon_loss_weight > 0
+            and step >= self.x0_recon_loss_start_iter
+        ):
+            x0_hat = self._estimate_x0_from_noise(
+                sde=sde,
+                xt=self.state,
+                mu=self.condition,
+                noise=noise,
+                timesteps=timesteps,
+            )
+            # Keep the loss differentiable for ordinary over-white predictions
+            # (e.g. x0_hat around 1.0~1.5), but cap pathological outliers from
+            # very high-noise timesteps so they do not dominate finetuning.
+            x0_hat_for_loss = torch.nan_to_num(
+                x0_hat, nan=0.0, posinf=2.0, neginf=-1.0
+            ).clamp(-1.0, 2.0)
+            x0_hat_clamped = x0_hat.clamp(0.0, 1.0)
+            x0_loss_components = self.loss_fn.compute_components(
+                x0_hat_for_loss, training_target, self.mask
+            )
+            x0_recon_loss = x0_loss_components["loss_total"]
+            x0_recon_weighted = self.x0_recon_loss_weight * x0_recon_loss
         
-        # 总损失 = 扩散损失 + Mu-Denoiser 损失（如果有）
+        # 总损失 = 扩散损失 + x0重建辅助损失 + Mu-Denoiser损失（如果有）
         total_loss = loss
+        if x0_recon_weighted is not None:
+            total_loss = total_loss + x0_recon_weighted
         if mu_denoiser_loss is not None:
             total_loss = total_loss + mu_denoiser_loss
         
@@ -564,6 +637,20 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_known"] = loss_components["loss_known"].item()
         self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
+        self.log_dict["loss_x0"] = float(x0_recon_weighted.item()) if x0_recon_weighted is not None else 0.0
+        self.log_dict["loss_x0_raw"] = float(x0_recon_loss.item()) if x0_recon_loss is not None else 0.0
+        self.log_dict["loss_x0_known"] = (
+            float(x0_loss_components["loss_known"].item())
+            if x0_loss_components is not None else 0.0
+        )
+        self.log_dict["loss_x0_hole"] = (
+            float(x0_loss_components["loss_hole"].item())
+            if x0_loss_components is not None else 0.0
+        )
+        self.log_dict["loss_x0_hole_weighted"] = (
+            float(x0_loss_components["loss_hole_weighted"].item())
+            if x0_loss_components is not None else 0.0
+        )
         self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
         self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
         self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
@@ -588,6 +675,20 @@ class DenoisingModel(BaseModel):
         target_lut_delta = (training_target - self.reference_degraded).abs().mean()
         self.log_dict["stats_condition_lut_delta_known"] = float(condition_lut_delta_known.item())
         self.log_dict["stats_target_lut_delta"] = float(target_lut_delta.item())
+
+        if x0_hat_clamped is not None:
+            mask_hole = (1 - self.mask).to(dtype=x0_hat_clamped.dtype, device=x0_hat_clamped.device)
+            mask_hole_3c = mask_hole.expand(-1, x0_hat_clamped.shape[1], -1, -1)
+            hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+            x0_hole = x0_hat_clamped * mask_hole_3c
+            x0_hole_mean = x0_hole.sum() / hole_denom
+            x0_white_map = (x0_hat_clamped > 0.95).all(dim=1, keepdim=True).float()
+            x0_white_ratio = (x0_white_map * mask_hole).sum() / mask_hole.sum().clamp_min(1.0)
+            self.log_dict["stats_x0_hat_hole_mean"] = float(x0_hole_mean.item())
+            self.log_dict["stats_x0_hat_hole_white_ratio"] = float(x0_white_ratio.item())
+        else:
+            self.log_dict["stats_x0_hat_hole_mean"] = 0.0
+            self.log_dict["stats_x0_hat_hole_white_ratio"] = 0.0
 
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,
@@ -904,7 +1005,23 @@ class DenoisingModel(BaseModel):
         from torch.nn.parallel import DataParallel, DistributedDataParallel
         if isinstance(network, (DataParallel, DistributedDataParallel)):
             network = network.module
-        network.load_state_dict(state_dict, strict=strict)
+        incompatible = network.load_state_dict(state_dict, strict=strict)
+        missing = list(getattr(incompatible, "missing_keys", []))
+        unexpected = list(getattr(incompatible, "unexpected_keys", []))
+        total = len(network.state_dict())
+        loaded = max(0, total - len(missing))
+        logger.info(
+            "[LoadCheck] loaded %d/%d tensors into %s, missing=%d, unexpected=%d",
+            loaded,
+            total,
+            network.__class__.__name__,
+            len(missing),
+            len(unexpected),
+        )
+        if missing:
+            logger.warning("[LoadCheck] missing keys sample: %s", missing[:20])
+        if unexpected:
+            logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
 
     def save(self, iter_label):
         """

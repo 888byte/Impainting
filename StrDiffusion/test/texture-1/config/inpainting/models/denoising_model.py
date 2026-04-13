@@ -651,12 +651,20 @@ class DenoisingModel(BaseModel):
         load_path_gs = self.opt["path"].get("pretrain_model_Gs")
         if load_path_gs:
             logger.info("Loading model for Gs [%s] ...", load_path_gs)
-            self.load_network(load_path_gs, self.models, strict_load)
+            checkpoint_gs = torch.load(load_path_gs, map_location=self.device)
+            gs_state = {}
+            for key, value in checkpoint_gs.items():
+                gs_state[key[7:] if key.startswith("module.") else key] = value
+            self.load_network_from_state(gs_state, self.models, strict=strict_load)
 
         load_path_d = self.opt["path"].get("pretrain_model_D")
         if load_path_d:
             logger.info("Loading model for D [%s] ...", load_path_d)
-            self.load_network(load_path_d, self.dis, strict_load)
+            checkpoint_d = torch.load(load_path_d, map_location=self.device)
+            d_state = {}
+            for key, value in checkpoint_d.items():
+                d_state[key[7:] if key.startswith("module.") else key] = value
+            self.load_network_from_state(d_state, self.dis, strict=strict_load)
 
     def save(self, iter_label):
         raise NotImplementedError("The texture-1 tree is used for inference only.")

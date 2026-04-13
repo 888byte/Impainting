@@ -92,6 +92,11 @@ def _build_tb_scalar_map(logs):
     add("train/loss_hole", "loss_hole")
     add("train/loss_known", "loss_known")
     add("train/loss_hole_weighted", "loss_hole_weighted")
+    add("train/loss_x0", "loss_x0")
+    add("train/loss_x0_raw", "loss_x0_raw")
+    add("train/loss_x0_known", "loss_x0_known")
+    add("train/loss_x0_hole", "loss_x0_hole")
+    add("train/loss_x0_hole_weighted", "loss_x0_hole_weighted")
     add("train/loss_mu_total", "loss_mu_total")
     add("train/loss_mu_ss", "loss_mu_ss")
     add("train/loss_mu_tv", "loss_mu_tv")
@@ -113,6 +118,8 @@ def _build_tb_scalar_map(logs):
     add("stats/target_lut_delta", "stats_target_lut_delta")
     add("stats/mu_known_mean", "stats_mu_known_mean")
     add("stats/mu_known_std", "stats_mu_known_std")
+    add("stats/x0_hat_hole_mean", "stats_x0_hat_hole_mean")
+    add("stats/x0_hat_hole_white_ratio", "stats_x0_hat_hole_white_ratio")
     add("train/condition_target_gap", "condition_target_gap")
     add("train/degraded_target_gap", "degraded_target_gap")
 
@@ -294,6 +301,11 @@ def main():
     ema_texture_loss = None
     ema_total_loss = None
     ema_beta = 0.98  # 越大越平滑（0.98~0.995都可）
+    metric_version = (
+        "x0_recon_v1"
+        if float(opt.get("train", {}).get("x0_recon_loss_weight", 0.0)) > 0
+        else "base"
+    )
 
     # 3) 确保 training_state 目录存在（避免 save_training_state 失败）
     if rank <= 0 and opt.get("path", {}).get("training_state", None):
@@ -400,6 +412,16 @@ def main():
             ema_texture_loss = float(ema_texture_loss)
         if ema_total_loss is not None:
             ema_total_loss = float(ema_total_loss)
+        if resume_state.get("metric_version", "base") != metric_version:
+            logger.warning(
+                "[ckpt] Checkpoint metric version differs from current training "
+                f"({resume_state.get('metric_version', 'base')} -> {metric_version}); "
+                "resetting best/EMA metrics so new x0-supervised checkpoints can be selected."
+            )
+            best_texture_loss = float("inf")
+            best_total_loss = float("inf")
+            ema_texture_loss = None
+            ema_total_loss = None
     else:
         current_step = 0
         start_epoch = 0
@@ -675,9 +697,12 @@ def main():
 
             # 主纹理损失：用于 best checkpoint
             if "loss_main" in logs:
-                cur_texture_loss = float(logs["loss_main"])
+                # Include the weighted x0 auxiliary term in the texture
+                # checkpoint criterion.  Otherwise "best" could still select a
+                # checkpoint with low one-step loss but bad final x0 hole output.
+                cur_texture_loss = float(logs["loss_main"]) + float(logs.get("loss_x0", 0.0))
             elif "loss" in logs:
-                cur_texture_loss = float(logs["loss"])
+                cur_texture_loss = float(logs["loss"]) + float(logs.get("loss_x0", 0.0))
             elif "l_total" in logs:
                 cur_texture_loss = float(logs["l_total"])
             else:
@@ -726,6 +751,7 @@ def main():
                         current_step,
                         label=str(current_step),
                         extra_state={
+                            "metric_version": metric_version,
                             "best_texture_loss": float(best_texture_loss),
                             "best_total_loss": float(best_total_loss),
                             "ema_texture_loss": float(ema_texture_loss),
@@ -748,6 +774,8 @@ def main():
                         log_msg += f" loss_mu_ss={logs['loss_mu_ss']:.4f}"
                     if 'loss_mu_total' in logs:
                         log_msg += f" loss_mu={logs['loss_mu_total']:.4f}"
+                    if 'loss_x0' in logs:
+                        log_msg += f" loss_x0={logs['loss_x0']:.4e}"
                     logger.info(log_msg)
                     model.save("best")
                     model.save_training_state(
@@ -755,6 +783,7 @@ def main():
                         current_step,
                         label="best",
                         extra_state={
+                            "metric_version": metric_version,
                             "best_texture_loss": float(best_texture_loss),
                             "best_total_loss": float(best_total_loss),
                             "ema_texture_loss": float(ema_texture_loss),
@@ -776,6 +805,8 @@ def main():
                         log_msg += f" loss_mu_ss={logs['loss_mu_ss']:.4f}"
                     if 'loss_mu_total' in logs:
                         log_msg += f" loss_mu={logs['loss_mu_total']:.4f}"
+                    if 'loss_x0' in logs:
+                        log_msg += f" loss_x0={logs['loss_x0']:.4e}"
                     logger.info(log_msg)
                     model.save("best_total")
                     model.save_training_state(
@@ -783,6 +814,7 @@ def main():
                         current_step,
                         label="best_total",
                         extra_state={
+                            "metric_version": metric_version,
                             "best_texture_loss": float(best_texture_loss),
                             "best_total_loss": float(best_total_loss),
                             "ema_texture_loss": float(ema_texture_loss),
@@ -834,6 +866,7 @@ def main():
                 current_step,
                 label="latest",
                 extra_state={
+                    "metric_version": metric_version,
                     "best_texture_loss": float(best_texture_loss),
                     "best_total_loss": float(best_total_loss),
                     "ema_texture_loss": float(ema_texture_loss) if ema_texture_loss is not None else None,

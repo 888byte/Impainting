@@ -144,6 +144,12 @@ train:
   is_weighted: False
   loss_type: l1
   weight: 1.0
+  # Auxiliary supervision for the model-implied x0.  It keeps the final
+  # reverse result in the target color domain and prevents white-hole
+  # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
+  x0_recon_loss_weight: 0.1
+  x0_recon_loss_start_iter: 0
+  x0_recon_clamp_b_min: !!float 1e-3
 
   manual_seed: 0
 
