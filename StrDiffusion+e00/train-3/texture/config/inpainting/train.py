@@ -559,28 +559,17 @@ def main():
 
                     if color_prior is not None:
                         # Safety alignment for BrushNet prior:
-                        # known area is exactly CondLUT; hole area keeps the
-                        # generator output but is softly blended back toward
-                        # CondLUT according to confidence. This avoids unstable
-                        # green/cyan priors from dominating huge/low-confidence
-                        # holes while not hard-thresholding hole colors.
-                        prior_hole_max_weight = float(
-                            opt["datasets"]["train"].get("prior_hole_max_weight", 0.5)
-                        )
-                        prior_hole_max_weight = min(max(prior_hole_max_weight, 0.0), 1.0)
-                        if confidence is not None:
-                            prior_hole_weight = confidence.clamp(0.0, prior_hole_max_weight)
-                        else:
-                            prior_hole_weight = torch.full_like(
-                                mask_for_sde, min(max(prior_hole_max_weight, 0.0), 1.0)
-                            )
-                        hole_prior = (
-                            prior_hole_weight * color_prior
-                            + (1.0 - prior_hole_weight) * condition_lut
-                        )
+                        # known area must be exactly CondLUT so it is the same
+                        # target-domain source as condition_mu.  Hole area must
+                        # keep ColorPriorGenerator's inpainted prior.  Do not
+                        # blend the hole back toward condition_lut by confidence:
+                        # confidence is a reliability map for BrushNet, not a
+                        # color overwrite weight.  Blending here can wash out a
+                        # valid local prior (e.g. blue surroundings -> blue hole)
+                        # into the mask-aware denoise/global-mean condition_lut.
                         color_prior_for_sde = (
                             condition_lut * mask_for_sde
-                            + hole_prior * (1 - mask_for_sde)
+                            + color_prior * (1 - mask_for_sde)
                         )
                     else:
                         color_prior_for_sde = None
