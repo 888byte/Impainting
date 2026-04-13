@@ -305,6 +305,8 @@ class IRSDE(SDE):
         S_LQ,
         S_LQs,
         restore_S_guidance,
+        deterministic_reverse,
+        known_area_projection,
         **brushnet_kwargs,
     ):
         x_original = xt.clone().to(self.device)
@@ -327,13 +329,27 @@ class IRSDE(SDE):
                 structure_tensor = structure_state
 
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
-            x_original = self.reverse_sde_step(x_original, score_original, t)
+            if deterministic_reverse:
+                # Training optimizes reverse_sde_step_mean(...).  Enhanced mural
+                # inference uses the same mean step by default to avoid stochastic
+                # reverse noise saturating unconstrained hole pixels to white.
+                x_original = self.reverse_sde_step_mean(x_original, score_original, t)
+            else:
+                x_original = self.reverse_sde_step(x_original, score_original, t)
+            if known_area_projection:
+                # In mural inpainting, self.mu is condition_mu =
+                # target-domain CondLUT/MuCleanr output on known pixels and 0 in
+                # holes.  Projecting known pixels after the reverse update keeps
+                # the condition stable while leaving the hole trajectory free.
+                x_original = self.mu * mask_known + x_original * mask_hole
 
             if save_states:
                 interval = max(1, self.T // 100)
                 if t % interval == 0:
                     self._save_state_image(x_original, save_dir, t // interval)
 
+        if known_area_projection:
+            return self.mu * mask_known + x_original * mask_hole
         return x_original
 
     def _reverse_sde_enhanced_with_discriminator(
@@ -350,6 +366,8 @@ class IRSDE(SDE):
         S_LQs,
         dis,
         restore_S_guidance,
+        deterministic_reverse,
+        known_area_projection,
         **brushnet_kwargs,
     ):
         x_original = xt.clone().to(self.device)
@@ -370,7 +388,12 @@ class IRSDE(SDE):
                 structure_tensor = xs
 
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
-            x_updated = self.reverse_sde_step(x_original, score_original, t)
+            if deterministic_reverse:
+                x_updated = self.reverse_sde_step_mean(x_original, score_original, t)
+            else:
+                x_updated = self.reverse_sde_step(x_original, score_original, t)
+            if known_area_projection:
+                x_updated = self.mu * mask_known + x_updated * mask_hole
 
             if (
                 dis is not None
@@ -401,7 +424,12 @@ class IRSDE(SDE):
                         scores = S_sde.score_fn(xs1, t + z)
                         xs1 = S_sde.reverse_sde_step(xs1, scores, t + z)
                     score_tmp = self.score_fn(x_original, t, xs1, **brushnet_kwargs)
-                    x_tmp = self.reverse_sde_step(x_original, score_tmp, t)
+                    if deterministic_reverse:
+                        x_tmp = self.reverse_sde_step_mean(x_original, score_tmp, t)
+                    else:
+                        x_tmp = self.reverse_sde_step(x_original, score_tmp, t)
+                    if known_area_projection:
+                        x_tmp = self.mu * mask_known + x_tmp * mask_hole
                     d_proposal = dis(
                         torch.tensor(t, device=self.device).reshape(1,),
                         x_tmp.detach() * mask_known,
@@ -430,8 +458,15 @@ class IRSDE(SDE):
             if restore_S_guidance and xs is not None:
                 structure_tensor = torch.mean(x_original, dim=1, keepdim=True)
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
-            x_original = self.reverse_sde_step(x_original, score_original, t)
+            if deterministic_reverse:
+                x_original = self.reverse_sde_step_mean(x_original, score_original, t)
+            else:
+                x_original = self.reverse_sde_step(x_original, score_original, t)
+            if known_area_projection:
+                x_original = self.mu * mask_known + x_original * mask_hole
 
+        if known_area_projection:
+            return self.mu * mask_known + x_original * mask_hole
         return x_original
 
     def reverse_sde(self, xt, T=-1, save_states=False, save_dir='sde_state',GT = None, mask = None, S_sde = None, S_GT = None, S_LQ = None, dis = None, S_LQs = None, **kwargs):
@@ -440,6 +475,8 @@ class IRSDE(SDE):
         if kwargs.get("enhanced_inference", False):
             mask_known = mask.to(self.device)
             mask_hole = kwargs["mask_hole"].to(self.device)
+            deterministic_reverse = bool(kwargs.get("deterministic_reverse", True))
+            known_area_projection = bool(kwargs.get("known_area_projection", True))
             degraded = kwargs.get("degraded")
             if degraded is not None:
                 degraded = degraded.to(self.device)
@@ -470,6 +507,8 @@ class IRSDE(SDE):
                     S_LQs,
                     dis,
                     kwargs.get("restore_S_guidance", False),
+                    deterministic_reverse,
+                    known_area_projection,
                     **brushnet_kwargs,
                 )
 
@@ -485,6 +524,8 @@ class IRSDE(SDE):
                 S_LQ,
                 S_LQs,
                 kwargs.get("restore_S_guidance", False),
+                deterministic_reverse,
+                known_area_projection,
                 **brushnet_kwargs,
             )
 

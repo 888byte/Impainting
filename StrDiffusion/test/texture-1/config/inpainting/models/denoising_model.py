@@ -87,6 +87,14 @@ class DenoisingModel(BaseModel):
             self.inference_opt.get("discriminator_guidance", {}).get("enabled", False)
         )
         self.save_intermediates = bool(self.inference_opt.get("save_intermediates", False))
+        # The model is trained with reverse_sde_step_mean in optimize_parameters.
+        # Keep enhanced mural inference deterministic by default; this preserves
+        # the SDE formulas while avoiding stochastic reverse noise saturating
+        # unconstrained hole pixels to white.
+        self.deterministic_reverse = bool(self.inference_opt.get("deterministic_reverse", True))
+        # Optional inference-only projection: keep known pixels on target-domain
+        # condition_mu during reverse sampling; holes remain predicted by the model.
+        self.known_area_projection = bool(self.inference_opt.get("known_area_projection", True))
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
         self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
@@ -469,12 +477,19 @@ class DenoisingModel(BaseModel):
                     confidence=self.confidence,
                     restore_S_guidance=self.restore_s_guidance,
                     discriminator_guidance=self.discriminator_guidance,
+                    deterministic_reverse=self.deterministic_reverse,
+                    known_area_projection=self.known_area_projection,
                 )
                 self.raw_output = pred_full
                 if self.gt_mode == "partial":
-                    self.output = self.original_degraded * self.mask + pred_full * self.mask_hole
+                    known_source = self.original_degraded
                 else:
-                    self.output = pred_full
+                    # full mode still protects known pixels, but the protected
+                    # value is target-domain CondLUT, not raw degraded input.
+                    known_source = prepared["lut_transformed"]
+                self.output = known_source * self.mask + pred_full * self.mask_hole
+
+                self._log_inference_debug_stats(pred_full, self.output)
 
                 self.debug_outputs = {
                     "original_degraded": self.original_degraded,
@@ -537,7 +552,69 @@ class DenoisingModel(BaseModel):
     def load_network_from_state(self, state_dict, network, strict=True):
         if isinstance(network, DataParallel):
             network = network.module
-        network.load_state_dict(state_dict, strict=strict)
+        incompatible = network.load_state_dict(state_dict, strict=strict)
+        missing = list(getattr(incompatible, "missing_keys", []))
+        unexpected = list(getattr(incompatible, "unexpected_keys", []))
+        total = len(network.state_dict())
+        loaded = max(0, total - len(missing))
+        logger.info(
+            "[LoadCheck] loaded %d/%d tensors into %s, missing=%d, unexpected=%d",
+            loaded,
+            total,
+            network.__class__.__name__,
+            len(missing),
+            len(unexpected),
+        )
+        if missing:
+            logger.warning("[LoadCheck] missing keys sample: %s", missing[:20])
+        if unexpected:
+            logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
+
+    def _masked_rgb_stats(self, tensor, mask):
+        if tensor is None or mask is None:
+            return {}
+        rgb = tensor.detach().float()
+        mask = mask.detach().float()
+        if mask.shape[1] != rgb.shape[1]:
+            mask = mask.expand(-1, rgb.shape[1], -1, -1)
+        denom = mask.sum().clamp_min(1.0)
+        masked = rgb * mask
+        mean = masked.sum() / denom
+        white = ((rgb > 0.95).all(dim=1, keepdim=True).float() * mask[:, :1]).sum()
+        white_denom = mask[:, :1].sum().clamp_min(1.0)
+        return {
+            "mean": float(mean.item()),
+            "min": float(rgb.min().item()),
+            "max": float(rgb.max().item()),
+            "white_ratio": float((white / white_denom).item()),
+        }
+
+    def _log_inference_debug_stats(self, pred_full, final):
+        if self.mask_hole is None:
+            return
+        raw_hole = self._masked_rgb_stats(pred_full, self.mask_hole)
+        final_hole = self._masked_rgb_stats(final, self.mask_hole)
+        cond_known = self._masked_rgb_stats(self.condition, self.mask)
+        logger.info(
+            "[Inference Debug] gt_mode=%s deterministic_reverse=%s "
+            "raw_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+            "final_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+            "cond_known(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
+            self.gt_mode,
+            self.deterministic_reverse,
+            raw_hole.get("mean", 0.0),
+            raw_hole.get("min", 0.0),
+            raw_hole.get("max", 0.0),
+            raw_hole.get("white_ratio", 0.0),
+            final_hole.get("mean", 0.0),
+            final_hole.get("min", 0.0),
+            final_hole.get("max", 0.0),
+            final_hole.get("white_ratio", 0.0),
+            cond_known.get("mean", 0.0),
+            cond_known.get("min", 0.0),
+            cond_known.get("max", 0.0),
+            cond_known.get("white_ratio", 0.0),
+        )
 
     def load(self):
         """Load texture G, structure Gs, and discriminator D in official order."""
