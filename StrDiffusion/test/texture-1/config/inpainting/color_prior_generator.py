@@ -171,8 +171,33 @@ class ColorPriorGenerator:
             ratio: 缺失区域占比 (0.0 ~ 1.0)
         """
         total_pixels = mask.size
+
         masked_pixels = np.sum(mask > 127)
         return masked_pixels / total_pixels
+
+    def _prepare_lut_input(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """
+        Prepare a mask-aware RGB input for LUT/Lab color prior generation.
+
+        In mural inference/training, observed_degraded hole pixels may be filled
+        with white or black placeholders. They are not real observations, so they
+        must not enter Lab luminance, delta smoothing, or LUT confidence. This
+        pre-fills only the hole pixels with the existing inpaint strategy before
+        the original color-prior algorithm runs. Known pixels stay unchanged.
+        """
+        image_uint8 = np.clip(image, 0, 255).astype(np.uint8)
+        if mask is None:
+            return image_uint8.copy()
+
+        mask_uint8 = ((mask > 127).astype(np.uint8) * 255)
+        if not np.any(mask_uint8):
+            return image_uint8.copy()
+
+        filled = self.multi_scale_inpaint(image_uint8, mask_uint8)
+        image_for_lut = image_uint8.copy()
+        mask_bool = mask_uint8 > 0
+        image_for_lut[mask_bool] = filled[mask_bool]
+        return image_for_lut
     
     def multi_scale_inpaint(
         self, 
@@ -393,18 +418,19 @@ class ColorPriorGenerator:
         
         H, W = image.shape[:2]
         mask_bool = mask > 127
+        image_for_lut = self._prepare_lut_input(image, mask)
         
         # ============================================================
         # Step 1: RGB 转 Lab
         # ============================================================
-        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        img_bgr = cv2.cvtColor(image_for_lut, cv2.COLOR_RGB2BGR)
         orig_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
         L_orig = orig_lab[..., 0]
         
         # ============================================================
         # Step 2: LUT 映射
         # ============================================================
-        color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image)
+        color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image_for_lut)
         
         # 转换到 Lab 空间
         lut_bgr = cv2.cvtColor(np.clip(color_prior_lut, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
@@ -474,6 +500,7 @@ class ColorPriorGenerator:
         if debug:
             result['color_prior_lut'] = color_prior_lut
             result['color_prior_inpainted'] = color_prior_inpainted
+            result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
             result['spatial_conf'] = spatial_conf
         
@@ -502,11 +529,12 @@ class ColorPriorGenerator:
         H, W = image.shape[:2]
         mask_bool = mask > 127
         mask_01 = (mask / 255.0).astype(np.float32)
+        image_for_lut = self._prepare_lut_input(image, mask)
         
         # ============================================================
         # Step 1: RGB 转 Lab
         # ============================================================
-        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        img_bgr = cv2.cvtColor(image_for_lut, cv2.COLOR_RGB2BGR)
         orig_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
         L_orig = orig_lab[..., 0]
         guide = (L_orig / (L_orig.max() + 1e-6)).astype(np.float32)
@@ -514,7 +542,7 @@ class ColorPriorGenerator:
         # ============================================================
         # Step 2: LUT 映射
         # ============================================================
-        color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image)
+        color_prior_lut, conf_lut = self.lut.trilinear_interpolate(image_for_lut)
         
         lut_bgr = cv2.cvtColor(np.clip(color_prior_lut, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         mapped_lab = cv2.cvtColor(lut_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -581,6 +609,7 @@ class ColorPriorGenerator:
         if debug:
             result['color_prior_lut'] = color_prior_lut
             result['color_prior_inpainted'] = color_prior_inpainted
+            result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
             result['spatial_conf'] = spatial_conf
         
@@ -629,6 +658,7 @@ class ColorPriorGenerator:
         debug_buffers = {
             'color_prior_lut': [],
             'color_prior_inpainted': [],
+            'image_for_lut': [],
             'conf_lut': [],
             'conf_inpaint': [],
         } if debug else None
@@ -659,7 +689,7 @@ class ColorPriorGenerator:
             stacked = np.stack(values, axis=0)
             if stacked.ndim == 4:
                 stacked = np.transpose(stacked, (0, 3, 1, 2))
-                if key.startswith('color_prior'):
+                if key.startswith('color_prior') or key == 'image_for_lut':
                     stacked = stacked / 255.0
             elif stacked.ndim == 3:
                 stacked = stacked[:, np.newaxis, :, :]

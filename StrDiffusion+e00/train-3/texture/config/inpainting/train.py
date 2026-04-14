@@ -588,7 +588,19 @@ def main():
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    condition_mu = mu_clean_lut * mask_for_sde
+                    # SDE mu must NOT be zero in holes -- θ*(x-0)*dt is
+                    # a positive-feedback loop that causes exponential drift
+                    # to white over 400 reverse steps.  Fill holes with
+                    # color_prior so drift θ*(x-prior)*dt is *negative*
+                    # feedback (stabilising), and the model learns to *refine*
+                    # the prior rather than generate from scratch.
+                    if color_prior_for_sde is not None:
+                        condition_mu = (
+                            mu_clean_lut * mask_for_sde
+                            + color_prior_for_sde * (1 - mask_for_sde)
+                        )
+                    else:
+                        condition_mu = mu_clean_lut * mask_for_sde
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu

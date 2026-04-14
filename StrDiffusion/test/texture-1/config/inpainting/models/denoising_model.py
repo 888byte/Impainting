@@ -361,7 +361,15 @@ class DenoisingModel(BaseModel):
             ).clamp(0.0, 1.0)
         else:
             mu_clean_lut = lut_transformed
-        condition_mu = mu_clean_lut * mask_known
+        # SDE mu must NOT be zero in holes.  The reverse drift θ*(x−μ)*dt
+        # is a positive-feedback loop when μ=0, causing exponential divergence
+        # to white over 400 steps.  Fill holes with color_prior so the drift
+        # becomes negative feedback (stabilising).  Must match training-side
+        # construction in train.py.
+        if color_prior is not None:
+            condition_mu = mu_clean_lut * mask_known + color_prior * mask_hole
+        else:
+            condition_mu = mu_clean_lut * mask_known
 
         return {
             "denoised_original": denoised_original,
@@ -498,6 +506,7 @@ class DenoisingModel(BaseModel):
                     "color_prior": self.color_prior,
                     "color_prior_lut": prior_debug.get("color_prior_lut"),
                     "color_prior_inpainted": prior_debug.get("color_prior_inpainted"),
+                    "image_for_lut": prior_debug.get("image_for_lut"),
                     "conf_lut_prior": prior_debug.get("conf_lut"),
                     "conf_inpaint_prior": prior_debug.get("conf_inpaint"),
                     "training_target_like": target_like,
@@ -595,11 +604,15 @@ class DenoisingModel(BaseModel):
         raw_hole = self._masked_rgb_stats(pred_full, self.mask_hole)
         final_hole = self._masked_rgb_stats(final, self.mask_hole)
         cond_known = self._masked_rgb_stats(self.condition, self.mask)
+        cond_hole = self._masked_rgb_stats(self.condition, self.mask_hole)
+        prior_hole = self._masked_rgb_stats(self.color_prior, self.mask_hole)
         logger.info(
             "[Inference Debug] gt_mode=%s deterministic_reverse=%s "
             "raw_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
             "final_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
-            "cond_known(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
+            "cond_known(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+            "cond_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+            "prior_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
             self.gt_mode,
             self.deterministic_reverse,
             raw_hole.get("mean", 0.0),
@@ -614,6 +627,14 @@ class DenoisingModel(BaseModel):
             cond_known.get("min", 0.0),
             cond_known.get("max", 0.0),
             cond_known.get("white_ratio", 0.0),
+            cond_hole.get("mean", 0.0),
+            cond_hole.get("min", 0.0),
+            cond_hole.get("max", 0.0),
+            cond_hole.get("white_ratio", 0.0),
+            prior_hole.get("mean", 0.0),
+            prior_hole.get("min", 0.0),
+            prior_hole.get("max", 0.0),
+            prior_hole.get("white_ratio", 0.0),
         )
 
     def load(self):
