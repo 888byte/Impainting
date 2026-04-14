@@ -363,13 +363,17 @@ class DenoisingModel(BaseModel):
             mu_clean_lut = lut_transformed
         # SDE mu must NOT be zero in holes.  The reverse drift θ*(x−μ)*dt
         # is a positive-feedback loop when μ=0, causing exponential divergence
-        # to white over 400 steps.  Fill holes with color_prior so the drift
-        # becomes negative feedback (stabilising).  Must match training-side
-        # construction in train.py.
-        if color_prior is not None:
-            condition_mu = mu_clean_lut * mask_known + color_prior * mask_hole
-        else:
-            condition_mu = mu_clean_lut * mask_known
+        # to white over 400 steps.  Fill holes with lut_transformed (the
+        # inference equivalent of condition_lut) so the drift becomes negative
+        # feedback (stabilising).  Must match training-side construction in
+        # train.py which uses condition_lut in holes.
+        #
+        # NOTE: We use lut_transformed, NOT color_prior.  color_prior comes
+        # from cv2.inpaint on white-filled holes and is way too bright
+        # (~0.92 mean vs ~0.65 for valid regions).  lut_transformed is
+        # computed from the same mask-aware denoise+LUT pipeline as the
+        # known area and has proper target-domain colors.
+        condition_mu = mu_clean_lut * mask_known + lut_transformed * mask_hole
 
         return {
             "denoised_original": denoised_original,
@@ -497,7 +501,7 @@ class DenoisingModel(BaseModel):
                     known_source = prepared["lut_transformed"]
                 self.output = known_source * self.mask + pred_full * self.mask_hole
 
-                self._log_inference_debug_stats(pred_full, self.output)
+                self._log_inference_debug_stats(pred_full, self.output, prepared)
 
                 self.debug_outputs = {
                     "original_degraded": self.original_degraded,
@@ -589,16 +593,24 @@ class DenoisingModel(BaseModel):
         denom = mask.sum().clamp_min(1.0)
         masked = rgb * mask
         mean = masked.sum() / denom
+        valid = mask > 0.5
+        masked_values = rgb[valid]
+        if masked_values.numel() > 0:
+            min_val = masked_values.min()
+            max_val = masked_values.max()
+        else:
+            min_val = rgb.new_tensor(0.0)
+            max_val = rgb.new_tensor(0.0)
         white = ((rgb > 0.95).all(dim=1, keepdim=True).float() * mask[:, :1]).sum()
         white_denom = mask[:, :1].sum().clamp_min(1.0)
         return {
             "mean": float(mean.item()),
-            "min": float(rgb.min().item()),
-            "max": float(rgb.max().item()),
+            "min": float(min_val.item()),
+            "max": float(max_val.item()),
             "white_ratio": float((white / white_denom).item()),
         }
 
-    def _log_inference_debug_stats(self, pred_full, final):
+    def _log_inference_debug_stats(self, pred_full, final, prepared=None):
         if self.mask_hole is None:
             return
         raw_hole = self._masked_rgb_stats(pred_full, self.mask_hole)
@@ -606,13 +618,19 @@ class DenoisingModel(BaseModel):
         cond_known = self._masked_rgb_stats(self.condition, self.mask)
         cond_hole = self._masked_rgb_stats(self.condition, self.mask_hole)
         prior_hole = self._masked_rgb_stats(self.color_prior, self.mask_hole)
+        
+        lut_hole = {}
+        if prepared is not None and "lut_transformed" in prepared:
+            lut_hole = self._masked_rgb_stats(prepared["lut_transformed"], self.mask_hole)
+
         logger.info(
             "[Inference Debug] gt_mode=%s deterministic_reverse=%s "
             "raw_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
             "final_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
             "cond_known(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
             "cond_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
-            "prior_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
+            "prior_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+            "lut_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
             self.gt_mode,
             self.deterministic_reverse,
             raw_hole.get("mean", 0.0),
@@ -635,6 +653,10 @@ class DenoisingModel(BaseModel):
             prior_hole.get("min", 0.0),
             prior_hole.get("max", 0.0),
             prior_hole.get("white_ratio", 0.0),
+            lut_hole.get("mean", 0.0),
+            lut_hole.get("min", 0.0),
+            lut_hole.get("max", 0.0),
+            lut_hole.get("white_ratio", 0.0),
         )
 
     def load(self):

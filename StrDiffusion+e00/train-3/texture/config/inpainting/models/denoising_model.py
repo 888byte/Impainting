@@ -659,7 +659,7 @@ class DenoisingModel(BaseModel):
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
 
-        # condition_mu is target-domain LUT/MuCleanr output masked to known area.
+        # condition_mu now includes condition_lut in holes (SDE μ attractor).
         texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
         self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
         condition_target_gap = (self.condition - training_target * self.mask).abs().mean()
@@ -744,6 +744,10 @@ class DenoisingModel(BaseModel):
         mu_known_mean, mu_known_std = self._masked_mean_std(mu_clean_lut, mask_known)
         confidence_hole_mean, _ = self._masked_mean_std(confidence, mask_hole)
 
+        cond_lut_hole_mean, cond_lut_hole_std = self._masked_mean_std(condition_lut, mask_hole)
+        cond_mu_known_mean, _ = self._masked_mean_std(self.condition, mask_known)
+        cond_mu_hole_mean, _ = self._masked_mean_std(self.condition, mask_hole)
+
         color_prior_white_ratio = 0.0
         if color_prior is not None:
             cp = color_prior.detach()
@@ -761,6 +765,10 @@ class DenoisingModel(BaseModel):
                 ("stats_condition_known_std", condition_known_std),
                 ("stats_mu_known_mean", mu_known_mean),
                 ("stats_mu_known_std", mu_known_std),
+                ("stats_cond_lut_hole_mean", cond_lut_hole_mean),
+                ("stats_cond_lut_hole_std", cond_lut_hole_std),
+                ("stats_sde_mu_known_mean", cond_mu_known_mean),
+                ("stats_sde_mu_hole_mean", cond_mu_hole_mean),
             ]
         )
 

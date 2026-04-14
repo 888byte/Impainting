@@ -591,16 +591,20 @@ def main():
                     # SDE mu must NOT be zero in holes -- θ*(x-0)*dt is
                     # a positive-feedback loop that causes exponential drift
                     # to white over 400 reverse steps.  Fill holes with
-                    # color_prior so drift θ*(x-prior)*dt is *negative*
+                    # condition_lut so drift θ*(x-cond)*dt is *negative*
                     # feedback (stabilising), and the model learns to *refine*
-                    # the prior rather than generate from scratch.
-                    if color_prior_for_sde is not None:
-                        condition_mu = (
-                            mu_clean_lut * mask_for_sde
-                            + color_prior_for_sde * (1 - mask_for_sde)
-                        )
-                    else:
-                        condition_mu = mu_clean_lut * mask_for_sde
+                    # the estimate rather than generate from scratch.
+                    #
+                    # NOTE: We use condition_lut (from mask-aware denoise+LUT)
+                    # for the hole mu, NOT color_prior.  color_prior comes from
+                    # cv2.inpaint on white-filled holes and is way too bright
+                    # (~0.92 mean vs ~0.65 for valid regions).  condition_lut
+                    # is computed from the same LUT pipeline as the known area
+                    # and has proper target-domain colors.
+                    condition_mu = (
+                        mu_clean_lut * mask_for_sde
+                        + condition_lut * (1 - mask_for_sde)
+                    )
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu
