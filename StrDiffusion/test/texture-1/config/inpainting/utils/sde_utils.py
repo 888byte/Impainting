@@ -351,10 +351,9 @@ class IRSDE(SDE):
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
             if known_area_projection:
-                # In mural inpainting, self.mu is condition_mu =
-                # target-domain CondLUT/MuCleanr output on known pixels and 0 in
-                # holes. Projecting known pixels after the reverse update keeps
-                # the condition stable while leaving the hole trajectory free.
+                # In mural inpainting, self.mu is condition_mu in the
+                # target domain: MuCleanr/CondLUT on known pixels and CondLUT
+                # in holes. Project known pixels only; holes remain predicted.
                 x_original = self.mu * mask_known + x_original * mask_hole
 
             if save_states:

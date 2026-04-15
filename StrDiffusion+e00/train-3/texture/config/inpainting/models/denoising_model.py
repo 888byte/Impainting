@@ -747,6 +747,11 @@ class DenoisingModel(BaseModel):
         cond_lut_hole_mean, cond_lut_hole_std = self._masked_mean_std(condition_lut, mask_hole)
         cond_mu_known_mean, _ = self._masked_mean_std(self.condition, mask_known)
         cond_mu_hole_mean, _ = self._masked_mean_std(self.condition, mask_hole)
+        if color_prior is not None and condition_lut is not None:
+            prior_lut_gap = (color_prior - condition_lut).abs().mean(dim=1, keepdim=True)
+            prior_lut_gap_hole, _ = self._masked_mean_std(prior_lut_gap, mask_hole)
+        else:
+            prior_lut_gap_hole = 0.0
 
         color_prior_white_ratio = 0.0
         if color_prior is not None:
@@ -760,6 +765,7 @@ class DenoisingModel(BaseModel):
                 ("stats_color_prior_hole_mean", color_prior_mean),
                 ("stats_color_prior_hole_std", color_prior_std),
                 ("stats_color_prior_hole_white_ratio", color_prior_white_ratio),
+                ("stats_color_prior_lut_gap_hole", prior_lut_gap_hole),
                 ("stats_confidence_hole_mean", confidence_hole_mean),
                 ("stats_condition_known_mean", condition_known_mean),
                 ("stats_condition_known_std", condition_known_std),

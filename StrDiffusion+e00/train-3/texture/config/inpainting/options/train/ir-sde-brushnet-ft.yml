@@ -30,6 +30,9 @@ brushnet:
   depth: 4
   lite: false
   prior_dropout_prob: 0.3
+  #### Keep BrushNet as weak hole-only reference guidance.
+  feature_scale: 0.10
+  use_spatial_gate: true
 
 #### Main trunk guidance compatibility field
 #### Keep this disabled so the main repair path stays aligned with original
@@ -90,6 +93,9 @@ datasets:
     lut_strength: 1.0
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
+    prior_lut_gap_scale: 0.15
+    #### Expand inpaint mask internally to prevent white/gray placeholder edge leakage.
+    prior_inpaint_mask_dilate: 3
 
     #### fast: 更快
     #### quality: 更稳，正式训练推荐使用
@@ -147,7 +153,7 @@ train:
   # Auxiliary supervision for the model-implied x0.  It keeps the final
   # reverse result in the target color domain and prevents white-hole
   # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
-  x0_recon_loss_weight: 0.1
+  x0_recon_loss_weight: 0.3
   x0_recon_loss_start_iter: 0
   x0_recon_clamp_b_min: !!float 1e-3
 

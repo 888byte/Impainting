@@ -1,4 +1,4 @@
-#### 官方骨架保留的最终增强版推理配置
+﻿#### 官方骨架保留的最终增强版推理配置
 #### 使用命令:
 ####   python test.py -opt options/test/ir-sde-brushnet.yml
 ####   python test.py -opt options/test/ir-sde-brushnet.yml --set texture_core.enabled=false
@@ -55,6 +55,9 @@ datasets:
     lut_strength: 1.0
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
+    prior_lut_gap_scale: 0.15
+    #### Expand inpaint mask internally to prevent white/gray placeholder edge leakage.
+    prior_inpaint_mask_dilate: 3
     #### 颜色先验生成方法：
     #### - fast: 更快
     #### - quality: 更稳，更适合正式推理
@@ -90,6 +93,9 @@ brushnet:
   lite: false
   # 训练时用于抑制主干直接抄 prior；推理阶段该值不生效，仅保留镜像配置。
   prior_dropout_prob: 0.0
+  #### Keep BrushNet as weak hole-only reference guidance.
+  feature_scale: 0.10
+  use_spatial_gate: true
 
 #### 主干观测引导兼容字段
 #### - 默认保持关闭

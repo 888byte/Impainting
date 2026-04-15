@@ -72,7 +72,8 @@ class ColorPriorGenerator:
         inpaint_method: str = 'telea',
         large_mask_threshold: float = 0.3,
         inpaint_conf_known: float = 1.0,
-        inpaint_conf_inpainted: float = 0.3
+        inpaint_conf_inpainted: float = 0.3,
+        inpaint_mask_dilate: int = 3
     ):
         """
         初始化颜色先验生成器
@@ -95,6 +96,10 @@ class ColorPriorGenerator:
         
         # 多尺度修复参数
         self.large_mask_threshold = large_mask_threshold
+        # Internal safety dilation for cv2.inpaint masks. This does not change
+        # public hole/known semantics; it only prevents white/gray placeholder
+        # borders and downsampled thin mask strokes from being used as known colors.
+        self.inpaint_mask_dilate = max(0, int(inpaint_mask_dilate))
         
         # 修复方法选择
         if inpaint_method.lower() == 'telea':
@@ -113,6 +118,7 @@ class ColorPriorGenerator:
         print(f"  - β (修复权重): {self.beta}")
         print(f"  - 修复方法: {inpaint_method}")
         print(f"  - 大面积阈值: {self.large_mask_threshold * 100:.0f}%")
+        print(f"  - inpaint mask dilate: {self.inpaint_mask_dilate}px")
 
     def feather_blend(
         self,
@@ -175,6 +181,30 @@ class ColorPriorGenerator:
         masked_pixels = np.sum(mask > 127)
         return masked_pixels / total_pixels
 
+    def _normalize_hole_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Return a uint8 hole mask where 255=hole and 0=known."""
+        if mask is None:
+            return mask
+        mask_uint8 = mask.astype(np.uint8) if mask.dtype != np.uint8 else mask.copy()
+        if mask_uint8.max() <= 1:
+            mask_uint8 = mask_uint8 * 255
+        return ((mask_uint8 > 127).astype(np.uint8) * 255)
+
+    def _expand_inpaint_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Dilate the hole mask used by cv2.inpaint, preserving the public mask semantics.
+
+        The final returned color_prior is still written only to the original hole
+        pixels.  This expanded mask is only an internal safety mask for inpaint:
+        it prevents white/gray placeholder borders, anti-aliased mask edges, and
+        thin holes lost during downsampling from being used as known colors.
+        """
+        mask_uint8 = self._normalize_hole_mask(mask)
+        if mask_uint8 is None or self.inpaint_mask_dilate <= 0 or not np.any(mask_uint8):
+            return mask_uint8
+        k = 2 * self.inpaint_mask_dilate + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        return cv2.dilate(mask_uint8, kernel, iterations=1)
+
     def _prepare_lut_input(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
         Prepare a mask-aware RGB input for LUT/Lab color prior generation.
@@ -227,6 +257,12 @@ class ColorPriorGenerator:
             inpainted: [H, W, 3] uint8 修复后的图像
         """
         H, W = image.shape[:2]
+        # Use a slightly expanded mask internally. Final callers still write
+        # back only to the original hole mask, but cv2.inpaint must not see
+        # white/gray placeholder borders or downsampled thin strokes as known.
+        mask = self._expand_inpaint_mask(mask)
+        if mask is None or not np.any(mask):
+            return image.copy()
         mask_ratio = self._calculate_mask_ratio(mask)
         
         # 确保mask是uint8类型
@@ -244,7 +280,11 @@ class ColorPriorGenerator:
             
             # 下采样
             small_image = cv2.resize(image, (small_W, small_H), interpolation=cv2.INTER_AREA)
-            small_mask = cv2.resize(mask, (small_W, small_H), interpolation=cv2.INTER_NEAREST)
+            # INTER_NEAREST may drop thin/anti-aliased hole strokes while
+            # downsampling, turning white placeholders into false known pixels.
+            # Resize with area coverage and keep any covered pixel as hole.
+            small_mask = cv2.resize(mask, (small_W, small_H), interpolation=cv2.INTER_AREA)
+            small_mask = ((small_mask > 0).astype(np.uint8) * 255)
             
             # 低分辨率修复
             small_inpainted = cv2.inpaint(
@@ -417,6 +457,7 @@ class ColorPriorGenerator:
         assert image.shape[:2] == mask.shape
         
         H, W = image.shape[:2]
+        mask = self._normalize_hole_mask(mask)
         mask_bool = mask > 127
         image_for_lut = self._prepare_lut_input(image, mask)
         
@@ -503,7 +544,9 @@ class ColorPriorGenerator:
             result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
             result['spatial_conf'] = spatial_conf
-        
+            result['inpaint_mask'] = self._expand_inpaint_mask(mask)
+            result['inpaint_mask_ratio'] = self._calculate_mask_ratio(result['inpaint_mask'])
+
         return result
     
     def generate_quality(
@@ -527,6 +570,7 @@ class ColorPriorGenerator:
         assert image.shape[:2] == mask.shape
         
         H, W = image.shape[:2]
+        mask = self._normalize_hole_mask(mask)
         mask_bool = mask > 127
         mask_01 = (mask / 255.0).astype(np.float32)
         image_for_lut = self._prepare_lut_input(image, mask)
@@ -612,7 +656,9 @@ class ColorPriorGenerator:
             result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
             result['spatial_conf'] = spatial_conf
-        
+            result['inpaint_mask'] = self._expand_inpaint_mask(mask)
+            result['inpaint_mask_ratio'] = self._calculate_mask_ratio(result['inpaint_mask'])
+
         return result
     
     def generate_tensor(
@@ -661,6 +707,7 @@ class ColorPriorGenerator:
             'image_for_lut': [],
             'conf_lut': [],
             'conf_inpaint': [],
+            'inpaint_mask': [],
         } if debug else None
         
         for i in range(B):

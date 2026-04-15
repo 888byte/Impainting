@@ -111,6 +111,10 @@ class DenoisingModel(BaseModel):
                 alpha=self.dataset_opt.get("lut_alpha", 0.7),
                 beta=self.dataset_opt.get("lut_beta", 0.3),
                 inpaint_method=self.dataset_opt.get("lut_inpaint_method", "telea"),
+                inpaint_mask_dilate=self.dataset_opt.get(
+                    "prior_inpaint_mask_dilate",
+                    self.dataset_opt.get("inpaint_mask_dilate", 3),
+                ),
             )
 
         mu_opt = opt.get("mu_denoiser", {})
@@ -281,6 +285,32 @@ class DenoisingModel(BaseModel):
         structure_edge = torch.stack(edge_list, dim=0).to(self.device)
         return structure_gray, structure_edge
 
+    def _build_safe_brushnet_prior(self, color_prior, confidence, condition_lut, mask_known, mask_hole):
+        """Smoothly gate BrushNet prior by target-domain CondLUT consistency.
+
+        ColorPriorGenerator still provides the prior.  This only prevents a
+        white-biased inpaint prior from dominating BrushNet when it is far from
+        the LUT-domain condition.  It is a continuous reliability gate, not a
+        hard white threshold.
+        """
+        color_prior = color_prior.to(dtype=condition_lut.dtype, device=condition_lut.device)
+        mask_known = mask_known.to(dtype=condition_lut.dtype, device=condition_lut.device)
+        mask_hole = mask_hole.to(dtype=condition_lut.dtype, device=condition_lut.device)
+        if confidence is None:
+            base_conf = torch.ones_like(mask_known)
+        else:
+            base_conf = confidence.to(dtype=condition_lut.dtype, device=condition_lut.device)
+
+        gap_scale = float(self.dataset_opt.get("prior_lut_gap_scale", 0.15))
+        gap_scale = max(gap_scale, 1e-6)
+        prior_gap = (color_prior - condition_lut).abs().mean(dim=1, keepdim=True)
+        prior_reliability = (base_conf * torch.exp(-prior_gap / gap_scale)).clamp(0.0, 1.0)
+
+        safe_hole_prior = prior_reliability * color_prior + (1 - prior_reliability) * condition_lut
+        safe_prior = condition_lut * mask_known + safe_hole_prior * mask_hole
+        safe_confidence = torch.ones_like(mask_known) * mask_known + prior_reliability * mask_hole
+        return safe_prior, safe_confidence, prior_reliability
+
     def _prepare_brushnet_inputs(self):
         """Mirror the training-side color path as closely as possible."""
         mask_known = self.mask
@@ -330,27 +360,33 @@ class DenoisingModel(BaseModel):
                 + lut_transformed * effective_weight
             )
 
-        # ?????: known ????? CondLUT?hole ??? prior generator?
-        # ?? confidence ???? CondLUT??????/?? hole ???/?? prior ???
-        # Align known pixels to the same target-domain CondLUT used by condition_mu,
-        # but keep ColorPriorGenerator's inpainted prior in holes.  Confidence is
-        # passed as reliability guidance, not used to overwrite hole colors.
-        color_prior = lut_transformed * mask_known + color_prior * mask_hole
-        confidence = torch.ones_like(mask_known) * mask_known + confidence * mask_hole
+        # Align known pixels to CondLUT, then softly gate the hole prior by
+        # target-domain consistency.  The raw inpaint prior can be very bright
+        # on large white-filled holes; if fed directly to BrushNet it pushes the
+        # score toward white even though SDE mu is already correct.
+        raw_color_prior = lut_transformed * mask_known + color_prior * mask_hole
+        raw_confidence = torch.ones_like(mask_known) * mask_known + confidence * mask_hole
+        color_prior, confidence, prior_reliability = self._build_safe_brushnet_prior(
+            raw_color_prior, raw_confidence, lut_transformed, mask_known, mask_hole
+        )
 
         if self.save_intermediates:
             mask_hole_3c = mask_hole.expand(-1, color_prior.shape[1], -1, -1)
             hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+            raw_cp_hole_mean = float((raw_color_prior * mask_hole_3c).sum().item() / hole_denom.item())
             cp_hole_mean = float((color_prior * mask_hole_3c).sum().item() / hole_denom.item())
             cp_hole_std = float((((color_prior - cp_hole_mean) ** 2) * mask_hole_3c).sum().div(hole_denom).sqrt().item())
             white_ratio = float((((color_prior > 0.95).all(dim=1, keepdim=True).float() * mask_hole).sum() / mask_hole.sum().clamp_min(1.0)).item())
             conf_hole_mean = float((confidence * mask_hole).sum().div(mask_hole.sum().clamp_min(1.0)).item())
+            reliability_hole_mean = float((prior_reliability * mask_hole).sum().div(mask_hole.sum().clamp_min(1.0)).item())
             logger.info(
-                "[ColorPrior Debug] hole_mean=%.6f hole_std=%.6f hole_white_ratio=%.6f confidence_hole_mean=%.6f",
+                "[ColorPrior Debug] raw_hole_mean=%.6f hole_mean=%.6f hole_std=%.6f hole_white_ratio=%.6f confidence_hole_mean=%.6f reliability_hole_mean=%.6f",
+                raw_cp_hole_mean,
                 cp_hole_mean,
                 cp_hole_std,
                 white_ratio,
                 conf_hole_mean,
+                reliability_hole_mean,
             )
 
         if self.use_mu_denoiser and getattr(self, "mu_denoiser_has_weights", False):
@@ -381,7 +417,9 @@ class DenoisingModel(BaseModel):
             "condition_lut": lut_transformed,
             "condition_mu": condition_mu,
             "color_prior": color_prior,
+            "color_prior_raw": raw_color_prior,
             "confidence": confidence,
+            "prior_reliability": prior_reliability,
             "mu_clean_lut": mu_clean_lut,
             "mu_clean": condition_mu,
             "prior_debug": prior_debug,
@@ -508,11 +546,14 @@ class DenoisingModel(BaseModel):
                     "mask_hole": self.mask_hole,
                     "mask_known": self.mask,
                     "color_prior": self.color_prior,
+                    "color_prior_raw": prepared.get("color_prior_raw"),
+                    "prior_reliability": prepared.get("prior_reliability"),
                     "color_prior_lut": prior_debug.get("color_prior_lut"),
                     "color_prior_inpainted": prior_debug.get("color_prior_inpainted"),
                     "image_for_lut": prior_debug.get("image_for_lut"),
                     "conf_lut_prior": prior_debug.get("conf_lut"),
                     "conf_inpaint_prior": prior_debug.get("conf_inpaint"),
+                    "prior_inpaint_mask": prior_debug.get("inpaint_mask"),
                     "training_target_like": target_like,
                     "confidence": self.confidence,
                     "denoised_original": prepared["denoised_original"],

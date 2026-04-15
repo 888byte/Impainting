@@ -117,7 +117,8 @@ class MuralInpaintingDataset(Dataset):
             lut_path=lut_path,
             alpha=lut_alpha,
             beta=lut_beta,
-            inpaint_method=lut_inpaint_method
+            inpaint_method=lut_inpaint_method,
+            inpaint_mask_dilate=opt.get('prior_inpaint_mask_dilate', opt.get('inpaint_mask_dilate', 3))
         )
         
         # 获取图像尺寸

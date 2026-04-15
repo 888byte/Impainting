@@ -111,6 +111,7 @@ def _build_tb_scalar_map(logs):
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
     add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
     add("stats/color_prior_hole_white_ratio", "stats_color_prior_hole_white_ratio")
+    add("stats/color_prior_lut_gap_hole", "stats_color_prior_lut_gap_hole")
     add("stats/confidence_hole_mean", "stats_confidence_hole_mean")
     add("stats/condition_known_mean", "stats_condition_known_mean")
     add("stats/condition_known_std", "stats_condition_known_std")
@@ -140,6 +141,43 @@ def _prepare_tb_image(tensor):
     if image.shape[0] not in (1, 3):
         image = image[:1]
     return image.clamp(0.0, 1.0)
+
+
+def _build_safe_brushnet_prior(
+    color_prior,
+    confidence,
+    condition_lut,
+    mask_known,
+    gap_scale=0.15,
+):
+    """Build BrushNet prior with smooth target-domain reliability gating.
+
+    ColorPriorGenerator is still used and the prior still participates in
+    BrushNet.  The guard is only for hole pixels where an inpainted prior can be
+    much brighter than the target-domain CondLUT estimate.  We use a continuous
+    gap-based reliability, not a hard white threshold, so valid local color priors
+    are preserved when they agree with CondLUT.
+    """
+    if color_prior is None:
+        return None, confidence
+
+    color_prior = color_prior.to(dtype=condition_lut.dtype, device=condition_lut.device)
+    mask_known = mask_known.to(dtype=condition_lut.dtype, device=condition_lut.device)
+    mask_hole = 1 - mask_known
+
+    if confidence is None:
+        base_conf = torch.ones_like(mask_known)
+    else:
+        base_conf = confidence.to(dtype=condition_lut.dtype, device=condition_lut.device)
+
+    scale = max(float(gap_scale), 1e-6)
+    prior_gap = (color_prior - condition_lut).abs().mean(dim=1, keepdim=True)
+    prior_reliability = (base_conf * torch.exp(-prior_gap / scale)).clamp(0.0, 1.0)
+
+    safe_hole_prior = prior_reliability * color_prior + (1 - prior_reliability) * condition_lut
+    safe_prior = condition_lut * mask_known + safe_hole_prior * mask_hole
+    safe_confidence = torch.ones_like(mask_known) * mask_known + prior_reliability * mask_hole
+    return safe_prior, safe_confidence
 
 
 def _log_tb_training_images(tb_logger, debug_info, current_step):
@@ -327,7 +365,8 @@ def main():
                 lut_path=lut_path,
                 alpha=train_opt.get('lut_alpha', 0.7),
                 beta=train_opt.get('lut_beta', 0.3),
-                inpaint_method=train_opt.get('lut_inpaint_method', 'telea')
+                inpaint_method=train_opt.get('lut_inpaint_method', 'telea'),
+                inpaint_mask_dilate=train_opt.get('prior_inpaint_mask_dilate', train_opt.get('inpaint_mask_dilate', 3))
             )
             logger.info(f"[BrushNet] ColorPriorGenerator 已初始化: {lut_path}")
         else:
@@ -558,29 +597,27 @@ def main():
                     )
 
                     if color_prior is not None:
-                        # Safety alignment for BrushNet prior:
-                        # known area must be exactly CondLUT so it is the same
-                        # target-domain source as condition_mu.  Hole area must
-                        # keep ColorPriorGenerator's inpainted prior.  Do not
-                        # blend the hole back toward condition_lut by confidence:
-                        # confidence is a reliability map for BrushNet, not a
-                        # color overwrite weight.  Blending here can wash out a
-                        # valid local prior (e.g. blue surroundings -> blue hole)
-                        # into the mask-aware denoise/global-mean condition_lut.
-                        color_prior_for_sde = (
-                            condition_lut * mask_for_sde
-                            + color_prior * (1 - mask_for_sde)
+                        # BrushNet still receives ColorPriorGenerator output, but
+                        # with a smooth reliability gate in holes.  This prevents
+                        # white-biased cv2.inpaint priors from overpowering the
+                        # target-domain condition while preserving valid local
+                        # priors when they agree with condition_lut.
+                        color_prior_for_sde, confidence_for_sde = _build_safe_brushnet_prior(
+                            color_prior,
+                            confidence,
+                            condition_lut,
+                            mask_for_sde,
+                            gap_scale=opt["datasets"]["train"].get("prior_lut_gap_scale", 0.15),
                         )
                     else:
                         color_prior_for_sde = None
-
-                    if confidence is not None:
-                        confidence_for_sde = (
-                            torch.ones_like(mask_for_sde) * mask_for_sde
-                            + confidence * (1 - mask_for_sde)
-                        )
-                    else:
-                        confidence_for_sde = None
+                        if confidence is not None:
+                            confidence_for_sde = (
+                                torch.ones_like(mask_for_sde) * mask_for_sde
+                                + confidence * (1 - mask_for_sde)
+                            )
+                        else:
+                            confidence_for_sde = None
 
                     # MuCleanr/Mu-Denoiser now cleans target-domain condition_lut.
                     # If disabled or no usable weights are loaded/trained yet, the

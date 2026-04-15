@@ -45,6 +45,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_enabled: bool = True,
         brushnet_lite: bool = False,
         brushnet_prior_dropout_prob: float = 0.0,
+        brushnet_feature_scale: float = 0.10,
+        brushnet_use_spatial_gate: bool = True,
         texture_core_opt: Optional[dict] = None,
         main_guidance_opt: Optional[dict] = None,
         restore_S_guidance: bool = False,
@@ -56,6 +58,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.brushnet_enabled = brushnet_enabled
         self.restore_S_guidance = restore_S_guidance
         self.brushnet_prior_dropout_prob = float(brushnet_prior_dropout_prob)
+        self.brushnet_feature_scale = float(brushnet_feature_scale)
+        self.brushnet_use_spatial_gate = bool(brushnet_use_spatial_gate)
         if not 0.0 <= self.brushnet_prior_dropout_prob <= 1.0:
             raise ValueError("brushnet_prior_dropout_prob must be in [0, 1]")
 
@@ -217,6 +221,31 @@ class ConditionalUNetWithBrushNet(nn.Module):
         mod_pad_w = (scale - w % scale) % scale
         return F.pad(x, (0, mod_pad_w, 0, mod_pad_h), "reflect")
 
+    def _apply_brushnet_feature_gate(
+        self,
+        feature: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        confidence: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Keep BrushNet as a weak hole-only reference branch.
+
+        BrushNet features are auxiliary guidance. They must not overwrite the
+        original StrDiffusion repair path globally.  We therefore inject them
+        only inside the hole mask and scale them by confidence plus a small
+        global feature scale.  This preserves the prior-free main trunk on known
+        pixels and prevents an imperfect color prior from dominating the score.
+        """
+        gated = feature * self.brushnet_feature_scale
+        if not self.brushnet_use_spatial_gate or mask is None:
+            return gated
+
+        gate = mask
+        if confidence is not None:
+            gate = gate * confidence.clamp(0.0, 1.0)
+        if gate.shape[-2:] != feature.shape[-2:]:
+            gate = F.interpolate(gate, size=feature.shape[-2:], mode="bilinear", align_corners=False)
+        return gated * gate.clamp(0.0, 1.0)
+
     def forward(
         self,
         xt: torch.Tensor,
@@ -298,14 +327,18 @@ class ConditionalUNetWithBrushNet(nn.Module):
 
             x = b1(x, t)
             if brushnet_features is not None and brushnet_idx < len(brushnet_features):
-                x = x + brushnet_features[brushnet_idx]
+                x = x + self._apply_brushnet_feature_gate(
+                    brushnet_features[brushnet_idx], mask_padded, confidence
+                )
                 brushnet_idx += 1
             skips.append(x)
 
             x = b2(x, t)
             x = attn(x)
             if brushnet_features is not None and brushnet_idx < len(brushnet_features):
-                x = x + brushnet_features[brushnet_idx]
+                x = x + self._apply_brushnet_feature_gate(
+                    brushnet_features[brushnet_idx], mask_padded, confidence
+                )
                 brushnet_idx += 1
             skips.append(x)
 
@@ -321,7 +354,9 @@ class ConditionalUNetWithBrushNet(nn.Module):
         x = self.mid_block2(x, t)
 
         if brushnet_mid is not None:
-            x = x + brushnet_mid
+            x = x + self._apply_brushnet_feature_gate(
+                brushnet_mid, mask_padded, confidence
+            )
 
         # MGLC-Tex does not duplicate BrushNet conditioning. It only refines
         # features after BrushNet fusion.
@@ -388,6 +423,8 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         brushnet_enabled=brushnet_opt.get("enabled", True),
         brushnet_lite=brushnet_opt.get("lite", False),
         brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
+        brushnet_feature_scale=brushnet_opt.get("feature_scale", 0.10),
+        brushnet_use_spatial_gate=brushnet_opt.get("use_spatial_gate", True),
         texture_core_opt=texture_core_opt,
         main_guidance_opt=main_guidance_opt,
         restore_S_guidance=restore_S_guidance,
