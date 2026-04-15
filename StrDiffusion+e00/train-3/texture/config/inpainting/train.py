@@ -148,15 +148,18 @@ def _build_safe_brushnet_prior(
     confidence,
     condition_lut,
     mask_known,
-    gap_scale=0.15,
+    gap_scale=0.15,  # kept for API compatibility, no longer used
 ):
-    """Build BrushNet prior with smooth target-domain reliability gating.
+    """Gate BrushNet prior by confidence only.
 
-    ColorPriorGenerator is still used and the prior still participates in
-    BrushNet.  The guard is only for hole pixels where an inpainted prior can be
-    much brighter than the target-domain CondLUT estimate.  We use a continuous
-    gap-based reliability, not a hard white threshold, so valid local color priors
-    are preserved when they agree with CondLUT.
+    The original gap-based reliability gate was too aggressive: it replaced
+    the cv2.inpaint color_prior with lut_transformed whenever the two differed
+    by more than gap_scale (~0.15), which is a normal and expected difference
+    for inpainted texture regions.  This destroyed the inpaint content that
+    BrushNet needs for color guidance.
+
+    Now we only use confidence as the gate weight in hole pixels.
+    Known pixels always use condition_lut (target domain).
     """
     if color_prior is None:
         return None, confidence
@@ -166,14 +169,12 @@ def _build_safe_brushnet_prior(
     mask_hole = 1 - mask_known
 
     if confidence is None:
-        base_conf = torch.ones_like(mask_known)
+        prior_reliability = torch.ones_like(mask_known)
     else:
-        base_conf = confidence.to(dtype=condition_lut.dtype, device=condition_lut.device)
+        prior_reliability = confidence.to(dtype=condition_lut.dtype, device=condition_lut.device).clamp(0.0, 1.0)
 
-    scale = max(float(gap_scale), 1e-6)
-    prior_gap = (color_prior - condition_lut).abs().mean(dim=1, keepdim=True)
-    prior_reliability = (base_conf * torch.exp(-prior_gap / scale)).clamp(0.0, 1.0)
-
+    # In hole pixels: blend color_prior (inpaint result) by confidence.
+    # Low-confidence holes get more condition_lut, high-confidence get more color_prior.
     safe_hole_prior = prior_reliability * color_prior + (1 - prior_reliability) * condition_lut
     safe_prior = condition_lut * mask_known + safe_hole_prior * mask_hole
     safe_confidence = torch.ones_like(mask_known) * mask_known + prior_reliability * mask_hole
