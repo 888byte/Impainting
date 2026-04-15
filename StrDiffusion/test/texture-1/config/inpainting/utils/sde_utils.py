@@ -344,25 +344,24 @@ class IRSDE(SDE):
 
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
             if deterministic_reverse:
-                # Training optimizes reverse_sde_step_mean(...). Enhanced mural
-                # inference uses the same mean step by default to avoid stochastic
-                # reverse noise saturating unconstrained hole pixels to white.
                 x_original = self.reverse_sde_step_mean(x_original, score_original, t)
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
-            if known_area_projection:
-                # In mural inpainting, self.mu is condition_mu in the
-                # target domain: MuCleanr/CondLUT on known pixels and CondLUT
-                # in holes. Project known pixels only; holes remain predicted.
-                x_original = self.mu * mask_known + x_original * mask_hole
+
+            # NOTE: known_area_projection is intentionally NOT applied inside the
+            # loop.  The model was trained with a clean SDE trajectory (no
+            # per-step masking), so injecting mask_known projection at every step
+            # shifts the input distribution away from training and causes the
+            # score to diverge, pushing hole pixels to white.
+            # The final composite is applied once after the loop instead.
 
             if save_states:
                 interval = max(1, self.T // 100)
                 if t % interval == 0:
                     self._save_state_image(x_original, save_dir, t // interval)
 
-        if known_area_projection:
-            return self.mu * mask_known + x_original * mask_hole
+        # Return the raw model prediction without compositing.
+        # denoising_model.test() handles the final known/hole composite.
         return x_original
 
     def _reverse_sde_enhanced_with_discriminator(
@@ -405,8 +404,7 @@ class IRSDE(SDE):
                 x_updated = self.reverse_sde_step_mean(x_original, score_original, t)
             else:
                 x_updated = self.reverse_sde_step(x_original, score_original, t)
-            if known_area_projection:
-                x_updated = self.mu * mask_known + x_updated * mask_hole
+            # No per-step known_area_projection — see _reverse_sde_enhanced comment.
 
             if (
                 dis is not None
@@ -441,8 +439,6 @@ class IRSDE(SDE):
                         x_tmp = self.reverse_sde_step_mean(x_original, score_tmp, t)
                     else:
                         x_tmp = self.reverse_sde_step(x_original, score_tmp, t)
-                    if known_area_projection:
-                        x_tmp = self.mu * mask_known + x_tmp * mask_hole
                     d_proposal = dis(
                         torch.tensor(t, device=self.device).reshape(1,),
                         x_tmp.detach() * mask_known,
@@ -475,11 +471,10 @@ class IRSDE(SDE):
                 x_original = self.reverse_sde_step_mean(x_original, score_original, t)
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
-            if known_area_projection:
-                x_original = self.mu * mask_known + x_original * mask_hole
+            # No per-step known_area_projection — see _reverse_sde_enhanced comment.
 
-        if known_area_projection:
-            return self.mu * mask_known + x_original * mask_hole
+        # Return the raw model prediction without compositing.
+        # denoising_model.test() handles the final known/hole composite.
         return x_original
 
     def reverse_sde(self, xt, T=-1, save_states=False, save_dir='sde_state',GT = None, mask = None, S_sde = None, S_GT = None, S_LQ = None, dis = None, S_LQs = None, **kwargs):

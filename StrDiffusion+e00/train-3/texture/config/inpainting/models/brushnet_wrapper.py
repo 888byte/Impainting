@@ -300,14 +300,33 @@ class ConditionalUNetWithBrushNet(nn.Module):
         ):
             color_prior = self.check_image_size(color_prior, H, W)
             confidence = self.check_image_size(confidence, H, W)
+            # During training, randomly skip BrushNet for individual samples.
+            # This forces the main trunk to learn to repair without color guidance,
+            # preventing over-reliance on the prior and improving robustness.
+            # Per-sample dropout: each sample in the batch independently decides
+            # whether to run BrushNet, keeping gradient variance low.
+            run_brushnet = True
             if self.training and self.brushnet_prior_dropout_prob > 0.0:
-                color_prior, confidence = self._apply_prior_dropout(
-                    color_prior, confidence, mask_padded
+                batch = color_prior.shape[0]
+                # [B, 1, 1, 1] boolean mask: True = run BrushNet for this sample
+                keep = (
+                    torch.rand(batch, 1, 1, 1, device=color_prior.device)
+                    >= self.brushnet_prior_dropout_prob
                 )
+                if not keep.any():
+                    run_brushnet = False
+                elif not keep.all():
+                    # Zero out dropped samples' prior so BrushNet sees no signal
+                    # for them. The feature gate will suppress injection anyway,
+                    # but zeroing the input is cleaner.
+                    keep_f = keep.float()
+                    color_prior = color_prior * keep_f
+                    confidence = confidence * keep_f
 
-            bn_output = self.brushnet(xt, mask_padded, color_prior, confidence, time)
-            brushnet_features = bn_output["down_features"]
-            brushnet_mid = bn_output["mid_feature"]
+            if run_brushnet:
+                bn_output = self.brushnet(xt, mask_padded, color_prior, confidence, time)
+                brushnet_features = bn_output["down_features"]
+                brushnet_mid = bn_output["mid_feature"]
 
         x = self.init_conv(x)
         if self.main_guidance_proj is not None:
