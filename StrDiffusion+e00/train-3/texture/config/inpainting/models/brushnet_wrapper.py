@@ -332,7 +332,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         skips = []
         brushnet_idx = 0
         for idx, blocks in enumerate(self.downs):
-            b1, b2, attn, downsample = blocks
+            b1, b2, attn, downsample = blocks[0], blocks[1], blocks[2], blocks[3]
 
             x = b1(x, t)
             if brushnet_features is not None and brushnet_idx < len(brushnet_features):
