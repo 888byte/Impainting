@@ -94,7 +94,7 @@ brushnet:
   # 训练时用于抑制主干直接抄 prior；推理阶段该值不生效，仅保留镜像配置。
   prior_dropout_prob: 0.0
   #### Keep BrushNet as weak hole-only reference guidance.
-  feature_scale: 0.10
+  feature_scale: 0.20
   use_spatial_gate: true
 
 #### 主干观测引导兼容字段

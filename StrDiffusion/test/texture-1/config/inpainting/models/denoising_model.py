@@ -398,19 +398,12 @@ class DenoisingModel(BaseModel):
             ).clamp(0.0, 1.0)
         else:
             mu_clean_lut = lut_transformed
-        # SDE mu must NOT be zero in holes.  The reverse drift θ*(x−μ)*dt
-        # is a positive-feedback loop when μ=0, causing exponential divergence
-        # to white over 400 steps.  Fill holes with lut_transformed (the
-        # inference equivalent of condition_lut) so the drift becomes negative
-        # feedback (stabilising).  Must match training-side construction in
-        # train.py which uses condition_lut in holes.
-        #
-        # NOTE: We use lut_transformed, NOT color_prior.  color_prior comes
-        # from cv2.inpaint on white-filled holes and is way too bright
-        # (~0.92 mean vs ~0.65 for valid regions).  lut_transformed is
-        # computed from the same mask-aware denoise+LUT pipeline as the
-        # known area and has proper target-domain colors.
-        condition_mu = mu_clean_lut * mask_known + lut_transformed * mask_hole
+        # Keep original inpainting SDE semantics: condition_mu is known-region only.
+        # MuCleanr cleans target-domain LUT values on known pixels; holes remain
+        # unconditioned for the texture network/SDE to synthesize.  The LUT/color
+        # prior in holes is still provided to BrushNet as a reference, but it must
+        # not become the SDE drift attractor.
+        condition_mu = mu_clean_lut * mask_known
 
         return {
             "denoised_original": denoised_original,
@@ -500,10 +493,15 @@ class DenoisingModel(BaseModel):
                 x_init = self.condition
                 self.state = sde.noise_state(x_init)
 
-                # Structure guidance stays auxiliary. It should come from the
-                # denoised observed input, not from mu_clean.
+                # Structure guidance should come from the target-domain estimate
+                # (lut_transformed), not from the degraded observed input.
+                # During training, S is built from training_target = LUT(denoised(GT)).
+                # At inference, lut_transformed = LUT(denoised(observed)) is the
+                # closest available approximation to the training-time S source.
+                # Using denoised_original (which has white holes) produces empty
+                # edge maps in the hole region and mismatches the training distribution.
                 structure_gray, structure_edge = self._build_structure_targets(
-                    prepared["denoised_original"]
+                    prepared["lut_transformed"]
                 )
                 structure_state = None
                 if S_sde is not None:

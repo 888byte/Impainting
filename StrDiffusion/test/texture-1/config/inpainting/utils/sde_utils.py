@@ -306,6 +306,54 @@ class IRSDE(SDE):
                 f"mask_known and mask_hole must be complementary in enhanced inference; max deviation={deviation:.6f}"
             )
 
+    def _masked_hole_stats(self, tensor, mask_hole):
+        """Return simple hole-region safety stats for inference-only guards."""
+        if tensor is None or mask_hole is None:
+            return 0.0, 0.0, 0.0, 0.0
+        x = tensor.detach().float()
+        mask = mask_hole.detach().float()
+        if mask.shape[1] != x.shape[1]:
+            mask = mask.expand(-1, x.shape[1], -1, -1)
+        denom = mask.sum().clamp_min(1.0)
+        mean = (x * mask).sum() / denom
+        values = x[mask > 0.5]
+        if values.numel() > 0:
+            min_val = values.min()
+            max_val = values.max()
+        else:
+            min_val = x.new_tensor(0.0)
+            max_val = x.new_tensor(0.0)
+        white = ((x > 0.95).all(dim=1, keepdim=True).float() * mask_hole[:, :1]).sum()
+        white_ratio = white / mask_hole[:, :1].sum().clamp_min(1.0)
+        return (
+            float(mean.item()),
+            float(white_ratio.item()),
+            float(min_val.item()),
+            float(max_val.item()),
+        )
+
+    def _safe_discriminator_candidate(self, candidate, reference, mask_hole):
+        """Keep discriminator guidance from selecting over-white hole proposals.
+
+        The discriminator branch is legacy proposal selection.  In the mural
+        target-domain pipeline the discriminator is not a color prior and must
+        not be allowed to override the SDE/BrushNet trajectory with numerically
+        unstable or all-white hole states.  This guard does not change the SDE
+        update formula; it only rejects discriminator proposals that are clearly
+        outside the target-domain hole range.
+        """
+        if candidate is None or not torch.isfinite(candidate).all():
+            return False
+        cand_mean, cand_white, cand_min, cand_max = self._masked_hole_stats(candidate, mask_hole)
+        ref_mean, _, _, _ = self._masked_hole_stats(reference, mask_hole)
+        if cand_min < -1.0 or cand_max > 2.0:
+            return False
+        if cand_white > 0.25 and cand_mean > ref_mean + 0.08:
+            return False
+        if cand_mean > 0.95 and cand_mean > ref_mean + 0.12:
+            return False
+        return True
+
     def _reverse_sde_enhanced(
         self,
         xt,
@@ -401,9 +449,10 @@ class IRSDE(SDE):
 
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
             if deterministic_reverse:
-                x_updated = self.reverse_sde_step_mean(x_original, score_original, t)
+                x_nominal = self.reverse_sde_step_mean(x_original, score_original, t)
             else:
-                x_updated = self.reverse_sde_step(x_original, score_original, t)
+                x_nominal = self.reverse_sde_step(x_original, score_original, t)
+            x_updated = x_nominal
             # No per-step known_area_projection — see _reverse_sde_enhanced comment.
 
             if (
@@ -439,6 +488,8 @@ class IRSDE(SDE):
                         x_tmp = self.reverse_sde_step_mean(x_original, score_tmp, t)
                     else:
                         x_tmp = self.reverse_sde_step(x_original, score_tmp, t)
+                    if not self._safe_discriminator_candidate(x_tmp, self.mu, mask_hole):
+                        continue
                     d_proposal = dis(
                         torch.tensor(t, device=self.device).reshape(1,),
                         x_tmp.detach() * mask_known,
@@ -451,10 +502,14 @@ class IRSDE(SDE):
                         xs_t = xs1
                         d_current = d_proposal
                     else:
-                        x_updated = (x_updated + x_tmp) / 2
-                        xs_t = (xs1 + xs_t) / 2
+                        x_blend = (x_updated + x_tmp) / 2
+                        if self._safe_discriminator_candidate(x_blend, self.mu, mask_hole):
+                            x_updated = x_blend
+                            xs_t = (xs1 + xs_t) / 2
                 xs = xs_optimum * mask_known + xs_t * (1 - mask_known)
 
+            if not self._safe_discriminator_candidate(x_updated, self.mu, mask_hole):
+                x_updated = x_nominal
             x_original = x_updated
 
             if save_states:
@@ -464,8 +519,16 @@ class IRSDE(SDE):
 
         for t in tqdm(reversed(range(1, early_start))):
             structure_tensor = None
-            if restore_S_guidance and xs is not None:
-                structure_tensor = torch.mean(x_original, dim=1, keepdim=True)
+            if restore_S_guidance and S_sde is not None and S_GT is not None and S_LQs is not None and xs is not None:
+                xs_optimum = S_sde.generate_states(
+                    x0=S_GT.to(self.device) * mask_known,
+                    mu=S_LQs.to(self.device) * mask_known,
+                    timesteps=t - 1,
+                )
+                xs = xs_optimum * mask_known + xs * (1 - mask_known)
+                scores = S_sde.score_fn(xs, t)
+                xs = S_sde.reverse_sde_step(xs, scores, t)
+                structure_tensor = xs
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
             if deterministic_reverse:
                 x_original = self.reverse_sde_step_mean(x_original, score_original, t)

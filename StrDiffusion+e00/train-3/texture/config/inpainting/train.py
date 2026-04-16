@@ -328,9 +328,8 @@ def main():
 
     #———————————————————检查点保存—————————————————————————
     #———————————————————检查点保存—————————————————————————
-    # 1) 读取保存频率（你要每5000次保存一次，就在 yml 里设 logger.save_checkpoint_freq: 5000）
-    #save_freq = int(opt.get("logger", {}).get("save_checkpoint_freq", 5000))
-    save_freq = 5000
+    # 1) 读取保存频率（从配置文件读取，默认2000）
+    save_freq = int(opt.get("logger", {}).get("save_checkpoint_freq", 2000))
 
     # 2) 训练loss最优保存（best），用EMA平滑避免抖动
     # best:     以主纹理损失为准，更贴近最终修复质量
@@ -626,23 +625,12 @@ def main():
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    # SDE mu must NOT be zero in holes -- θ*(x-0)*dt is
-                    # a positive-feedback loop that causes exponential drift
-                    # to white over 400 reverse steps.  Fill holes with
-                    # condition_lut so drift θ*(x-cond)*dt is *negative*
-                    # feedback (stabilising), and the model learns to *refine*
-                    # the estimate rather than generate from scratch.
-                    #
-                    # NOTE: We use condition_lut (from mask-aware denoise+LUT)
-                    # for the hole mu, NOT color_prior.  color_prior comes from
-                    # cv2.inpaint on white-filled holes and is way too bright
-                    # (~0.92 mean vs ~0.65 for valid regions).  condition_lut
-                    # is computed from the same LUT pipeline as the known area
-                    # and has proper target-domain colors.
-                    condition_mu = (
-                        mu_clean_lut * mask_for_sde
-                        + condition_lut * (1 - mask_for_sde)
-                    )
+                    # Keep original inpainting SDE semantics: mu/condition is known-region only.
+                    # MuCleanr still cleans the target-domain condition_lut on known pixels,
+                    # but the hole region is left unconditioned for the original texture SDE
+                    # to generate/restore texture. ColorPrior/CondLUT are passed to BrushNet
+                    # as auxiliary references, not as the SDE drift attractor in holes.
+                    condition_mu = mu_clean_lut * mask_for_sde
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu

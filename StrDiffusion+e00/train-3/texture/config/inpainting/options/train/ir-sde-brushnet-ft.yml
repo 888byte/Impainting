@@ -29,9 +29,9 @@ brushnet:
   nf: 64
   depth: 4
   lite: false
-  prior_dropout_prob: 0.3
+  prior_dropout_prob: 0.15
   #### Keep BrushNet as weak hole-only reference guidance.
-  feature_scale: 0.10
+  feature_scale: 0.20
   use_spatial_gate: true
 
 #### Main trunk guidance compatibility field
@@ -129,23 +129,28 @@ network_G:
     depth: 4
 
 #### Paths
+#### 选择起点权重的建议：
+####   推荐用原版十万步权重（ir-sde/models/best_G.pth），主干+guides 完全收敛
+####   guides 位置已改回 downs[i][4]，可直接复用预训练权重里的 SPADEBlock 参数
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft/models/40000_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
   strict_load: false
-  resume_state: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft/training_state/40000.state
+  resume_state: ~
 
 #### Training
 train:
   optimizer: Adam
-  lr_G: !!float 5e-6
+  lr_G: !!float 5e-6        # 预训练主干参数的学习率（低，保护已收敛权重）
+  lr_new: !!float 1e-5      # 新增随机初始化模块的学习率（BrushNet、MGLC）
+
   lr_scheme: MultiStepLR
   beta1: 0.9
   beta2: 0.999
-  niter: 100000
-  warmup_iter: 3000
-  lr_steps: [30000, 50000, 80000]
-  lr_gamma: 0.5
-  eta_min: !!float 1e-7
+  niter: 50000
+  warmup_iter: 800
+  lr_steps: [8000, 20000, 35000]
+  lr_gamma: 0.5              # 每个节点 lr 减半
+  eta_min: !!float 1e-7      # lr 下限
 
   is_weighted: False
   loss_type: l1
@@ -153,7 +158,7 @@ train:
   # Auxiliary supervision for the model-implied x0.  It keeps the final
   # reverse result in the target color domain and prevents white-hole
   # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
-  x0_recon_loss_weight: 0.3
+  x0_recon_loss_weight: 1.0
   x0_recon_loss_start_iter: 0
   x0_recon_clamp_b_min: !!float 1e-3
 
@@ -174,5 +179,5 @@ debug:
 #### Logger
 logger:
   print_freq: 100
-  save_checkpoint_freq: 2000
+  save_checkpoint_freq: 2000  
   use_tb_logger: true

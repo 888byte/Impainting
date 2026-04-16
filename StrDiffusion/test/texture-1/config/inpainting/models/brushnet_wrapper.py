@@ -114,32 +114,22 @@ class ConditionalUNetWithBrushNet(nn.Module):
                     nn.init.zeros_(self.main_guidance_proj.bias)
 
         self.downs = nn.ModuleList([])
-        self.guides = nn.ModuleList([])
         for i in range(depth):
             dim_in = nf * int(math.pow(2, i))
             dim_out = nf * int(math.pow(2, i + 1))
-            self.downs.append(
-                nn.ModuleList(
-                    [
-                        block_class(
-                            dim_in=dim_in,
-                            dim_out=dim_in,
-                            time_emb_dim=time_dim,
-                        ),
-                        block_class(
-                            dim_in=dim_in,
-                            dim_out=dim_in,
-                            time_emb_dim=time_dim,
-                        ),
-                        Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                        Downsample(dim_in, dim_out)
-                        if i != (depth - 1)
-                        else default_conv(dim_in, dim_out),
-                    ]
-                )
-            )
+            down_block = [
+                block_class(dim_in=dim_in, dim_out=dim_in, time_emb_dim=time_dim),
+                block_class(dim_in=dim_in, dim_out=dim_in, time_emb_dim=time_dim),
+                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                Downsample(dim_in, dim_out) if i != (depth - 1) else default_conv(dim_in, dim_out),
+            ]
             if self.restore_S_guidance:
-                self.guides.append(SPADEBlock(dim_out, dim_out, 1))
+                # Keep SPADEBlock as downs[i][4] to match the pretrained weight
+                # key layout (downs.0.4.*, downs.1.4.*, ...) from the original
+                # ConditionalUNet checkpoint.  This allows direct weight reuse
+                # without any key remapping.
+                down_block.append(SPADEBlock(dim_out, dim_out, 1))
+            self.downs.append(nn.ModuleList(down_block))
 
         self.ups = nn.ModuleList([])
         for i in range(depth):
@@ -365,8 +355,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
 
             # Baseline compatibility fix only; not counted as the texture-core
             # innovation. This restores the legacy S guidance when requested.
-            if self.restore_S_guidance and S is not None:
-                x = self.guides[idx](x, S)
+            if self.restore_S_guidance and S is not None and len(blocks) > 4:
+                x = blocks[4](x, S)
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)

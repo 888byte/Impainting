@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from collections import OrderedDict
 import os
 import numpy as np
@@ -220,13 +220,33 @@ class DenoisingModel(BaseModel):
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
             
             wd_G = train_opt["weight_decay_G"] if train_opt["weight_decay_G"] else 0
-            optim_params = []
-            for (k,v,) in self.model.named_parameters():  # can optimize for a part of the model
-                if v.requires_grad:
-                    optim_params.append(v)
-                else:
+            # Split parameters into two groups:
+            # - pretrained (backbone UNet): use the configured lr_G (low, e.g. 5e-6)
+            # - new modules (BrushNet, MGLC, mu_denoiser backbone): use lr_new
+            #   which defaults to 10x lr_G so randomly-initialised weights converge
+            #   faster without destabilising the pretrained backbone.
+            lr_new = float(train_opt.get("lr_new", train_opt["lr_G"] * 10))
+            new_module_prefixes = ("brushnet.", "mglc_mid.", "mglc_dec.")
+            pretrained_params = []
+            new_params = []
+            for k, v in self.model.named_parameters():
+                if not v.requires_grad:
                     if self.rank <= 0:
                         logger.warning("Params [{:s}] will not optimize.".format(k))
+                    continue
+                is_new = any(k.startswith(p) for p in new_module_prefixes)
+                if is_new:
+                    new_params.append(v)
+                else:
+                    pretrained_params.append(v)
+            optim_params = [
+                {"params": pretrained_params, "lr": train_opt["lr_G"]},
+                {"params": new_params, "lr": lr_new},
+            ]
+            logger.info(
+                "[Model] Param groups: pretrained=%d (lr=%.2e), new=%d (lr=%.2e)",
+                len(pretrained_params), train_opt["lr_G"], len(new_params), lr_new,
+            )
 
 
             if train_opt['optimizer'] == 'Adam':
@@ -659,7 +679,7 @@ class DenoisingModel(BaseModel):
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
 
-        # condition_mu now includes condition_lut in holes (SDE μ attractor).
+        # condition_mu is known-region only; hole color/texture guidance comes from BrushNet prior, not SDE μ.
         texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
         self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
         condition_target_gap = (self.condition - training_target * self.mask).abs().mean()
@@ -1071,3 +1091,4 @@ class DenoisingModel(BaseModel):
         
         torch.save(combined_state, save_path)
         #logger.info(f"[Model] 模型已保存到 {save_path}")
+
