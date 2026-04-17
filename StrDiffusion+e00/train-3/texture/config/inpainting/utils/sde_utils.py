@@ -318,6 +318,24 @@ class IRSDE(SDE):
         batch = x0.shape[0]
 
         timesteps = torch.randint(2, self.T + 1, (batch, 1, 1, 1)).long()
+        # Optional curriculum for inpainting finetuning.
+        #
+        # In inference the reverse chain starts at the highest-noise end
+        # (noise_state around t=T).  Uniform timestep sampling is mathematically
+        # valid, but with large holes it under-samples the hard "nearly pure
+        # noise in hole" regime.  This does not change the SDE formula; it only
+        # changes which existing timesteps are sampled for training.
+        high_t_prob = float(getattr(self, "high_t_prob", 0.0))
+        if high_t_prob > 0:
+            high_t_prob = max(0.0, min(1.0, high_t_prob))
+            high_t_min_ratio = float(getattr(self, "high_t_min_ratio", 0.65))
+            high_t_min_ratio = max(0.0, min(1.0, high_t_min_ratio))
+            high_t_min = max(2, min(self.T, int(round(self.T * high_t_min_ratio))))
+            high_timesteps = torch.randint(
+                high_t_min, self.T + 1, (batch, 1, 1, 1)
+            ).long()
+            use_high = torch.rand(batch, 1, 1, 1) < high_t_prob
+            timesteps = torch.where(use_high, high_timesteps, timesteps)
 
         state_mean = self.mu_bar(x0, timesteps)
         noises = torch.randn_like(state_mean)

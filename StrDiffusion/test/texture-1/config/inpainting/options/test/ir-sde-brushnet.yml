@@ -94,7 +94,7 @@ brushnet:
   # 训练时用于抑制主干直接抄 prior；推理阶段该值不生效，仅保留镜像配置。
   prior_dropout_prob: 0.0
   #### Keep BrushNet as weak hole-only reference guidance.
-  feature_scale: 0.20
+  feature_scale: 0.30
   use_spatial_gate: true
 
 #### 主干观测引导兼容字段
@@ -158,14 +158,20 @@ inference:
   compose_mode: auto
   #### 是否保存 reverse 过程状态图
   save_states: true
-  deterministic_reverse: false
+  deterministic_reverse: false  # 随机步能生成纹理细节，效果优于均值步
   known_area_projection: true
   compose_mask_dilate: 2
   compose_feather: 2
+  # 修掉标注 mask 略小导致的白色占位边缘残留：仅在 hole 邻域内把
+  # original_degraded 中接近纯白的像素并入最终合成 alpha。
+  compose_white_guard: true
+  compose_white_guard_dilate: 8
+  compose_white_threshold: 0.965
   #### 是否保存诊断图
   #### - 建议排查 bad case 时保持 true
   #### - 会额外输出 color_prior_lut / color_prior_inpainted / training_target_like
   save_intermediates: true
   #### 判别器引导开关
+  #### 判别器权重来自原版收敛训练，可以开启辅助纹理生成
   discriminator_guidance:
     enabled: true

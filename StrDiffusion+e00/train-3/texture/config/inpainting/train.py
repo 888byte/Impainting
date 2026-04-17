@@ -472,6 +472,13 @@ def main():
         eps=opt["sde"]["eps"],
         device=device
     )
+    sde.high_t_prob = float(opt["sde"].get("high_t_prob", 0.0))
+    sde.high_t_min_ratio = float(opt["sde"].get("high_t_min_ratio", 0.65))
+    if sde.high_t_prob > 0:
+        logger.info(
+            "[SDE] high-timestep curriculum enabled: "
+            f"prob={sde.high_t_prob:.3f}, min_ratio={sde.high_t_min_ratio:.3f}"
+        )
     sde.set_model(model.model)
 
     S_sde = str_util.IRSDE(
@@ -691,8 +698,8 @@ def main():
                     # 新的调试格式：
                     # Input -> Denoised -> ColorChanged -> Prior -> Original+Mask -> Mask
                     original = debug_info.get('original_degraded', Y_degraded)
-                    denoised = debug_info.get('denoised_observed_mask_aware', debug_info.get('denoised_original', None))
-                    color_changed = debug_info.get('training_target', debug_info.get('color_changed', training_target))
+                    denoised = debug_info.get('denoised_observed_mask_aware', None)
+                    color_changed = debug_info.get('training_target', training_target)
                     prior = debug_info.get('color_prior', color_prior_for_sde)
                     orig_with_mask = debug_info.get('condition_mu', condition_mu)
                     mask_img = debug_info.get('mask_known', mask_for_sde)
