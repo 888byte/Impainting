@@ -536,7 +536,8 @@ class DenoisingModel(BaseModel):
                     # full mode still protects known pixels, but the protected
                     # value is target-domain CondLUT, not raw degraded input.
                     known_source = prepared["lut_transformed"]
-                self.output = known_source * self.mask + pred_full * self.mask_hole
+                compose_alpha = self._build_composite_alpha(self.mask_hole)
+                self.output = known_source * (1 - compose_alpha) + pred_full * compose_alpha
 
                 self._log_inference_debug_stats(pred_full, self.output, prepared)
 
@@ -622,6 +623,25 @@ class DenoisingModel(BaseModel):
             logger.warning("[LoadCheck] missing keys sample: %s", missing[:20])
         if unexpected:
             logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
+
+    def _build_composite_alpha(self, mask_hole: torch.Tensor) -> torch.Tensor:
+        """Inference-only soft compose mask to remove white/gray mask fringes.
+
+        mask_hole semantics are unchanged (1=hole). We optionally dilate the
+        hole before final compositing and feather the boundary, so placeholder
+        pixels just outside the annotated mask are not preserved as hard white
+        rims. This does not change the SDE trajectory or network structure.
+        """
+        alpha = mask_hole.float()
+        dilate = int(self.inference_opt.get("compose_mask_dilate", 0) or 0)
+        feather = int(self.inference_opt.get("compose_feather", 0) or 0)
+        if dilate > 0:
+            k = 2 * dilate + 1
+            alpha = F.max_pool2d(alpha, kernel_size=k, stride=1, padding=dilate)
+        if feather > 0:
+            k = 2 * feather + 1
+            alpha = F.avg_pool2d(alpha, kernel_size=k, stride=1, padding=feather)
+        return alpha.clamp(0.0, 1.0)
 
     def _masked_rgb_stats(self, tensor, mask):
         if tensor is None or mask is None:

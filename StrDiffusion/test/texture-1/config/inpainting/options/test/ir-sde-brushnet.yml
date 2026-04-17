@@ -158,8 +158,10 @@ inference:
   compose_mode: auto
   #### 是否保存 reverse 过程状态图
   save_states: true
-  deterministic_reverse: true
+  deterministic_reverse: false
   known_area_projection: true
+  compose_mask_dilate: 2
+  compose_feather: 2
   #### 是否保存诊断图
   #### - 建议排查 bad case 时保持 true
   #### - 会额外输出 color_prior_lut / color_prior_inpainted / training_target_like

@@ -373,8 +373,11 @@ class IRSDE(SDE):
     ):
         x_original = xt.clone().to(self.device)
         structure_state = S_LQ.clone().to(self.device) if S_LQ is not None else None
+        early_start = max(1, int(0.4 * T))
 
-        for t in tqdm(reversed(range(1, T + 1))):
+        # Early stage follows the legacy restore_S_guidance path: update the
+        # structure SDE and feed its state to the texture network.
+        for t in tqdm(reversed(range(early_start, T + 1))):
             structure_tensor = None
             if restore_S_guidance and S_sde is not None and S_GT is not None and S_LQs is not None:
                 xs_optimum = S_sde.generate_states(
@@ -396,12 +399,22 @@ class IRSDE(SDE):
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
 
-            # NOTE: known_area_projection is intentionally NOT applied inside the
-            # loop.  The model was trained with a clean SDE trajectory (no
-            # per-step masking), so injecting mask_known projection at every step
-            # shifts the input distribution away from training and causes the
-            # score to diverge, pushing hole pixels to white.
-            # The final composite is applied once after the loop instead.
+            # NOTE: known_area_projection is intentionally NOT applied inside the loop.
+            if save_states:
+                interval = max(1, self.T // 100)
+                if t % interval == 0:
+                    self._save_state_image(x_original, save_dir, t // interval)
+
+        # Late stage restores original StrDiffusion behavior: feed current texture
+        # grayscale as S.  This lets holes refine texture instead of being forced by
+        # an external known-only edge map.
+        for t in tqdm(reversed(range(1, early_start))):
+            structure_tensor = torch.mean(x_original, dim=1, keepdim=True) if restore_S_guidance else None
+            score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
+            if deterministic_reverse:
+                x_original = self.reverse_sde_step_mean(x_original, score_original, t)
+            else:
+                x_original = self.reverse_sde_step(x_original, score_original, t)
 
             if save_states:
                 interval = max(1, self.T // 100)
@@ -518,23 +531,16 @@ class IRSDE(SDE):
                     self._save_state_image(x_original, save_dir, t // interval)
 
         for t in tqdm(reversed(range(1, early_start))):
-            structure_tensor = None
-            if restore_S_guidance and S_sde is not None and S_GT is not None and S_LQs is not None and xs is not None:
-                xs_optimum = S_sde.generate_states(
-                    x0=S_GT.to(self.device) * mask_known,
-                    mu=S_LQs.to(self.device) * mask_known,
-                    timesteps=t - 1,
-                )
-                xs = xs_optimum * mask_known + xs * (1 - mask_known)
-                scores = S_sde.score_fn(xs, t)
-                xs = S_sde.reverse_sde_step(xs, scores, t)
-                structure_tensor = xs
+            # Match the original discriminator-guided StrDiffusion late stage:
+            # feed current texture grayscale as S so the texture branch can refine
+            # hole content instead of being constrained by a known-only edge map.
+            structure_tensor = torch.mean(x_original, dim=1, keepdim=True) if restore_S_guidance else None
             score_original = self.score_fn(x_original, t, structure_tensor, **brushnet_kwargs)
             if deterministic_reverse:
                 x_original = self.reverse_sde_step_mean(x_original, score_original, t)
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
-            # No per-step known_area_projection — see _reverse_sde_enhanced comment.
+            # No per-step known_area_projection ? see _reverse_sde_enhanced comment.
 
         # Return the raw model prediction without compositing.
         # denoising_model.test() handles the final known/hole composite.
