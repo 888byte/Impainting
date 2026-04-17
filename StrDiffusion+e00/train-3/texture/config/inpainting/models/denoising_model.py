@@ -208,12 +208,20 @@ class DenoisingModel(BaseModel):
             self.x0_recon_loss_weight = float(train_opt.get("x0_recon_loss_weight", 0.0))
             self.x0_recon_loss_start_iter = int(train_opt.get("x0_recon_loss_start_iter", 0))
             self.x0_recon_clamp_b_min = float(train_opt.get("x0_recon_clamp_b_min", 1e-3))
+            # Timestep-aware decay for x0 auxiliary loss.
+            # At high-noise timesteps B(t) is small, so x0_hat = mu + (xt-mu-sigma*noise)/B
+            # amplifies noise prediction errors.  We decay the x0 loss weight as t increases
+            # so the high-t curriculum does not inadvertently amplify x0 gradients.
+            # weight_at_t = x0_recon_loss_weight * exp(-x0_high_t_decay * t/T)
+            # x0_high_t_decay=0 disables the decay (original behavior).
+            self.x0_high_t_decay = float(train_opt.get("x0_high_t_decay", 0.0))
             if self.x0_recon_loss_weight > 0:
                 logger.info(
                     "[Model] x0 reconstruction auxiliary loss enabled: "
                     f"weight={self.x0_recon_loss_weight}, "
                     f"start_iter={self.x0_recon_loss_start_iter}, "
-                    f"clamp_b_min={self.x0_recon_clamp_b_min}"
+                    f"clamp_b_min={self.x0_recon_clamp_b_min}, "
+                    f"high_t_decay={self.x0_high_t_decay}"
                 )
 
             # optimizers
@@ -629,8 +637,16 @@ class DenoisingModel(BaseModel):
                 x0_hat_for_loss, training_target, self.mask
             )
             x0_recon_loss = x0_loss_components["loss_total"]
-            x0_recon_weighted = self.x0_recon_loss_weight * x0_recon_loss
-        
+            # Timestep-aware weight decay: reduce x0 loss contribution at high-noise
+            # timesteps where B(t) is small and x0_hat amplifies prediction errors.
+            # effective_x0_weight = x0_recon_loss_weight * exp(-decay * t/T)
+            if self.x0_high_t_decay > 0.0:
+                t_ratio = timesteps.detach().float().mean() / float(getattr(sde, "T", 400))
+                t_ratio = t_ratio.clamp(0.0, 1.0)
+                decay_factor = math.exp(-self.x0_high_t_decay * float(t_ratio.item()))
+            else:
+                decay_factor = 1.0
+            x0_recon_weighted = self.x0_recon_loss_weight * decay_factor * x0_recon_loss        
         # 总损失 = 扩散损失 + x0重建辅助损失 + Mu-Denoiser损失（如果有）
         total_loss = loss
         if x0_recon_weighted is not None:
@@ -659,6 +675,7 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
         self.log_dict["loss_x0"] = float(x0_recon_weighted.item()) if x0_recon_weighted is not None else 0.0
         self.log_dict["loss_x0_raw"] = float(x0_recon_loss.item()) if x0_recon_loss is not None else 0.0
+        self.log_dict["stats_x0_decay_factor"] = float(decay_factor) if x0_recon_weighted is not None else 1.0
         self.log_dict["loss_x0_known"] = (
             float(x0_loss_components["loss_known"].item())
             if x0_loss_components is not None else 0.0
@@ -675,9 +692,17 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
         self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
         self.log_dict["lr_main"] = float(self.optimizer.param_groups[0]["lr"])
+        if len(self.optimizer.param_groups) > 1:
+            self.log_dict["lr_new"] = float(self.optimizer.param_groups[1]["lr"])
         if self.use_mu_denoiser:
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+        timesteps_float = timesteps.detach().float()
+        self.log_dict["stats_timestep_mean"] = float(timesteps_float.mean().item())
+        high_t_min_ratio = float(getattr(sde, "high_t_min_ratio", 0.65))
+        self.log_dict["stats_timestep_high_ratio"] = float(
+            (timesteps_float >= (high_t_min_ratio * float(getattr(sde, "T", 400)))).float().mean().item()
+        )
 
         # condition_mu is known-region only; hole color/texture guidance comes from BrushNet prior, not SDE μ.
         texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
@@ -733,13 +758,6 @@ class DenoisingModel(BaseModel):
             'mask_hole': (1 - self.mask).detach(),
             'structure_gray_from_target': self.S_GT.detach(),
             'structure_edge_from_target': self.S_LQ.detach(),
-            # Backward-compatible debug aliases.
-            'denoised_original': denoised_observed.detach() if denoised_observed is not None else None,
-            'lut_transformed': condition_lut_for_mu.detach(),
-            'mu_clean': (mu_clean_lut * self.mask).detach(),
-            'color_changed': training_target.detach(),
-            'original_with_mask': self.condition.detach(),
-            'mask': self.mask.detach(),
         }
 
     def _masked_mean_std(self, tensor, mask):

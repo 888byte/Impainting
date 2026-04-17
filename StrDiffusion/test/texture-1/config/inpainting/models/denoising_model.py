@@ -536,7 +536,10 @@ class DenoisingModel(BaseModel):
                     # full mode still protects known pixels, but the protected
                     # value is target-domain CondLUT, not raw degraded input.
                     known_source = prepared["lut_transformed"]
-                compose_alpha = self._build_composite_alpha(self.mask_hole)
+                compose_alpha = self._build_composite_alpha(
+                    self.mask_hole,
+                    source=self.original_degraded,
+                )
                 self.output = known_source * (1 - compose_alpha) + pred_full * compose_alpha
 
                 self._log_inference_debug_stats(pred_full, self.output, prepared)
@@ -565,6 +568,7 @@ class DenoisingModel(BaseModel):
                     "x_init": x_init,
                     "structure_gray": structure_gray,
                     "structure_edge": structure_edge,
+                    "compose_alpha": compose_alpha,
                     "raw_pred": self.raw_output,
                     "final": self.output,
                 }
@@ -624,7 +628,11 @@ class DenoisingModel(BaseModel):
         if unexpected:
             logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
 
-    def _build_composite_alpha(self, mask_hole: torch.Tensor) -> torch.Tensor:
+    def _build_composite_alpha(
+        self,
+        mask_hole: torch.Tensor,
+        source: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Inference-only soft compose mask to remove white/gray mask fringes.
 
         mask_hole semantics are unchanged (1=hole). We optionally dilate the
@@ -633,6 +641,20 @@ class DenoisingModel(BaseModel):
         rims. This does not change the SDE trajectory or network structure.
         """
         alpha = mask_hole.float()
+        if bool(self.inference_opt.get("compose_white_guard", False)):
+            # Some inference masks are slightly tighter than the actually
+            # white-filled damaged pixels.  Those pixels are then treated as
+            # "known" and survive the final composite as white rims.  Build a
+            # conservative auxiliary alpha from near-white source pixels only in
+            # a narrow neighborhood of the hole mask.
+            guard_dilate = int(self.inference_opt.get("compose_white_guard_dilate", 8) or 0)
+            threshold = float(self.inference_opt.get("compose_white_threshold", 0.965))
+            source_tensor = source if source is not None else self.original_degraded
+            if guard_dilate > 0 and source_tensor is not None:
+                k = 2 * guard_dilate + 1
+                near_hole = F.max_pool2d(alpha, kernel_size=k, stride=1, padding=guard_dilate)
+                white_like = (source_tensor.detach().float() > threshold).all(dim=1, keepdim=True).float()
+                alpha = torch.maximum(alpha, white_like * near_hole)
         dilate = int(self.inference_opt.get("compose_mask_dilate", 0) or 0)
         feather = int(self.inference_opt.get("compose_feather", 0) or 0)
         if dilate > 0:
