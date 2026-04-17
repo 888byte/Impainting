@@ -490,7 +490,16 @@ class DenoisingModel(BaseModel):
                 target_like = self._build_training_target_like()
                 self.condition = prepared["condition_mu"]
                 sde.set_mu(self.condition)
-                x_init = self.condition
+                # x_init: use lut_transformed to fill hole pixels so the starting
+                # point is closer to the training distribution.
+                # During training, xt_hole = training_target * exp(-θt) + noise,
+                # which contains GT color information.  At inference, using
+                # condition_mu (hole=0) as x_init gives only pure noise in holes,
+                # causing score mismatch and white output.
+                # lut_transformed is the best available approximation to
+                # training_target at inference time.
+                lut_t = prepared["lut_transformed"]
+                x_init = self.condition * self.mask + lut_t * self.mask_hole
                 self.state = sde.noise_state(x_init)
 
                 # Structure guidance should come from the target-domain estimate
