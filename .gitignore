@@ -15,6 +15,7 @@
 **/experiments/
 **/debug_color_guidance/
 
+cmp/
 dataset/
 MuralDH/
 
