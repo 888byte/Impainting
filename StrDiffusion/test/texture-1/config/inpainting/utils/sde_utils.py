@@ -541,6 +541,10 @@ class IRSDE(SDE):
             else:
                 x_original = self.reverse_sde_step(x_original, score_original, t)
             # No per-step known_area_projection ? see _reverse_sde_enhanced comment.
+            if save_states:
+                interval = max(1, self.T // 100)
+                if t % interval == 0:
+                    self._save_state_image(x_original, save_dir, t // interval)
 
         # Return the raw model prediction without compositing.
         # denoising_model.test() handles the final known/hole composite.

@@ -589,7 +589,12 @@ class DenoisingModel(BaseModel):
             brushnet_kwargs['mask'] = 1 - self.mask
 
         model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
-        noise = model_output[0] if isinstance(model_output, (tuple, list)) else model_output
+        if isinstance(model_output, (tuple, list)):
+            noise = model_output[0]
+            g_score = model_output[1]  # 与原版 ConditionalUNet 一致
+        else:
+            noise = model_output
+            g_score = None
         # ============ 传递BrushNet条件完成 ============
         
         score = sde.get_score_from_noise(noise, timesteps)
@@ -605,6 +610,28 @@ class DenoisingModel(BaseModel):
             yt_1_expection, yt_1_optimum, self.mask
         )
         loss = loss_components["loss_total"]
+
+        # ============ g_score 辅助损失（恢复原版 StrDiffusion 机制） ============
+        # 原版 denoising_model.py 使用 g_score 为 hole 区域提供直接监督：
+        #   1. hole 区域的 g_score 应趋向 1.0（“相信模型预测”）
+        #   2. 混合后的输出应接近最优步
+        g_score_loss_val = 0.0
+        if g_score is not None:
+            mask_hole = 1 - self.mask  # 1=hole, 0=known
+            ones_like_gs = torch.ones_like(g_score)
+            _l1 = nn.L1Loss(reduction='mean')
+            _l2 = nn.MSELoss()
+            g_score_hole_loss = 0.1 * (
+                _l1(ones_like_gs * mask_hole, g_score * mask_hole)
+                + _l2(ones_like_gs * mask_hole, g_score * mask_hole)
+            )
+            g_score_blend_loss = _l1(
+                yt_1_expection * g_score + (1 - g_score) * yt_1_optimum,
+                yt_1_optimum,
+            )
+            g_score_total = g_score_hole_loss + g_score_blend_loss
+            loss = loss + g_score_total
+            g_score_loss_val = float(g_score_total.item())
 
         # x0 reconstruction auxiliary loss.
         # This directly supervises the model's implied final clean image in the
@@ -673,6 +700,7 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_known"] = loss_components["loss_known"].item()
         self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
+        self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["loss_x0"] = float(x0_recon_weighted.item()) if x0_recon_weighted is not None else 0.0
         self.log_dict["loss_x0_raw"] = float(x0_recon_loss.item()) if x0_recon_loss is not None else 0.0
         self.log_dict["stats_x0_decay_factor"] = float(decay_factor) if x0_recon_weighted is not None else 1.0
@@ -698,6 +726,46 @@ class DenoisingModel(BaseModel):
             self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
         self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
         timesteps_float = timesteps.detach().float()
+
+        # ============ 额外诊断指标 ============
+        # g_score 统计：验证 hole 区域的 g_score 是否趋向 1.0
+        if g_score is not None:
+            with torch.no_grad():
+                _mask_hole_g = (1 - self.mask).to(dtype=g_score.dtype)
+                _mask_known_g = self.mask.to(dtype=g_score.dtype)
+                if g_score.shape[1] != _mask_hole_g.shape[1]:
+                    _mhg = _mask_hole_g.expand_as(g_score)
+                    _mkg = _mask_known_g.expand_as(g_score)
+                else:
+                    _mhg = _mask_hole_g
+                    _mkg = _mask_known_g
+                self.log_dict["stats_g_score_hole_mean"] = float(
+                    (g_score * _mhg).sum().item() / _mhg.sum().clamp_min(1.0).item()
+                )
+                self.log_dict["stats_g_score_known_mean"] = float(
+                    (g_score * _mkg).sum().item() / _mkg.sum().clamp_min(1.0).item()
+                )
+                self.log_dict["stats_g_score_global_mean"] = float(g_score.mean().item())
+
+        # noise / score 统计：检查模型输出是否异常
+        with torch.no_grad():
+            self.log_dict["stats_noise_mean"] = float(noise.detach().mean().item())
+            self.log_dict["stats_noise_std"] = float(noise.detach().std().item())
+            self.log_dict["stats_noise_abs_max"] = float(noise.detach().abs().max().item())
+            _sb = sde.sigma_bar(timesteps).to(noise.device, noise.dtype)
+            _score_mag = (noise.detach().abs() / _sb.clamp_min(1e-8)).mean()
+            self.log_dict["stats_score_magnitude"] = float(_score_mag.item())
+            # yt_1 预测 vs 最优步：hole vs known 差异
+            _pred_opt_diff = (yt_1_expection - yt_1_optimum).detach().abs()
+            _mask_h3 = (1 - self.mask).expand_as(_pred_opt_diff)
+            _mask_k3 = self.mask.expand_as(_pred_opt_diff)
+            self.log_dict["stats_pred_opt_diff_hole"] = float(
+                (_pred_opt_diff * _mask_h3).sum().item() / _mask_h3.sum().clamp_min(1.0).item()
+            )
+            self.log_dict["stats_pred_opt_diff_known"] = float(
+                (_pred_opt_diff * _mask_k3).sum().item() / _mask_k3.sum().clamp_min(1.0).item()
+            )
+
         self.log_dict["stats_timestep_mean"] = float(timesteps_float.mean().item())
         high_t_min_ratio = float(getattr(sde, "high_t_min_ratio", 0.65))
         self.log_dict["stats_timestep_high_ratio"] = float(

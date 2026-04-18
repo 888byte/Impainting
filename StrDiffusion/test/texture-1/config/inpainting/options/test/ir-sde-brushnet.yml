@@ -142,8 +142,10 @@ mu_denoiser:
 
 #### 权重路径
 #### - 三个路径都保留，兼容官方骨架
+#### ⚠️ 重要：best_G.pth 是 iter=1 的权重（随机初始化），不要用！
+####         使用最新的 checkpoint（14000_G.pth 或 latest_G.pth）
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x4/models/best_G.pth
   pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
   pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
   strict_load: false

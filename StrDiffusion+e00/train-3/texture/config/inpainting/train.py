@@ -330,6 +330,16 @@ def main():
     #———————————————————检查点保存—————————————————————————
     # 1) 读取保存频率（从配置文件读取，默认2000）
     save_freq = int(opt.get("logger", {}).get("save_checkpoint_freq", 2000))
+    # Do not let the first few warmup iterations overwrite best_G.pth.
+    # In x3 logs best_G was selected at iter=1 because EMA starts from the first
+    # value; inference then accidentally loaded this almost-untrained checkpoint.
+    # Periodic checkpoints are still saved from save_freq as before.
+    best_save_start_iter = int(opt.get("logger", {}).get("best_save_start_iter", save_freq))
+    if rank <= 0:
+        logger.info(
+            "[ckpt] best checkpoint warmup: best/best_total will only be saved "
+            f"after iter >= {best_save_start_iter}"
+        )
 
     # 2) 训练loss最优保存（best），用EMA平滑避免抖动
     # best:     以主纹理损失为准，更贴近最终修复质量
@@ -734,13 +744,12 @@ def main():
             logs = model.get_current_log()
 
             # 主纹理损失：用于 best checkpoint
+            # 只用 loss_main 作为判断标准，不包含 loss_x0
+            # loss_x0 是辅助监督，不应主导 best 选择
             if "loss_main" in logs:
-                # Include the weighted x0 auxiliary term in the texture
-                # checkpoint criterion.  Otherwise "best" could still select a
-                # checkpoint with low one-step loss but bad final x0 hole output.
-                cur_texture_loss = float(logs["loss_main"]) + float(logs.get("loss_x0", 0.0))
+                cur_texture_loss = float(logs["loss_main"])
             elif "loss" in logs:
-                cur_texture_loss = float(logs["loss"]) + float(logs.get("loss_x0", 0.0))
+                cur_texture_loss = float(logs["loss"])
             elif "l_total" in logs:
                 cur_texture_loss = float(logs["l_total"])
             else:
@@ -798,7 +807,7 @@ def main():
                     )
 
                 # 保存loss最低(best)（用EMA判定更稳）- 使用 "best" 标签
-                if ema_texture_loss < best_texture_loss:
+                if current_step >= best_save_start_iter and ema_texture_loss < best_texture_loss:
                     best_texture_loss = ema_texture_loss
                     logs["best_metric"] = float(best_texture_loss)
                     log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best-texture] loss_main: {:.4e} loss_total: {:.4e}".format(
@@ -829,7 +838,8 @@ def main():
                         },
                     )
 
-                if ema_total_loss < best_total_loss:
+                # 保存 best_total（基于总损失）
+                if current_step >= best_save_start_iter and ema_total_loss < best_total_loss:
                     best_total_loss = ema_total_loss
                     logs["best_total_metric"] = float(best_total_loss)
                     log_msg = "<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> [best-total] loss_main: {:.4e} loss_total: {:.4e}".format(

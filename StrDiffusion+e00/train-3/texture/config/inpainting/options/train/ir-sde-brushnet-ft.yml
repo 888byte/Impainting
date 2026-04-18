@@ -17,11 +17,9 @@ sde:
   T: 400
   schedule: cosine
   eps: 0.005
-  # In inference the hole starts from the highest-noise end.  Bias part of
-  # finetuning toward high timesteps so the model learns texture synthesis from
-  # nearly pure-noise holes instead of only easy low/mid-t one-step denoising.
-  high_t_prob: 0.60
-  high_t_min_ratio: 0.65
+  # 降低high-timestep curriculum强度，减少训练不稳定性
+  high_t_prob: 0.40
+  high_t_min_ratio: 0.60
 
 #### Degradation
 degradation:
@@ -163,13 +161,12 @@ train:
   # Auxiliary supervision for the model-implied x0.  It keeps the final
   # reverse result in the target color domain and prevents white-hole
   # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
-  x0_recon_loss_weight: 0.1   # 保持低权重：high-t curriculum 已经让模型更多见到高噪声 hole
-                               # 0.3 在 high_t_prob=0.60 下等效于 x2 的 0.3~0.4，仍会导致高噪声梯度主导
-                               # 0.1 + timestep_aware_decay（见 denoising_model.py）是更稳定的组合
+  x0_recon_loss_weight: 0.03   # 大幅降低x0损失权重，减少高噪声下的不稳定性
   # 对高噪声 timestep 的 x0 损失做 timestep-aware 衰减，防止 t 接近 T 时 B(t) 很小导致 x0_hat 爆炸
   # weight_at_t = x0_recon_loss_weight * exp(-x0_high_t_decay * (t/T))
   # x0_high_t_decay=0 表示不衰减（等同于原来行为）
   x0_high_t_decay: 2.0        # t=T 时权重衰减到 exp(-2)≈0.135，t=0.65T 时约 exp(-1.3)≈0.27
+                               # 配合 high_t_prob=0.60，让高噪声区域的 x0 损失不会主导梯度
   x0_recon_loss_start_iter: 0
   x0_recon_clamp_b_min: !!float 1e-3
 
@@ -191,4 +188,5 @@ debug:
 logger:
   print_freq: 100
   save_checkpoint_freq: 2000  
+  best_save_start_iter: 2000
   use_tb_logger: true
