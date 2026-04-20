@@ -1,4 +1,4 @@
-﻿#### 官方骨架保留的最终增强版推理配置
+#### 官方骨架保留的最终增强版推理配置
 #### 使用命令:
 ####   python test.py -opt options/test/ir-sde-brushnet.yml
 ####   python test.py -opt options/test/ir-sde-brushnet.yml --set texture_core.enabled=false
@@ -162,13 +162,13 @@ inference:
   save_states: true
   deterministic_reverse: false  # 随机步能生成纹理细节，效果优于均值步
   known_area_projection: true
-  compose_mask_dilate: 2
-  compose_feather: 2
+  compose_mask_dilate: 3
+  compose_feather: 4
   # 修掉标注 mask 略小导致的白色占位边缘残留：仅在 hole 邻域内把
   # original_degraded 中接近纯白的像素并入最终合成 alpha。
   compose_white_guard: true
-  compose_white_guard_dilate: 8
-  compose_white_threshold: 0.965
+  compose_white_guard_dilate: 4
+  compose_white_threshold: 0.95
   #### 是否保存诊断图
   #### - 建议排查 bad case 时保持 true
   #### - 会额外输出 color_prior_lut / color_prior_inpainted / training_target_like
