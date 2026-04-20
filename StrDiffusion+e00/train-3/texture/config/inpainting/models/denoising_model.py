@@ -591,7 +591,28 @@ class DenoisingModel(BaseModel):
         model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
         if isinstance(model_output, (tuple, list)):
             noise = model_output[0]
-            g_score = model_output[1]  # 与原版 ConditionalUNet 一致
+            maybe_gate = model_output[1] if len(model_output) > 1 else None
+
+            # NOTE:
+            # The current BrushNet wrapper keeps a legacy tuple return for compatibility,
+            # but its second output is the same 3-channel noise tensor (return x, x), not
+            # the original StrDiffusion 1-channel gate/score map.  Treating that tensor as
+            # g_score creates a contradictory objective:
+            #   - main diffusion loss asks noise -> true zero-mean noise
+            #   - g_score loss asks the same tensor -> 1 in holes
+            # This was the reason stats_g_score_hole_mean stayed random and the reverse
+            # trajectory could not learn meaningful hole restoration even after long runs.
+            enable_g_score_aux = self.train_opt.get("enable_g_score_aux", False) is True
+            is_real_gate = (
+                maybe_gate is not None
+                and torch.is_tensor(maybe_gate)
+                and maybe_gate is not noise
+                and maybe_gate.dim() == noise.dim()
+                and maybe_gate.shape[0] == noise.shape[0]
+                and maybe_gate.shape[-2:] == noise.shape[-2:]
+                and maybe_gate.shape[1] == 1
+            )
+            g_score = maybe_gate if (enable_g_score_aux and is_real_gate) else None
         else:
             noise = model_output
             g_score = None
@@ -611,10 +632,9 @@ class DenoisingModel(BaseModel):
         )
         loss = loss_components["loss_total"]
 
-        # ============ g_score 辅助损失（恢复原版 StrDiffusion 机制） ============
-        # 原版 denoising_model.py 使用 g_score 为 hole 区域提供直接监督：
-        #   1. hole 区域的 g_score 应趋向 1.0（“相信模型预测”）
-        #   2. 混合后的输出应接近最优步
+        # ============ 可选 g_score 辅助损失 ============
+        # 仅当网络真的返回独立 1-channel gate 时启用。当前 BrushNet wrapper 的第二输出
+        # 是 legacy 兼容用的 3-channel noise，不参与该损失。
         g_score_loss_val = 0.0
         if g_score is not None:
             mask_hole = 1 - self.mask  # 1=hole, 0=known
@@ -701,6 +721,7 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
         self.log_dict["loss_g_score"] = g_score_loss_val
+        self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
         self.log_dict["loss_x0"] = float(x0_recon_weighted.item()) if x0_recon_weighted is not None else 0.0
         self.log_dict["loss_x0_raw"] = float(x0_recon_loss.item()) if x0_recon_loss is not None else 0.0
         self.log_dict["stats_x0_decay_factor"] = float(decay_factor) if x0_recon_weighted is not None else 1.0
@@ -746,6 +767,10 @@ class DenoisingModel(BaseModel):
                     (g_score * _mkg).sum().item() / _mkg.sum().clamp_min(1.0).item()
                 )
                 self.log_dict["stats_g_score_global_mean"] = float(g_score.mean().item())
+        else:
+            self.log_dict["stats_g_score_hole_mean"] = 0.0
+            self.log_dict["stats_g_score_known_mean"] = 0.0
+            self.log_dict["stats_g_score_global_mean"] = 0.0
 
         # noise / score 统计：检查模型输出是否异常
         with torch.no_grad():

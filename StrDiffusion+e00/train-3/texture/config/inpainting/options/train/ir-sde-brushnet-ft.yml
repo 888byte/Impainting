@@ -158,6 +158,10 @@ train:
   is_weighted: False
   loss_type: l1
   weight: 1.0
+  # Current BrushNet/UNet wrappers return (noise, noise) for legacy compatibility.
+  # The second tensor is NOT an independent 1-channel g_score gate, so keep this
+  # auxiliary loss disabled unless a real gate head is implemented.
+  enable_g_score_aux: false
   # Auxiliary supervision for the model-implied x0.  It keeps the final
   # reverse result in the target color domain and prevents white-hole
   # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
