@@ -766,29 +766,35 @@ class DenoisingModel(BaseModel):
                     S_infer_optimum, self.S_GT, infer_timesteps
                 )
 
-            infer_model_output = sde.noise_fn(
-                infer_state,
-                infer_timesteps.squeeze(),
-                S_infer_optimum,
-                **brushnet_kwargs,
-            )
-            infer_noise = infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output
-            infer_x0_hat = self._estimate_x0_from_noise(
-                sde=sde,
-                xt=infer_state,
-                mu=self.condition,
-                noise=infer_noise,
-                timesteps=infer_timesteps,
-            )
-            infer_x0_hat_for_loss = torch.nan_to_num(
-                infer_x0_hat, nan=0.0, posinf=2.0, neginf=-1.0
-            ).clamp(-1.0, 2.0)
-            infer_x0_hat_clamped = infer_x0_hat.clamp(0.0, 1.0)
-            infer_x0_loss_components = self.loss_fn.compute_components(
-                infer_x0_hat_for_loss, training_target, self.mask
-            )
-            infer_x0_loss = infer_x0_loss_components["loss_total"]
-            infer_x0_weighted = self.infer_x0_loss_weight * infer_x0_loss
+            # NOTE: wrapped in no_grad to avoid a second full forward pass keeping
+            # activations alive.  This branch currently serves as a diagnostic
+            # monitor (stats_infer_x0_hat_hole_*) rather than a training signal.
+            # Remove the no_grad context once the loss is confirmed effective and
+            # sufficient VRAM is available.
+            with torch.no_grad():
+                infer_model_output = sde.noise_fn(
+                    infer_state,
+                    infer_timesteps.squeeze(),
+                    S_infer_optimum,
+                    **brushnet_kwargs,
+                )
+                infer_noise = infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output
+                infer_x0_hat = self._estimate_x0_from_noise(
+                    sde=sde,
+                    xt=infer_state,
+                    mu=self.condition,
+                    noise=infer_noise,
+                    timesteps=infer_timesteps,
+                )
+                infer_x0_hat_for_loss = torch.nan_to_num(
+                    infer_x0_hat, nan=0.0, posinf=2.0, neginf=-1.0
+                ).clamp(-1.0, 2.0)
+                infer_x0_hat_clamped = infer_x0_hat.clamp(0.0, 1.0)
+                infer_x0_loss_components = self.loss_fn.compute_components(
+                    infer_x0_hat_for_loss, training_target, self.mask
+                )
+                infer_x0_loss = infer_x0_loss_components["loss_total"]
+            infer_x0_weighted = None  # no gradient signal; monitor only
         # 总损失 = 扩散损失 + x0重建辅助损失 + Mu-Denoiser损失（如果有）
         total_loss = loss
         if x0_recon_weighted is not None:
