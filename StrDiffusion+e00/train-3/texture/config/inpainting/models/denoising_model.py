@@ -223,6 +223,29 @@ class DenoisingModel(BaseModel):
                     f"clamp_b_min={self.x0_recon_clamp_b_min}, "
                     f"high_t_decay={self.x0_high_t_decay}"
                 )
+            # Extra mural inpainting bootstrap loss.
+            #
+            # The normal one-step target samples xt from the forward process of
+            # training_target, so hole pixels still contain B(t) * target
+            # information.  In inference, however, the hole part of x_init is
+            # condition_mu (=0 in holes) plus noise.  If the reverse trajectory
+            # drifts off-manifold, late low-noise steps see blank/white holes
+            # that the model was not trained to correct.  This auxiliary branch
+            # keeps the SDE formula unchanged but trains the same network call on
+            # an inference-like state: known area follows the normal forward
+            # state, hole area is blank/noisy from condition_mu.  It directly
+            # supervises the implied x0 against the target-domain GT.
+            self.infer_x0_loss_weight = float(train_opt.get("infer_x0_loss_weight", 0.0))
+            self.infer_x0_loss_start_iter = int(train_opt.get("infer_x0_loss_start_iter", 0))
+            self.infer_x0_t_min_ratio = float(train_opt.get("infer_x0_t_min_ratio", 0.10))
+            self.infer_x0_t_max_ratio = float(train_opt.get("infer_x0_t_max_ratio", 0.70))
+            if self.infer_x0_loss_weight > 0:
+                logger.info(
+                    "[Model] inference-like blank-hole x0 loss enabled: "
+                    f"weight={self.infer_x0_loss_weight}, "
+                    f"start_iter={self.infer_x0_loss_start_iter}, "
+                    f"t_range=[{self.infer_x0_t_min_ratio}, {self.infer_x0_t_max_ratio}]"
+                )
 
             # optimizers
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
@@ -662,6 +685,11 @@ class DenoisingModel(BaseModel):
         x0_loss_components = None
         x0_hat = None
         x0_hat_clamped = None
+        infer_x0_loss = None
+        infer_x0_weighted = None
+        infer_x0_loss_components = None
+        infer_x0_hat_clamped = None
+        infer_timesteps = None
         if (
             self.x0_recon_loss_weight > 0
             and step >= self.x0_recon_loss_start_iter
@@ -694,10 +722,79 @@ class DenoisingModel(BaseModel):
             else:
                 decay_factor = 1.0
             x0_recon_weighted = self.x0_recon_loss_weight * decay_factor * x0_recon_loss        
+
+        # Inference-like blank-hole x0 loss.
+        #
+        # This branch is deliberately different from the normal forward xt:
+        # known pixels stay on the standard forward trajectory, while hole
+        # pixels are sampled from the actual inference start distribution
+        # (condition_mu + noise, with condition_mu=0 in holes).  It prevents the
+        # model from only learning teacher-forced states that already contain
+        # B(t) * target in the hole and then turning white during multi-step
+        # inference when that target component is absent.
+        if (
+            self.infer_x0_loss_weight > 0
+            and step >= self.infer_x0_loss_start_iter
+        ):
+            T_val = int(getattr(sde, "T", 400))
+            t_min = max(2, min(T_val, int(round(T_val * self.infer_x0_t_min_ratio))))
+            t_max = max(t_min, min(T_val, int(round(T_val * self.infer_x0_t_max_ratio))))
+            batch = training_target.shape[0]
+            infer_timesteps = torch.randint(
+                t_min,
+                t_max + 1,
+                (batch, 1, 1, 1),
+                device=self.device,
+            ).long()
+
+            with torch.no_grad():
+                normal_state_mean = sde.mu_bar(training_target, infer_timesteps)
+                sigma_bar_infer = sde.sigma_bar(infer_timesteps).to(
+                    dtype=training_target.dtype, device=training_target.device
+                )
+                blank_hole_state = self.condition + torch.randn_like(training_target) * sigma_bar_infer
+                infer_state = (
+                    normal_state_mean.to(dtype=training_target.dtype, device=training_target.device) * self.mask
+                    + blank_hole_state * (1 - self.mask)
+                ).to(torch.float32)
+                _, S_infer_optimum = self.S_sde.generate_random_states_texture(
+                    x0=self.S_GT,
+                    mu=self.S_LQ * self.mask,
+                    timesteps=infer_timesteps,
+                )
+                S_infer_optimum = self.S_sde.reverse_optimum_step(
+                    S_infer_optimum, self.S_GT, infer_timesteps
+                )
+
+            infer_model_output = sde.noise_fn(
+                infer_state,
+                infer_timesteps.squeeze(),
+                S_infer_optimum,
+                **brushnet_kwargs,
+            )
+            infer_noise = infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output
+            infer_x0_hat = self._estimate_x0_from_noise(
+                sde=sde,
+                xt=infer_state,
+                mu=self.condition,
+                noise=infer_noise,
+                timesteps=infer_timesteps,
+            )
+            infer_x0_hat_for_loss = torch.nan_to_num(
+                infer_x0_hat, nan=0.0, posinf=2.0, neginf=-1.0
+            ).clamp(-1.0, 2.0)
+            infer_x0_hat_clamped = infer_x0_hat.clamp(0.0, 1.0)
+            infer_x0_loss_components = self.loss_fn.compute_components(
+                infer_x0_hat_for_loss, training_target, self.mask
+            )
+            infer_x0_loss = infer_x0_loss_components["loss_total"]
+            infer_x0_weighted = self.infer_x0_loss_weight * infer_x0_loss
         # 总损失 = 扩散损失 + x0重建辅助损失 + Mu-Denoiser损失（如果有）
         total_loss = loss
         if x0_recon_weighted is not None:
             total_loss = total_loss + x0_recon_weighted
+        if infer_x0_weighted is not None:
+            total_loss = total_loss + infer_x0_weighted
         if mu_denoiser_loss is not None:
             total_loss = total_loss + mu_denoiser_loss
         
@@ -736,6 +833,24 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_x0_hole_weighted"] = (
             float(x0_loss_components["loss_hole_weighted"].item())
             if x0_loss_components is not None else 0.0
+        )
+        self.log_dict["loss_infer_x0"] = float(infer_x0_weighted.item()) if infer_x0_weighted is not None else 0.0
+        self.log_dict["loss_infer_x0_raw"] = float(infer_x0_loss.item()) if infer_x0_loss is not None else 0.0
+        self.log_dict["loss_infer_x0_known"] = (
+            float(infer_x0_loss_components["loss_known"].item())
+            if infer_x0_loss_components is not None else 0.0
+        )
+        self.log_dict["loss_infer_x0_hole"] = (
+            float(infer_x0_loss_components["loss_hole"].item())
+            if infer_x0_loss_components is not None else 0.0
+        )
+        self.log_dict["loss_infer_x0_hole_weighted"] = (
+            float(infer_x0_loss_components["loss_hole_weighted"].item())
+            if infer_x0_loss_components is not None else 0.0
+        )
+        self.log_dict["stats_infer_timestep_mean"] = (
+            float(infer_timesteps.detach().float().mean().item())
+            if infer_timesteps is not None else 0.0
         )
         self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
         self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
@@ -827,6 +942,23 @@ class DenoisingModel(BaseModel):
         else:
             self.log_dict["stats_x0_hat_hole_mean"] = 0.0
             self.log_dict["stats_x0_hat_hole_white_ratio"] = 0.0
+
+        if infer_x0_hat_clamped is not None:
+            mask_hole = (1 - self.mask).to(
+                dtype=infer_x0_hat_clamped.dtype,
+                device=infer_x0_hat_clamped.device,
+            )
+            mask_hole_3c = mask_hole.expand(-1, infer_x0_hat_clamped.shape[1], -1, -1)
+            hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+            infer_hole = infer_x0_hat_clamped * mask_hole_3c
+            infer_hole_mean = infer_hole.sum() / hole_denom
+            infer_white_map = (infer_x0_hat_clamped > 0.95).all(dim=1, keepdim=True).float()
+            infer_white_ratio = (infer_white_map * mask_hole).sum() / mask_hole.sum().clamp_min(1.0)
+            self.log_dict["stats_infer_x0_hat_hole_mean"] = float(infer_hole_mean.item())
+            self.log_dict["stats_infer_x0_hat_hole_white_ratio"] = float(infer_white_ratio.item())
+        else:
+            self.log_dict["stats_infer_x0_hat_hole_mean"] = 0.0
+            self.log_dict["stats_infer_x0_hat_hole_white_ratio"] = 0.0
 
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,
