@@ -228,7 +228,7 @@ class DenoisingModel(BaseModel):
             # The normal one-step target samples xt from the forward process of
             # training_target, so hole pixels still contain B(t) * target
             # information.  In inference, however, the hole part of x_init is
-            # condition_mu (=0 in holes) plus noise.  If the reverse trajectory
+            # condition_mu plus noise (known-only mode uses 0 in holes).  If the reverse trajectory
             # drifts off-manifold, late low-noise steps see blank/white holes
             # that the model was not trained to correct.  This auxiliary branch
             # keeps the SDE formula unchanged but trains the same network call on
@@ -728,7 +728,7 @@ class DenoisingModel(BaseModel):
         # This branch is deliberately different from the normal forward xt:
         # known pixels stay on the standard forward trajectory, while hole
         # pixels are sampled from the actual inference start distribution
-        # (condition_mu + noise, with condition_mu=0 in holes).  It prevents the
+        # (condition_mu + noise; known-only mode uses 0 in holes).  It prevents the
         # model from only learning teacher-forced states that already contain
         # B(t) * target in the hole and then turning white during multi-step
         # inference when that target component is absent.
@@ -918,8 +918,8 @@ class DenoisingModel(BaseModel):
             (timesteps_float >= (high_t_min_ratio * float(getattr(sde, "T", 400)))).float().mean().item()
         )
 
-        # condition_mu is known-region only; hole color/texture guidance comes from BrushNet prior, not SDE μ.
-        texture_condition_gap = (self.condition - self.original_degraded * self.mask).abs().mean()
+        # Compare condition to observed degraded only on known pixels; condition_mu may include a target-domain hole anchor.
+        texture_condition_gap = ((self.condition - self.original_degraded) * self.mask).abs().sum() / self.mask.expand_as(self.condition).sum().clamp_min(1.0)
         self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
         condition_target_gap = (self.condition - training_target * self.mask).abs().mean()
         self.log_dict["condition_target_gap"] = float(condition_target_gap.item())

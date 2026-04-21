@@ -398,12 +398,22 @@ class DenoisingModel(BaseModel):
             ).clamp(0.0, 1.0)
         else:
             mu_clean_lut = lut_transformed
-        # Keep original inpainting SDE semantics: condition_mu is known-region only.
-        # MuCleanr cleans target-domain LUT values on known pixels; holes remain
-        # unconditioned for the texture network/SDE to synthesize.  The LUT/color
-        # prior in holes is still provided to BrushNet as a reference, but it must
-        # not become the SDE drift attractor.
-        condition_mu = mu_clean_lut * mask_known
+        # SDE mu construction must match training.  Do not use raw degraded input.
+        # known_only preserves the original inpainting semantics; condition_lut anchors
+        # holes with the target-domain LUT estimate; safe_prior uses the confidence-gated
+        # BrushNet prior and should be treated as an ablation.
+        mu_hole_mode = self.inference_opt.get("sde_mu_hole_mode", "known_only")
+        if mu_hole_mode == "known_only":
+            condition_mu = mu_clean_lut * mask_known
+        elif mu_hole_mode == "condition_lut":
+            condition_mu = mu_clean_lut * mask_known + lut_transformed * mask_hole
+        elif mu_hole_mode == "safe_prior":
+            condition_mu = mu_clean_lut * mask_known + color_prior * mask_hole
+        else:
+            raise ValueError(
+                f"Unsupported inference.sde_mu_hole_mode={mu_hole_mode!r}; "
+                "expected known_only|condition_lut|safe_prior"
+            )
 
         return {
             "denoised_original": denoised_original,

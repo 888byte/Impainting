@@ -124,6 +124,9 @@ def _build_tb_scalar_map(logs):
     add("stats/target_lut_delta", "stats_target_lut_delta")
     add("stats/mu_known_mean", "stats_mu_known_mean")
     add("stats/mu_known_std", "stats_mu_known_std")
+    add("stats/cond_lut_hole_mean", "stats_cond_lut_hole_mean")
+    add("stats/cond_lut_hole_std", "stats_cond_lut_hole_std")
+    add("stats/sde_mu_hole_mean", "stats_sde_mu_hole_mean")
     add("stats/x0_hat_hole_mean", "stats_x0_hat_hole_mean")
     add("stats/x0_hat_hole_white_ratio", "stats_x0_hat_hole_white_ratio")
     add("stats/infer_x0_hat_hole_mean", "stats_infer_x0_hat_hole_mean")
@@ -650,12 +653,22 @@ def main():
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    # Keep original inpainting SDE semantics: mu/condition is known-region only.
-                    # MuCleanr still cleans the target-domain condition_lut on known pixels,
-                    # but the hole region is left unconditioned for the original texture SDE
-                    # to generate/restore texture. ColorPrior/CondLUT are passed to BrushNet
-                    # as auxiliary references, not as the SDE drift attractor in holes.
-                    condition_mu = mu_clean_lut * mask_for_sde
+                    # SDE mu construction for mural mode.
+                    # Default remains original known-only semantics, but mural inpainting can
+                    # explicitly anchor hole pixels with a target-domain estimate.  Never use
+                    # raw degraded-domain pixels here.  ``condition_lut`` is the safest hole
+                    # anchor; ``safe_prior`` is confidence-gated and only for ablation.
+                    mu_hole_mode = opt.get("train", {}).get("sde_mu_hole_mode", "known_only")
+                    mask_hole_for_sde = 1 - mask_for_sde
+                    if mu_hole_mode == "known_only":
+                        condition_mu = mu_clean_lut * mask_for_sde
+                    elif mu_hole_mode == "condition_lut":
+                        condition_mu = mu_clean_lut * mask_for_sde + condition_lut * mask_hole_for_sde
+                    elif mu_hole_mode == "safe_prior":
+                        hole_mu = color_prior_for_sde if color_prior_for_sde is not None else condition_lut
+                        condition_mu = mu_clean_lut * mask_for_sde + hole_mu * mask_hole_for_sde
+                    else:
+                        raise ValueError(f"Unsupported train.sde_mu_hole_mode={mu_hole_mode!r}; expected known_only|condition_lut|safe_prior")
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu

@@ -161,6 +161,8 @@ inference:
   #### 是否保存 reverse 过程状态图
   save_states: true
   deterministic_reverse: false  # 随机步能生成纹理细节，效果优于均值步
+  # Must match training train.sde_mu_hole_mode: known_only | condition_lut | safe_prior.
+  sde_mu_hole_mode: condition_lut
   known_area_projection: true
   compose_mask_dilate: 3
   compose_feather: 4

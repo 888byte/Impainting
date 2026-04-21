@@ -182,6 +182,9 @@ train:
   infer_x0_loss_start_iter: 0
   infer_x0_t_min_ratio: 0.10
   infer_x0_t_max_ratio: 0.70
+  # SDE mu in hole pixels: known_only | condition_lut | safe_prior.
+  # condition_lut is the recommended stabilizing ablation for mural mode; it stays in target color domain.
+  sde_mu_hole_mode: condition_lut
 
   manual_seed: 0
 
