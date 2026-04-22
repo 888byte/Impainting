@@ -135,9 +135,80 @@ class DenoisingModel(BaseModel):
             )
 
         self.load()
+        self._log_route_config()
         self.output = None
         self.raw_output = None
         self.debug_outputs: Dict[str, torch.Tensor] = {}
+
+    def _unwrap_model(self, network):
+        return network.module if isinstance(network, DataParallel) else network
+
+    def _log_route_config(self):
+        """Log the effective inference route before running samples.
+
+        The no-retrain ablation keeps the wrapper class for checkpoint
+        compatibility, but disables BrushNet/MGLC/Mu-Denoiser through config.
+        This log line is the quickest way to verify that the current run is
+        actually on the intended original StrDiffusion trunk.
+        """
+        module = self._unwrap_model(self.model)
+        brushnet_opt = self.opt.get("brushnet", {})
+        texture_core_opt = self.opt.get("texture_core", {})
+        mu_opt = self.opt.get("mu_denoiser", {})
+        inference_opt = self.inference_opt
+        network_name = self.opt.get("network_G", {}).get("which_model_G")
+        brushnet_runtime = bool(getattr(module, "brushnet_enabled", False))
+        texture_core_runtime = bool(getattr(module, "texture_core_enabled", False))
+        no_extra_route = (
+            network_name == "ConditionalUNetWithBrushNet"
+            and not brushnet_runtime
+            and not texture_core_runtime
+            and not self.use_mu_denoiser
+        )
+
+        logger.info(
+            "[RouteCheck] network_G=%s model_class=%s no_extra_route=%s",
+            network_name,
+            module.__class__.__name__,
+            no_extra_route,
+        )
+        logger.info(
+            "[RouteCheck] brushnet.enabled(config/runtime)=%s/%s "
+            "texture_core.enabled(config/runtime)=%s/%s "
+            "mu_denoiser.enabled(config/available/runtime/has_weights)=%s/%s/%s/%s "
+            "restore_S_guidance=%s inference.mode=%s sde_mu_hole_mode=%s "
+            "save_states=%s save_intermediates=%s discriminator_guidance=%s "
+            "deterministic_reverse=%s known_area_projection=%s",
+            bool(brushnet_opt.get("enabled", False)),
+            brushnet_runtime,
+            bool(texture_core_opt.get("enabled", False)),
+            texture_core_runtime,
+            bool(mu_opt.get("enabled", False)),
+            HAS_MU_DENOISER,
+            self.use_mu_denoiser,
+            getattr(self, "mu_denoiser_has_weights", False),
+            self.restore_s_guidance,
+            self.inference_mode,
+            inference_opt.get("sde_mu_hole_mode", "known_only"),
+            bool(inference_opt.get("save_states", False)),
+            self.save_intermediates,
+            self.discriminator_guidance,
+            self.deterministic_reverse,
+            self.known_area_projection,
+        )
+        logger.info(
+            "[RouteCheck] pretrain_model_G=%s pretrain_model_Gs=%s pretrain_model_D=%s strict_load=%s",
+            self.opt["path"].get("pretrain_model_G"),
+            self.opt["path"].get("pretrain_model_Gs"),
+            self.opt["path"].get("pretrain_model_D"),
+            self.opt["path"].get("strict_load", True),
+        )
+        if no_extra_route:
+            logger.info(
+                "[NoExtraRoute] BrushNet/MGLC/Mu-Denoiser are bypassed; "
+                "the wrapper is kept only for current-checkpoint key compatibility. "
+                "restore_S_guidance stays enabled when configured, matching the original StrDiffusion structure path."
+            )
 
     def feed_data(
         self,
@@ -502,6 +573,17 @@ class DenoisingModel(BaseModel):
                 sde.set_mu(self.condition)
                 x_init = self.condition
                 self.state = sde.noise_state(x_init)
+                logger.info(
+                    "[RouteCheck] sample=%s x_init=condition_mu sde_mu_hole_mode=%s "
+                    "restore_S_guidance=%s brushnet_runtime=%s texture_core_runtime=%s "
+                    "mu_denoiser_runtime=%s",
+                    self.sample_name,
+                    self.inference_opt.get("sde_mu_hole_mode", "known_only"),
+                    self.restore_s_guidance,
+                    bool(getattr(self._unwrap_model(self.model), "brushnet_enabled", False)),
+                    bool(getattr(self._unwrap_model(self.model), "texture_core_enabled", False)),
+                    self.use_mu_denoiser,
+                )
 
                 # Structure guidance should come from the target-domain estimate
                 # (lut_transformed), not from the degraded observed input.
@@ -781,6 +863,11 @@ class DenoisingModel(BaseModel):
                 else:
                     self.mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
                     self.mu_denoiser_has_weights = True
+            elif mu_denoiser_state:
+                logger.info(
+                    "[LoadCheck] ignored %d mu_denoiser tensors because mu_denoiser.enabled=false",
+                    len(mu_denoiser_state),
+                )
 
 
         load_path_gs = self.opt["path"].get("pretrain_model_Gs")

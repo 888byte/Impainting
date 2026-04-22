@@ -178,10 +178,13 @@ train:
   # 训练普通 xt 时，hole 里仍带有 B(t)*training_target 信息；推理时 hole 是 condition_mu(=0)+noise。
   # 这个辅助分支只把 hole 改成推理式 blank/noisy 状态，直接监督 x0，专门防止多步反推后变白。
   # 不改 SDE 公式、不改网络结构、不关闭 MuCleanr / 判别器 / 结构 guidance。
-  infer_x0_loss_weight: 0.03
+  infer_x0_loss_weight: 0.0  # no-retrain/original-route ablation: keep infer_x0 off
   infer_x0_loss_start_iter: 0
   infer_x0_t_min_ratio: 0.10
   infer_x0_t_max_ratio: 0.70
+  infer_x0_grad: false
+  infer_x0_loss_interval: 1
+  infer_x0_microbatch: 0
   # SDE mu in hole pixels: known_only | condition_lut | safe_prior.
   # condition_lut is the recommended stabilizing ablation for mural mode; it stays in target color domain.
   sde_mu_hole_mode: condition_lut
