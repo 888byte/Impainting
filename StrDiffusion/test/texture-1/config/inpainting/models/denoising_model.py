@@ -215,6 +215,13 @@ class DenoisingModel(BaseModel):
                 "the wrapper is kept only for current-checkpoint key compatibility. "
                 "restore_S_guidance stays enabled when configured, matching the original StrDiffusion structure path."
             )
+            if inference_opt.get("sde_mu_hole_mode", "known_only") != "known_only":
+                logger.warning(
+                    "[NoExtraRoute] inference.sde_mu_hole_mode=%s keeps non-zero content in the hole. "
+                    "For the original StrDiffusion inpainting start, use known_only so the clean x_init hole is black "
+                    "before noise_state adds small Gaussian noise.",
+                    inference_opt.get("sde_mu_hole_mode", "known_only"),
+                )
             if self.discriminator_guidance or not self.deterministic_reverse:
                 logger.warning(
                     "[NoExtraRoute] sampler is still not isolated: discriminator_guidance=%s, "
@@ -587,16 +594,28 @@ class DenoisingModel(BaseModel):
                 sde.set_mu(self.condition)
                 x_init = self.condition
                 self.state = sde.noise_state(x_init)
+                x_init_hole = self._masked_rgb_stats(x_init, self.mask_hole)
+                noisy_start_hole = self._masked_rgb_stats(self.state, self.mask_hole)
                 logger.info(
                     "[RouteCheck] sample=%s x_init=condition_mu sde_mu_hole_mode=%s "
                     "restore_S_guidance=%s brushnet_runtime=%s texture_core_runtime=%s "
-                    "mu_denoiser_runtime=%s",
+                    "mu_denoiser_runtime=%s "
+                    "x_init_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) "
+                    "noisy_start_hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f)",
                     self.sample_name,
                     self.inference_opt.get("sde_mu_hole_mode", "known_only"),
                     self.restore_s_guidance,
                     bool(getattr(self._unwrap_model(self.model), "brushnet_enabled", False)),
                     bool(getattr(self._unwrap_model(self.model), "texture_core_enabled", False)),
                     self.use_mu_denoiser,
+                    x_init_hole.get("mean", 0.0),
+                    x_init_hole.get("min", 0.0),
+                    x_init_hole.get("max", 0.0),
+                    x_init_hole.get("white_ratio", 0.0),
+                    noisy_start_hole.get("mean", 0.0),
+                    noisy_start_hole.get("min", 0.0),
+                    noisy_start_hole.get("max", 0.0),
+                    noisy_start_hole.get("white_ratio", 0.0),
                 )
 
                 # Structure guidance should come from the target-domain estimate
@@ -672,6 +691,7 @@ class DenoisingModel(BaseModel):
                     "mu_clean_lut": prepared["mu_clean_lut"],
                     "mu_clean": mu_clean,
                     "x_init": x_init,
+                    "x_start_noisy": self.state,
                     "structure_gray": structure_gray,
                     "structure_edge": structure_edge,
                     "compose_alpha": compose_alpha,

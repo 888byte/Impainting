@@ -1,7 +1,7 @@
-#### No-retrain ablation profile: keep ConditionalUNetWithBrushNet wrapper for checkpoint compatibility,
-#### but bypass BrushNet, MGLC(texture_core), and Mu-Denoiser.
-#### For white-hole diagnosis this also disables discriminator guidance and uses deterministic reverse.
-#### restore_S_guidance is intentionally kept on as the original StrDiffusion structure path.
+#### No-retrain original StrDiffusion-path diagnostic.
+#### Clean x_init/mu keeps known pixels only and leaves hole black (known_only); noise_state then adds small Gaussian noise.
+#### BrushNet/MGLC/Mu-Denoiser are bypassed.
+#### restore_S_guidance is kept on as the original StrDiffusion structure path.
 name: ir-sde-no-extra-current-domain
 suffix: null
 model: denoising
@@ -97,7 +97,7 @@ inference:
   compose_mode: auto
   save_states: true
   deterministic_reverse: true
-  sde_mu_hole_mode: condition_lut
+  sde_mu_hole_mode: known_only
   known_area_projection: true
   compose_mask_dilate: 3
   compose_feather: 4

@@ -1,5 +1,7 @@
-#### Diagnostic only: no BrushNet/MGLC/Mu-Denoiser, deterministic sampler, no discriminator,
-#### and restore_S_guidance=false to isolate whether the structure SPADE path drives white holes.
+#### No-retrain original StrDiffusion-path diagnostic.
+#### Clean x_init/mu keeps known pixels only and leaves hole black (known_only); noise_state then adds small Gaussian noise.
+#### BrushNet/MGLC/Mu-Denoiser are bypassed.
+#### restore_S_guidance=false here is diagnostic-only for isolating the structure SPADE path.
 name: ir-sde-no-extra-no-structure-current-domain
 suffix: null
 model: denoising
@@ -95,7 +97,7 @@ inference:
   compose_mode: auto
   save_states: true
   deterministic_reverse: true
-  sde_mu_hole_mode: condition_lut
+  sde_mu_hole_mode: known_only
   known_area_projection: true
   compose_mask_dilate: 3
   compose_feather: 4

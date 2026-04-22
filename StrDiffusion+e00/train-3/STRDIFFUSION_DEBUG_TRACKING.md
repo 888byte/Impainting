@@ -128,3 +128,33 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 
 1. 关掉 `restore_S_guidance` 后明显不白：优先修结构 S/edge/SPADE 路径。
 2. 关掉 `restore_S_guidance` 后仍白：优先查当前 32000_G 主干 score 是否已被训练分布带偏，或者当前推理 condition/x0 与训练域仍不一致。
+
+## 2026-04-22 23:00 去噪起点修正
+
+用户指出推理去噪起点不对：原版 StrDiffusion inpainting 的 clean start/mu 应该是 `known_pixels * mask_known`，hole 区在加噪前是黑色；`noise_state()` 之后 hole 才会有小幅 Gaussian noise。
+
+日志确认之前 `no-structure-current-domain` 使用了：
+
+- `sde_mu_hole_mode=condition_lut`
+- `cond_hole(mean≈0.69~0.81)`
+
+这说明 hole 被 LUT 内容预填了，确实不是原版黑洞起点，也会导致去噪过程看起来只是轻微调整。
+
+已修改：
+
+- `ir-sde-no-extra-current-domain.yml` 改为 `sde_mu_hole_mode: known_only`
+- `ir-sde-no-extra-no-structure-current-domain.yml` 改为 `sde_mu_hole_mode: known_only`
+- 推理日志新增 `x_init_hole(...)` 和 `noisy_start_hole(...)`
+- 中间图新增 `x_start_noisy.png`
+
+下一次应优先跑带结构的原版路径：
+
+`D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-current-domain.yml`
+
+期望日志：
+
+- `sde_mu_hole_mode=known_only`
+- `x_init_hole(mean≈0,min≈0,max≈0,white=0)`
+- `noisy_start_hole` 为接近 0 的小噪声，而不是 LUT 灰/白块
+
+如果这个起点正确后仍没有有效去噪，再查主干 score/训练分布。
