@@ -1,5 +1,6 @@
 #### No-retrain ablation profile: keep ConditionalUNetWithBrushNet wrapper for checkpoint compatibility,
 #### but bypass BrushNet, MGLC(texture_core), and Mu-Denoiser.
+#### For white-hole diagnosis this also disables discriminator guidance and uses deterministic reverse.
 #### restore_S_guidance is intentionally kept on as the original StrDiffusion structure path.
 name: ir-sde-no-extra-original-semantics
 suffix: null
@@ -95,7 +96,7 @@ inference:
   mode: brushnet_final
   compose_mode: auto
   save_states: true
-  deterministic_reverse: false
+  deterministic_reverse: true
   sde_mu_hole_mode: known_only
   known_area_projection: true
   compose_mask_dilate: 3
@@ -105,4 +106,4 @@ inference:
   compose_white_threshold: 0.95
   save_intermediates: true
   discriminator_guidance:
-    enabled: true
+    enabled: false

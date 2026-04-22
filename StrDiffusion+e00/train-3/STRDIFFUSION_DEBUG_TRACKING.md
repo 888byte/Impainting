@@ -68,3 +68,31 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 - 先贴对应 run 的 `test_*.log` 中 `[RouteCheck]`、`[LoadCheck]`、`[Inference Debug]` 几行。
 - 同时贴同一样本的 `x_init.png`、`condition_mu.png`、`state_1/state_10/state_25/state_50/state_100/final.png`。
 - 只在 no-extra 路径复现后，再决定是否逐个打开 BrushNet、MGLC、Mu-Denoiser 做二分定位。
+
+## 2026-04-22 21:20 日志复盘：no-extra 仍发白
+
+已查看两份日志：
+
+- `C:\Users\admin\Desktop\test_ir-sde-no-extra-current-domain_260422-204651.log`
+- `C:\Users\admin\Desktop\test_ir-sde-no-extra-original-semantics_260422-205916.log`
+
+关键事实：
+
+- `no_extra_route=True`，说明 BrushNet/MGLC/Mu-Denoiser 已经真正关闭。
+- 当前权重 `32000_G.pth` 主干加载完整：`loaded 231/231`，新增分支为 `unexpected=147`，符合关闭新增模块后的预期。
+- 但两次运行仍是 `discriminator_guidance=True` 且 `deterministic_reverse=False`。
+- 因此这两次还不是“纯 no-extra sampler”诊断；仍混入判别器候选选择和随机反推噪声。
+- `condition_lut` 版本中，`cond_hole` 和 `prior_hole` 都不是白色，但 `raw_hole/final_hole` 白色比例很高，说明发白发生在 reverse sampler/score 轨迹中，而不是输入先验直接是白色。
+
+已更新两个 no-extra YAML：
+
+- `inference.deterministic_reverse: true`
+- `inference.discriminator_guidance.enabled: false`
+
+下一步先重跑 `ir-sde-no-extra-current-domain.yml`，日志应出现：
+
+- `no_extra_route=True pure_no_extra_route=True`
+- `discriminator_guidance=False`
+- `deterministic_reverse=True`
+
+如果 pure no-extra 仍白，再回查主干 score / S guidance / checkpoint 主干训练分布；如果 pure no-extra 不白，问题优先归因于判别器引导或随机 reverse noise。

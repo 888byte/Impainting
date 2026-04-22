@@ -165,12 +165,18 @@ class DenoisingModel(BaseModel):
             and not texture_core_runtime
             and not self.use_mu_denoiser
         )
+        pure_no_extra_route = (
+            no_extra_route
+            and not self.discriminator_guidance
+            and self.deterministic_reverse
+        )
 
         logger.info(
-            "[RouteCheck] network_G=%s model_class=%s no_extra_route=%s",
+            "[RouteCheck] network_G=%s model_class=%s no_extra_route=%s pure_no_extra_route=%s",
             network_name,
             module.__class__.__name__,
             no_extra_route,
+            pure_no_extra_route,
         )
         logger.info(
             "[RouteCheck] brushnet.enabled(config/runtime)=%s/%s "
@@ -209,6 +215,14 @@ class DenoisingModel(BaseModel):
                 "the wrapper is kept only for current-checkpoint key compatibility. "
                 "restore_S_guidance stays enabled when configured, matching the original StrDiffusion structure path."
             )
+            if self.discriminator_guidance or not self.deterministic_reverse:
+                logger.warning(
+                    "[NoExtraRoute] sampler is still not isolated: discriminator_guidance=%s, "
+                    "deterministic_reverse=%s. For the next white-hole diagnosis, set "
+                    "inference.discriminator_guidance.enabled=false and inference.deterministic_reverse=true.",
+                    self.discriminator_guidance,
+                    self.deterministic_reverse,
+                )
 
     def feed_data(
         self,
