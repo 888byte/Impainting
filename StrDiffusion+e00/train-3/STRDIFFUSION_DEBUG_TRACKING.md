@@ -158,3 +158,32 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 - `noisy_start_hole` 为接近 0 的小噪声，而不是 LUT 灰/白块
 
 如果这个起点正确后仍没有有效去噪，再查主干 score/训练分布。
+
+## 2026-04-22 23:35 黑洞起点正确，但纯 mean sampler 无纹理
+
+新日志 `test_ir-sde-no-extra-current-domain_260422-232202.log` 说明：
+
+- `x_init_hole(mean=0,min=0,max=0)`，原版黑洞起点已经正确。
+- `noisy_start_hole` 只有小噪声，起点问题已修正。
+- 在纯诊断路径中：`deterministic_reverse=True` 且 `discriminator_guidance=False`，hole 从黑色逐渐变成浅色/白色均值块，但没有纹理。
+
+这说明当前问题不再是起点错误，而是：关闭所有辅助分支并使用 deterministic mean sampler 时，当前主干只给出均值/颜色趋势，不能生成纹理细节。
+
+新增两个下一步配置：
+
+1. `ir-sde-no-extra-original-sampler-known-only.yml`
+   - BrushNet/MGLC/Mu-Denoiser 仍关闭
+   - `known_only` 黑洞起点
+   - 恢复原版 sampler 风格：`deterministic_reverse=false` + `discriminator_guidance=true`
+   - 用来确认原版随机+D sampler 是否能给当前主干带回纹理。
+
+2. `ir-sde-brushnet-only-known-start.yml`
+   - 黑洞起点 + 原版结构引导
+   - 只打开 BrushNet，关闭 MGLC/Mu-Denoiser/D guidance
+   - 用来验证“只注入颜色先验图，不改主干结构”是否能提供纹理/颜色参考。
+
+判断：
+
+- 如果 original-sampler 有纹理：之前纯 deterministic 诊断过于保守，最终路径需要保留原版 sampler。
+- 如果 original-sampler 仍无纹理，但 brushnet-only 有纹理：说明当前主干单独不够，BrushNet prior 是必要条件。
+- 如果两者都无纹理：优先查 BrushNet 输入/特征注入强度，或当前 32000_G 主干训练分布已经偏成均值填充。
