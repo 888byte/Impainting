@@ -96,3 +96,35 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 - `deterministic_reverse=True`
 
 如果 pure no-extra 仍白，再回查主干 score / S guidance / checkpoint 主干训练分布；如果 pure no-extra 不白，问题优先归因于判别器引导或随机 reverse noise。
+
+## 2026-04-22 21:50 继续复盘：纯 no-extra 仍发白后的下一步
+
+如果新 run 已确认：
+
+- `no_extra_route=True`
+- `pure_no_extra_route=True`
+- `discriminator_guidance=False`
+- `deterministic_reverse=True`
+
+但 mask 区仍然发白，则可以排除 BrushNet / MGLC / Mu-Denoiser / 判别器 / 随机 reverse noise 是主因。
+
+下一步优先隔离 `restore_S_guidance` / SPADE 结构路径：新增两个诊断配置：
+
+- `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-no-structure-current-domain.yml`
+- `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-no-structure-known-only.yml`
+
+它们保持：
+
+- BrushNet=false
+- MGLC=false
+- Mu-Denoiser=false
+- D guidance=false
+- deterministic_reverse=true
+- 但 `restore_S_guidance=false`
+
+同时在 `utils/sde_utils.py` 增加 `[Trajectory Debug]`，会在若干关键步记录 hole 的 mean/min/max/white 和 score_abs_mean，用来确认是哪个阶段开始推白。
+
+判断：
+
+1. 关掉 `restore_S_guidance` 后明显不白：优先修结构 S/edge/SPADE 路径。
+2. 关掉 `restore_S_guidance` 后仍白：优先查当前 32000_G 主干 score 是否已被训练分布带偏，或者当前推理 condition/x0 与训练域仍不一致。

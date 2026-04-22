@@ -7,6 +7,7 @@ still enters here but uses explicit ``mask_known`` / ``mask_hole`` handling.
 """
 
 import abc
+import logging
 import math
 import os
 
@@ -15,6 +16,8 @@ import torch
 import torchvision.utils as tvutils
 from scipy import integrate
 from tqdm import tqdm
+
+logger = logging.getLogger("base")
 
 class SDE(abc.ABC):
     def __init__(self, T, device=None):
@@ -332,6 +335,29 @@ class IRSDE(SDE):
             float(max_val.item()),
         )
 
+    def _masked_abs_mean(self, tensor, mask_hole):
+        if tensor is None or mask_hole is None:
+            return 0.0
+        x = tensor.detach().float().abs()
+        mask = mask_hole.detach().float()
+        if mask.shape[1] != x.shape[1]:
+            mask = mask.expand(-1, x.shape[1], -1, -1)
+        return float((x * mask).sum().div(mask.sum().clamp_min(1.0)).item())
+
+    def _log_reverse_trajectory(self, tag, t, x, score, mask_hole):
+        mean, white, min_val, max_val = self._masked_hole_stats(x, mask_hole)
+        score_abs = self._masked_abs_mean(score, mask_hole)
+        logger.info(
+            "[Trajectory Debug] %s t=%d hole(mean=%.4f,min=%.4f,max=%.4f,white=%.4f) score_abs_mean=%.4f",
+            tag,
+            t,
+            mean,
+            min_val,
+            max_val,
+            white,
+            score_abs,
+        )
+
     def _safe_discriminator_candidate(self, candidate, reference, mask_hole):
         """Keep discriminator guidance from selecting over-white hole proposals.
 
@@ -404,6 +430,14 @@ class IRSDE(SDE):
                 interval = max(1, self.T // 100)
                 if t % interval == 0:
                     self._save_state_image(x_original, save_dir, t // interval)
+                    if (t // interval) in {100, 75, 50, 25, 10, 5, 1}:
+                        self._log_reverse_trajectory(
+                            "enhanced_early",
+                            t,
+                            x_original,
+                            score_original,
+                            mask_hole,
+                        )
 
         # Late stage restores original StrDiffusion behavior: feed current texture
         # grayscale as S.  This lets holes refine texture instead of being forced by
@@ -420,6 +454,14 @@ class IRSDE(SDE):
                 interval = max(1, self.T // 100)
                 if t % interval == 0:
                     self._save_state_image(x_original, save_dir, t // interval)
+                    if (t // interval) in {100, 75, 50, 25, 10, 5, 1}:
+                        self._log_reverse_trajectory(
+                            "enhanced_late",
+                            t,
+                            x_original,
+                            score_original,
+                            mask_hole,
+                        )
 
         # Return the raw model prediction without compositing.
         # denoising_model.test() handles the final known/hole composite.
