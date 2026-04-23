@@ -113,6 +113,21 @@ class DenoisingModel(BaseModel):
         self.structure_source = str(
             self.inference_opt.get("structure_source", "lut")
         ).lower()
+        self.safe_prior_min_reliability = float(
+            self.inference_opt.get("safe_prior_min_reliability", 0.0) or 0.0
+        )
+        self.safe_prior_confidence_power = float(
+            self.inference_opt.get("safe_prior_confidence_power", 1.0) or 1.0
+        )
+        if self.safe_prior_confidence_power <= 0:
+            logger.warning(
+                "Invalid inference.safe_prior_confidence_power=%s; falling back to 1.0",
+                self.safe_prior_confidence_power,
+            )
+            self.safe_prior_confidence_power = 1.0
+        self.confidence_debug_threshold = float(
+            self.inference_opt.get("confidence_debug_threshold", 0.4) or 0.4
+        )
 
         self.lut_processor = None
         lut_path = self.dataset_opt.get("lut_path")
@@ -202,7 +217,9 @@ class DenoisingModel(BaseModel):
             "expected_train_sde_mu_hole_mode=%s "
             "save_states=%s save_intermediates=%s discriminator_guidance=%s "
             "deterministic_reverse=%s known_area_projection=%s "
-            "force_legacy_reverse=%s condition_known_source=%s structure_source=%s",
+            "force_legacy_reverse=%s condition_known_source=%s structure_source=%s "
+            "safe_prior_min_reliability=%.3f safe_prior_confidence_power=%.3f "
+            "confidence_debug_threshold=%.3f",
             bool(brushnet_opt.get("enabled", False)),
             brushnet_runtime,
             getattr(module, "brushnet_feature_scale", None),
@@ -225,6 +242,9 @@ class DenoisingModel(BaseModel):
             self.force_legacy_reverse,
             self.condition_known_source,
             self.structure_source,
+            self.safe_prior_min_reliability,
+            self.safe_prior_confidence_power,
+            self.confidence_debug_threshold,
         )
         if (
             self.expected_train_sde_mu_hole_mode
@@ -432,6 +452,15 @@ class DenoisingModel(BaseModel):
             prior_reliability = torch.ones_like(mask_known)
         else:
             prior_reliability = confidence.to(dtype=condition_lut.dtype, device=condition_lut.device).clamp(0.0, 1.0)
+        if self.safe_prior_confidence_power != 1.0:
+            prior_reliability = prior_reliability.pow(self.safe_prior_confidence_power)
+        if self.safe_prior_min_reliability > 0.0:
+            floor = torch.full_like(
+                prior_reliability,
+                max(0.0, min(1.0, self.safe_prior_min_reliability)),
+            )
+            prior_reliability = torch.maximum(prior_reliability, floor)
+        prior_reliability = prior_reliability.clamp(0.0, 1.0)
 
         # In hole pixels: blend color_prior (inpaint result) by confidence.
         # Low-confidence holes get more lut_transformed, high-confidence get more color_prior.
@@ -508,6 +537,9 @@ class DenoisingModel(BaseModel):
             white_ratio = float((((color_prior > 0.95).all(dim=1, keepdim=True).float() * mask_hole).sum() / mask_hole.sum().clamp_min(1.0)).item())
             conf_hole_mean = float((confidence * mask_hole).sum().div(mask_hole.sum().clamp_min(1.0)).item())
             reliability_hole_mean = float((prior_reliability * mask_hole).sum().div(mask_hole.sum().clamp_min(1.0)).item())
+            reliability_stats = self._masked_scalar_stats(prior_reliability, mask_hole)
+            low_conf = (prior_reliability < self.confidence_debug_threshold).float() * mask_hole
+            low_conf_ratio = float(low_conf.sum().div(mask_hole.sum().clamp_min(1.0)).item())
             logger.info(
                 "[ColorPrior Debug] raw_hole_mean=%.6f hole_mean=%.6f hole_std=%.6f hole_white_ratio=%.6f confidence_hole_mean=%.6f reliability_hole_mean=%.6f",
                 raw_cp_hole_mean,
@@ -516,6 +548,19 @@ class DenoisingModel(BaseModel):
                 white_ratio,
                 conf_hole_mean,
                 reliability_hole_mean,
+            )
+            logger.info(
+                "[Confidence Debug] reliability(min=%.4f,p10=%.4f,p50=%.4f,p90=%.4f,max=%.4f) "
+                "low_ratio_lt%.2f=%.4f safe_prior_min=%.3f conf_power=%.3f",
+                reliability_stats.get("min", 0.0),
+                reliability_stats.get("p10", 0.0),
+                reliability_stats.get("p50", 0.0),
+                reliability_stats.get("p90", 0.0),
+                reliability_stats.get("max", 0.0),
+                self.confidence_debug_threshold,
+                low_conf_ratio,
+                self.safe_prior_min_reliability,
+                self.safe_prior_confidence_power,
             )
 
         if self.use_mu_denoiser and getattr(self, "mu_denoiser_has_weights", False):
@@ -946,6 +991,29 @@ class DenoisingModel(BaseModel):
         denom = mask.sum().clamp_min(1.0)
         return float(((lhs - rhs).abs() * mask).sum().div(denom).item())
 
+    def _masked_scalar_stats(self, tensor, mask):
+        if tensor is None or mask is None:
+            return {}
+        values = tensor.detach().float()
+        mask = mask.detach().float().to(device=values.device)
+        if mask.shape[1] != values.shape[1]:
+            mask = mask.expand(-1, values.shape[1], -1, -1)
+        selected = values[mask > 0.5]
+        if selected.numel() == 0:
+            return {}
+        quantiles = torch.quantile(
+            selected,
+            torch.tensor([0.1, 0.5, 0.9], device=selected.device),
+        )
+        return {
+            "mean": float(selected.mean().item()),
+            "min": float(selected.min().item()),
+            "p10": float(quantiles[0].item()),
+            "p50": float(quantiles[1].item()),
+            "p90": float(quantiles[2].item()),
+            "max": float(selected.max().item()),
+        }
+
     def _log_inference_debug_stats(self, pred_full, final, prepared=None):
         if self.mask_hole is None:
             return
@@ -1008,7 +1076,7 @@ class DenoisingModel(BaseModel):
                 self._masked_l1(lut, gt, self.mask_hole) or 0.0,
                 final_prior_l1,
                 final_lut_l1,
-            )
+                )
             mu_hole_mode = str(self.inference_opt.get("sde_mu_hole_mode", "known_only")).lower()
             if mu_hole_mode != "known_only":
                 logger.info(
@@ -1022,6 +1090,44 @@ class DenoisingModel(BaseModel):
                         if final_lut_l1 < 0.01 or final_prior_l1 < 0.01
                         else "not a pure anchor copy"
                     ),
+                )
+        if prepared is not None and prepared.get("prior_reliability") is not None:
+            reliability = prepared["prior_reliability"].to(device=final.device).detach().float()
+            threshold = self.confidence_debug_threshold
+            low_mask = self.mask_hole * (reliability < threshold).float()
+            high_mask = self.mask_hole * (reliability >= threshold).float()
+            hole_pixels = self.mask_hole.sum().clamp_min(1.0)
+            low_ratio = float(low_mask.sum().div(hole_pixels).item())
+            high_ratio = float(high_mask.sum().div(hole_pixels).item())
+            final_low = self._masked_rgb_stats(final, low_mask)
+            final_high = self._masked_rgb_stats(final, high_mask)
+            logger.info(
+                "[ConfidenceSlice Debug] threshold=%.3f low_ratio=%.4f high_ratio=%.4f "
+                "final_low(mean=%.4f,white=%.4f) final_high(mean=%.4f,white=%.4f)",
+                threshold,
+                low_ratio,
+                high_ratio,
+                final_low.get("mean", 0.0),
+                final_low.get("white_ratio", 0.0),
+                final_high.get("mean", 0.0),
+                final_high.get("white_ratio", 0.0),
+            )
+            if self.state_0 is not None:
+                gt = self.state_0.to(device=final.device)
+                lut = prepared.get("lut_transformed") if prepared is not None else None
+                low_has_pixels = float(low_mask.sum().item()) > 0.0
+                high_has_pixels = float(high_mask.sum().item()) > 0.0
+                logger.info(
+                    "[TargetByConfidence Debug] threshold=%.3f "
+                    "final_gt_low=%.6f prior_gt_low=%.6f lut_gt_low=%.6f "
+                    "final_gt_high=%.6f prior_gt_high=%.6f lut_gt_high=%.6f",
+                    threshold,
+                    self._masked_l1(final, gt, low_mask) if low_has_pixels else float("nan"),
+                    self._masked_l1(self.color_prior, gt, low_mask) if low_has_pixels else float("nan"),
+                    self._masked_l1(lut, gt, low_mask) if low_has_pixels else float("nan"),
+                    self._masked_l1(final, gt, high_mask) if high_has_pixels else float("nan"),
+                    self._masked_l1(self.color_prior, gt, high_mask) if high_has_pixels else float("nan"),
+                    self._masked_l1(lut, gt, high_mask) if high_has_pixels else float("nan"),
                 )
 
     def load(self):

@@ -553,3 +553,75 @@ Interpretation:
 - If current-domain safe-prior remains close to the GT-parity result, the practical no-retrain solution is confirmed.
 - If it collapses, the remaining dependency is not BrushNet but **GT-derived structure/known-source parity**; the next target should be the LUT/current-domain structure source quality, not further tuning BrushNet.
 
+
+## 2026-04-23 21:00 current-domain safe-prior: remaining problem is confidence/LUT fallback
+
+User feedback:
+
+- `ir-sde-no-extra-x7-48000-guarded-safe-prior-current-domain`
+  - high-confidence hole regions now show some texture;
+  - low-confidence regions still remain white / over-bright;
+  - overall is usable-ish but worse than the best GT-parity run.
+
+Log evidence:
+
+- The route is correct:
+  - `no_extra_route=True`
+  - `brushnet.enabled(config/runtime)=False/False`
+  - `texture_core.enabled=False`
+  - `mu_denoiser.enabled=False`
+  - `sde_mu_hole_mode=safe_prior`
+  - `condition_known_source=lut`
+  - `structure_source=lut`
+  - `StructureRoute ... resolved=lut`
+- The current-domain run is still not a pure anchor copy:
+  - `000098_bottom`: `final_gt_l1=0.068701`, `prior_gt_l1=0.075773`, `lut_gt_l1=0.113057`, `final_prior_l1=0.113304`
+  - `000098_center`: `final_gt_l1=0.170197`, `prior_gt_l1=0.204111`, `lut_gt_l1=0.271651`, `final_prior_l1=0.148450`
+  - `000098_left`: `final_gt_l1=0.202886`, `prior_gt_l1=0.218738`, `lut_gt_l1=0.300428`, `final_prior_l1=0.245952`
+- Compared to GT-parity, current-domain is consistently worse:
+  - bottom worsens from `0.041911` to `0.068701`
+  - center worsens from `0.127347` to `0.170197`
+
+Current interpretation:
+
+1. The no-extra 48000 trunk still repairs in current-domain, so the route is not fundamentally broken.
+2. The degradation is now concentrated in the current-domain conditioning, not BrushNet/MGLC/Mu.
+3. The user-observed high/low-confidence split matches the code path:
+   - `_build_safe_brushnet_prior()` blends hole mu as
+     - `confidence * color_prior + (1 - confidence) * condition_lut`
+   - `ColorPriorGenerator.get_spatial_confidence()` intentionally makes boundary confidence high and center confidence low.
+   - Therefore low-confidence hole pixels fall back toward `condition_lut`, which is the smooth/white fill that previously caused plain white regions.
+
+Code instrumentation added:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - new inference knobs:
+    - `inference.safe_prior_min_reliability`
+    - `inference.safe_prior_confidence_power`
+    - `inference.confidence_debug_threshold`
+  - new logs:
+    - `[Confidence Debug] reliability(min,p10,p50,p90,max), low_ratio`
+    - `[ConfidenceSlice Debug] final_low/final_high mean and white ratio`
+    - `[TargetByConfidence Debug] final/prior/lut GT L1 split by low/high confidence`
+
+New ablation configs:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-floor06-current-domain.yml`
+  - same current-domain route, but `safe_prior_min_reliability: 0.6`
+  - purpose: test whether forcing the low-confidence area to use more color prior reduces white fallback.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-lut-known-gt-structure.yml`
+  - `condition_known_source=lut`
+  - `structure_source=gt_if_available`
+  - purpose: isolate whether the lost quality is mainly from LUT-derived structure.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-gt-known-lut-structure.yml`
+  - `condition_known_source=gt_if_available`
+  - `structure_source=lut`
+  - purpose: isolate whether known/source color parity is the main cause.
+
+Decision rules:
+
+- If `floor06-current-domain` improves low-confidence white regions, the concrete issue is overly conservative `safe_prior` confidence gating.
+- If `floor06-current-domain` becomes brighter/worse, the raw color prior itself is too white in low-confidence regions; then the next fix should be color-prior generation, not the diffusion sampler.
+- If `lut-known-gt-structure` recovers most of the GT-parity quality, current LUT structure is the bottleneck.
+- If `gt-known-lut-structure` recovers most quality, the known-source / boundary target-domain alignment is the bottleneck.
+
