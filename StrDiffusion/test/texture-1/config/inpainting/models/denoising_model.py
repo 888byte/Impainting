@@ -98,6 +98,15 @@ class DenoisingModel(BaseModel):
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
         self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
+        self.force_legacy_reverse = bool(self.inference_opt.get("force_legacy_reverse", False)) or (
+            str(self.inference_mode).lower() == "legacy_reverse"
+        )
+        self.condition_known_source = str(
+            self.inference_opt.get("condition_known_source", "lut")
+        ).lower()
+        self.structure_source = str(
+            self.inference_opt.get("structure_source", "lut")
+        ).lower()
 
         self.lut_processor = None
         lut_path = self.dataset_opt.get("lut_path")
@@ -184,7 +193,8 @@ class DenoisingModel(BaseModel):
             "mu_denoiser.enabled(config/available/runtime/has_weights)=%s/%s/%s/%s "
             "restore_S_guidance=%s inference.mode=%s sde_mu_hole_mode=%s "
             "save_states=%s save_intermediates=%s discriminator_guidance=%s "
-            "deterministic_reverse=%s known_area_projection=%s",
+            "deterministic_reverse=%s known_area_projection=%s "
+            "force_legacy_reverse=%s condition_known_source=%s structure_source=%s",
             bool(brushnet_opt.get("enabled", False)),
             brushnet_runtime,
             bool(texture_core_opt.get("enabled", False)),
@@ -201,6 +211,9 @@ class DenoisingModel(BaseModel):
             self.discriminator_guidance,
             self.deterministic_reverse,
             self.known_area_projection,
+            self.force_legacy_reverse,
+            self.condition_known_source,
+            self.structure_source,
         )
         logger.info(
             "[RouteCheck] pretrain_model_G=%s pretrain_model_Gs=%s pretrain_model_D=%s strict_load=%s",
@@ -490,17 +503,34 @@ class DenoisingModel(BaseModel):
             ).clamp(0.0, 1.0)
         else:
             mu_clean_lut = lut_transformed
+
+        known_source = mu_clean_lut
+        if self.condition_known_source in {"gt", "gt_if_available"}:
+            if self.state_0 is not None:
+                known_source = self.state_0
+            elif self.condition_known_source == "gt":
+                raise RuntimeError("inference.condition_known_source=gt but this sample has no GT tensor.")
+        elif self.condition_known_source == "degraded":
+            known_source = degraded
+        elif self.condition_known_source in {"lut", "condition_lut", "target_lut"}:
+            known_source = mu_clean_lut
+        else:
+            raise ValueError(
+                f"Unsupported inference.condition_known_source={self.condition_known_source!r}; "
+                "expected lut|degraded|gt|gt_if_available"
+            )
+
         # SDE mu construction must match training.  Do not use raw degraded input.
         # known_only preserves the original inpainting semantics; condition_lut anchors
         # holes with the target-domain LUT estimate; safe_prior uses the confidence-gated
         # BrushNet prior and should be treated as an ablation.
         mu_hole_mode = self.inference_opt.get("sde_mu_hole_mode", "known_only")
         if mu_hole_mode == "known_only":
-            condition_mu = mu_clean_lut * mask_known
+            condition_mu = known_source * mask_known
         elif mu_hole_mode == "condition_lut":
-            condition_mu = mu_clean_lut * mask_known + lut_transformed * mask_hole
+            condition_mu = known_source * mask_known + lut_transformed * mask_hole
         elif mu_hole_mode == "safe_prior":
-            condition_mu = mu_clean_lut * mask_known + color_prior * mask_hole
+            condition_mu = known_source * mask_known + color_prior * mask_hole
         else:
             raise ValueError(
                 f"Unsupported inference.sde_mu_hole_mode={mu_hole_mode!r}; "
@@ -517,6 +547,7 @@ class DenoisingModel(BaseModel):
             "confidence": confidence,
             "prior_reliability": prior_reliability,
             "mu_clean_lut": mu_clean_lut,
+            "known_source": known_source,
             "mu_clean": condition_mu,
             "prior_debug": prior_debug,
         }
@@ -618,42 +649,95 @@ class DenoisingModel(BaseModel):
                     noisy_start_hole.get("white_ratio", 0.0),
                 )
 
-                # Structure guidance should come from the target-domain estimate
-                # (lut_transformed), not from the degraded observed input.
-                # During training, S is built from training_target = LUT(denoised(GT)).
-                # At inference, lut_transformed = LUT(denoised(observed)) is the
-                # closest available approximation to the training-time S source.
-                # Using denoised_original (which has white holes) produces empty
-                # edge maps in the hole region and mismatches the training distribution.
+                # Default mural inference uses the target-domain LUT estimate for
+                # structure.  For baseline parity diagnostics we can intentionally
+                # switch to GT-known semantics when GT is available, matching the
+                # original StrDiffusion test flow more closely.
+                if self.structure_source in {"gt", "gt_if_available"}:
+                    if self.state_0 is not None:
+                        structure_input = self.state_0
+                        resolved_structure_source = "gt"
+                    elif self.structure_source == "gt":
+                        raise RuntimeError("inference.structure_source=gt but this sample has no GT tensor.")
+                    else:
+                        structure_input = prepared["lut_transformed"]
+                        resolved_structure_source = "lut_fallback"
+                elif self.structure_source == "degraded":
+                    structure_input = self.original_degraded
+                    resolved_structure_source = "degraded"
+                elif self.structure_source in {"condition_mu", "mu"}:
+                    structure_input = self.condition
+                    resolved_structure_source = "condition_mu"
+                elif self.structure_source in {"lut", "condition_lut", "target_lut"}:
+                    structure_input = prepared["lut_transformed"]
+                    resolved_structure_source = "lut"
+                else:
+                    raise ValueError(
+                        f"Unsupported inference.structure_source={self.structure_source!r}; "
+                        "expected lut|degraded|condition_mu|gt|gt_if_available"
+                    )
+                logger.info(
+                    "[StructureRoute] sample=%s structure_source=%s resolved=%s has_gt=%s",
+                    self.sample_name,
+                    self.structure_source,
+                    resolved_structure_source,
+                    self.state_0 is not None,
+                )
                 structure_gray, structure_edge = self._build_structure_targets(
-                    prepared["lut_transformed"]
+                    structure_input
                 )
                 structure_state = None
                 if S_sde is not None:
                     S_sde.set_mu(structure_edge * self.mask)
                     structure_state = S_sde.noise_state(structure_edge * self.mask)
 
-                pred_full = sde.reverse_sde(
-                    self.state,
-                    save_states=save_states,
-                    save_dir=save_dir,
-                    GT=GT,
-                    mask=self.mask,
-                    S_sde=S_sde,
-                    S_GT=structure_gray,
-                    S_LQ=structure_state,
-                    dis=dis,
-                    S_LQs=structure_edge,
-                    enhanced_inference=True,
-                    gt_mode=self.gt_mode,
-                    mask_hole=self.mask_hole,
-                    color_prior=self.color_prior,
-                    confidence=self.confidence,
-                    restore_S_guidance=self.restore_s_guidance,
-                    discriminator_guidance=self.discriminator_guidance,
-                    deterministic_reverse=self.deterministic_reverse,
-                    known_area_projection=self.known_area_projection,
-                )
+                if self.force_legacy_reverse:
+                    legacy_known = (
+                        GT.to(self.device)
+                        if torch.is_tensor(GT)
+                        else prepared["known_source"]
+                    )
+                    logger.info(
+                        "[LegacyReverseRoute] sample=%s using original reverse_sde loop "
+                        "(enhanced_inference=false) with wrapper=%s; "
+                        "BrushNet/MGLC/Mu runtime flags remain as logged above.",
+                        self.sample_name,
+                        self.opt["network_G"]["which_model_G"],
+                    )
+                    pred_full = sde.reverse_sde(
+                        self.state,
+                        save_states=save_states,
+                        save_dir=save_dir,
+                        GT=legacy_known,
+                        mask=self.mask,
+                        S_sde=S_sde,
+                        S_GT=structure_gray,
+                        S_LQ=structure_state,
+                        dis=dis,
+                        S_LQs=structure_edge,
+                    )
+                else:
+                    pred_full = sde.reverse_sde(
+                        self.state,
+                        save_states=save_states,
+                        save_dir=save_dir,
+                        GT=GT,
+                        mask=self.mask,
+                        S_sde=S_sde,
+                        S_GT=structure_gray,
+                        S_LQ=structure_state,
+                        dis=dis,
+                        S_LQs=structure_edge,
+                        enhanced_inference=True,
+                        gt_mode=self.gt_mode,
+                        mask_hole=self.mask_hole,
+                        color_prior=self.color_prior,
+                        confidence=self.confidence,
+                        restore_S_guidance=self.restore_s_guidance,
+                        discriminator_guidance=self.discriminator_guidance,
+                        deterministic_reverse=self.deterministic_reverse,
+                        known_area_projection=self.known_area_projection,
+                    )
                 self.raw_output = pred_full
                 if self.gt_mode == "partial":
                     known_source = self.original_degraded
@@ -665,7 +749,15 @@ class DenoisingModel(BaseModel):
                     self.mask_hole,
                     source=self.original_degraded,
                 )
-                self.output = known_source * (1 - compose_alpha) + pred_full * compose_alpha
+                if self.force_legacy_reverse:
+                    # The original reverse_sde branch already returns
+                    # known_source * mask_known + predicted_hole * mask_hole.
+                    # Do not apply the mural feather/white-guard composite here;
+                    # otherwise this parity run would no longer be the original
+                    # StrDiffusion sampler.
+                    self.output = pred_full
+                else:
+                    self.output = known_source * (1 - compose_alpha) + pred_full * compose_alpha
 
                 self._log_inference_debug_stats(pred_full, self.output, prepared)
 
@@ -689,9 +781,11 @@ class DenoisingModel(BaseModel):
                     "lut_transformed": prepared["lut_transformed"],
                     "condition_mu": self.condition,
                     "mu_clean_lut": prepared["mu_clean_lut"],
+                    "known_source": prepared.get("known_source"),
                     "mu_clean": mu_clean,
                     "x_init": x_init,
                     "x_start_noisy": self.state,
+                    "structure_source_image": structure_input,
                     "structure_gray": structure_gray,
                     "structure_edge": structure_edge,
                     "compose_alpha": compose_alpha,

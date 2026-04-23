@@ -187,3 +187,48 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 - 如果 original-sampler 有纹理：之前纯 deterministic 诊断过于保守，最终路径需要保留原版 sampler。
 - 如果 original-sampler 仍无纹理，但 brushnet-only 有纹理：说明当前主干单独不够，BrushNet prior 是必要条件。
 - 如果两者都无纹理：优先查 BrushNet 输入/特征注入强度，或当前 32000_G 主干训练分布已经偏成均值填充。
+
+## 2026-04-23 00:25 original-sampler / BrushNet-only 仍失败后的结论
+
+新日志：
+
+- `test_ir-sde-no-extra-original-sampler-known-only_260422-235949.log`
+  - no-extra 路由成立：BrushNet=false, MGLC=false, Mu-Denoiser=false。
+  - 黑洞起点成立：`x_init_hole(mean=0,min=0,max=0)`。
+  - 恢复随机 reverse + D guidance 后，hole 仍主要变成浅灰/白块，没有纹理。
+- `test_ir-sde-brushnet-only-known-start_260423-000710.log`
+  - BrushNet 权重确实加载并参与：`loaded 326/326`，BrushNet runtime=true。
+  - 起点仍正确，但输出只出现黑/深色块，不是有效纹理修复。
+
+因此已排除：
+
+1. “只是起点不是黑洞” —— 已修正，仍失败。
+2. “只是 deterministic mean sampler 太保守” —— 恢复随机+D 后仍失败。
+3. “BrushNet 没加载/没生效” —— BrushNet-only 明显改变轨迹，但方向错误。
+4. “关掉新增模块就能恢复原版能力” —— 当前 32000_G 的 no-extra 主干路径仍不能恢复纹理。
+
+下一步不再继续盲调 x7 推理参数，而是做 **原版 StrDiffusion sampler parity**：当前 enhanced 路径虽然模拟了原版采样，但仍不是逐行原版 `reverse_sde` 分支。已新增两个配置，用同一个 wrapper/checkpoint 做无重训对照：
+
+- `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-legacy-reverse-current-domain.yml`
+  - no BrushNet/MGLC/Mu
+  - `force_legacy_reverse=true`
+  - `condition_known_source=lut`, `structure_source=lut`
+  - 目的：验证是否是 enhanced reverse 分支本身偏离原版。
+
+- `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-legacy-reverse-gt-parity.yml`
+  - no BrushNet/MGLC/Mu
+  - `force_legacy_reverse=true`
+  - `condition_known_source=gt_if_available`, `structure_source=gt_if_available`
+  - 目的：在训练集/有 GT 的样本上尽量贴近原版 StrDiffusion 测试语义，判断当前 x7 主干是否还保留原版修复能力。
+
+新增日志应出现：
+
+- `force_legacy_reverse=True`
+- `[LegacyReverseRoute] ... enhanced_inference=false`
+- `[StructureRoute] ... resolved=lut` 或 `resolved=gt`
+
+判断：
+
+- current-domain legacy 能改善：之前问题集中在 enhanced reverse/composite 逻辑。
+- current-domain 仍差但 gt-parity 改善：问题集中在当前推理 condition/structure 构造和原版训练/测试语义不一致。
+- 两者仍差：当前 x7 checkpoint 的主干 score 已经被后续训练/新增模块带偏；无重训关闭模块无法恢复原版能力，需要回到原版收敛 checkpoint 或做主干冻结/小学习率恢复训练。
