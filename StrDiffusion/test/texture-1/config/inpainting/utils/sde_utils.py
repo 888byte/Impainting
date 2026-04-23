@@ -344,6 +344,18 @@ class IRSDE(SDE):
             mask = mask.expand(-1, x.shape[1], -1, -1)
         return float((x * mask).sum().div(mask.sum().clamp_min(1.0)).item())
 
+    def _masked_dark_ratio(self, tensor, mask_hole, threshold=0.12):
+        if tensor is None or mask_hole is None:
+            return 0.0
+        x = tensor.detach().float()
+        mask = mask_hole.detach().float()
+        if x.shape[1] >= 3:
+            luminance = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
+        else:
+            luminance = x[:, :1]
+        dark = (luminance < threshold).float() * mask[:, :1]
+        return float(dark.sum().div(mask[:, :1].sum().clamp_min(1.0)).item())
+
     def _log_reverse_trajectory(self, tag, t, x, score, mask_hole):
         mean, white, min_val, max_val = self._masked_hole_stats(x, mask_hole)
         score_abs = self._masked_abs_mean(score, mask_hole)
@@ -359,12 +371,13 @@ class IRSDE(SDE):
         )
 
     def _safe_discriminator_candidate(self, candidate, reference, mask_hole):
-        """Keep discriminator guidance from selecting over-white hole proposals.
+        """Keep discriminator guidance from selecting obvious color outliers.
 
         The discriminator branch is legacy proposal selection.  In the mural
         target-domain pipeline the discriminator is not a color prior and must
         not be allowed to override the SDE/BrushNet trajectory with numerically
-        unstable or all-white hole states.  This guard does not change the SDE
+        unstable, all-white, or unsupported all-dark hole states.  This guard
+        does not change the SDE
         update formula; it only rejects discriminator proposals that are clearly
         outside the target-domain hole range.
         """
@@ -372,11 +385,21 @@ class IRSDE(SDE):
             return False
         cand_mean, cand_white, cand_min, cand_max = self._masked_hole_stats(candidate, mask_hole)
         ref_mean, _, _, _ = self._masked_hole_stats(reference, mask_hole)
+        cand_dark = self._masked_dark_ratio(candidate, mask_hole)
+        ref_dark = self._masked_dark_ratio(reference, mask_hole)
         if cand_min < -1.0 or cand_max > 2.0:
             return False
         if cand_white > 0.25 and cand_mean > ref_mean + 0.08:
             return False
         if cand_mean > 0.95 and cand_mean > ref_mean + 0.12:
+            return False
+        # If the color/GT/LUT reference has almost no dark content in the hole,
+        # reject discriminator proposals that introduce a new dark blob.  This
+        # targets the baseline-checkpoint artifact where the original stochastic
+        # sampler may select a dark patch in otherwise uniform mural regions.
+        if ref_mean > 0.45 and ref_dark < 0.03 and cand_dark > 0.08:
+            return False
+        if ref_mean > 0.60 and cand_min < 0.05 and cand_dark > ref_dark + 0.05:
             return False
         return True
 
@@ -488,6 +511,10 @@ class IRSDE(SDE):
         x_original = xt.clone().to(self.device)
         xs = S_LQ.clone().to(self.device)
         early_start = max(1, int(0.4 * T))
+        guard_reference = brushnet_kwargs.get("color_prior", None)
+        if guard_reference is None:
+            guard_reference = self.mu
+        guard_rejects = 0
 
         for t in tqdm(reversed(range(early_start, T + 1))):
             structure_tensor = None
@@ -543,7 +570,8 @@ class IRSDE(SDE):
                         x_tmp = self.reverse_sde_step_mean(x_original, score_tmp, t)
                     else:
                         x_tmp = self.reverse_sde_step(x_original, score_tmp, t)
-                    if not self._safe_discriminator_candidate(x_tmp, self.mu, mask_hole):
+                    if not self._safe_discriminator_candidate(x_tmp, guard_reference, mask_hole):
+                        guard_rejects += 1
                         continue
                     d_proposal = dis(
                         torch.tensor(t, device=self.device).reshape(1,),
@@ -558,12 +586,15 @@ class IRSDE(SDE):
                         d_current = d_proposal
                     else:
                         x_blend = (x_updated + x_tmp) / 2
-                        if self._safe_discriminator_candidate(x_blend, self.mu, mask_hole):
+                        if self._safe_discriminator_candidate(x_blend, guard_reference, mask_hole):
                             x_updated = x_blend
                             xs_t = (xs1 + xs_t) / 2
+                        else:
+                            guard_rejects += 1
                 xs = xs_optimum * mask_known + xs_t * (1 - mask_known)
 
-            if not self._safe_discriminator_candidate(x_updated, self.mu, mask_hole):
+            if not self._safe_discriminator_candidate(x_updated, guard_reference, mask_hole):
+                guard_rejects += 1
                 x_updated = x_nominal
             x_original = x_updated
 
@@ -587,6 +618,12 @@ class IRSDE(SDE):
                 interval = max(1, self.T // 100)
                 if t % interval == 0:
                     self._save_state_image(x_original, save_dir, t // interval)
+
+        if guard_rejects:
+            logger.info(
+                "[DiscriminatorGuard] rejected_candidates=%d using color/GT/LUT reference safety range",
+                guard_rejects,
+            )
 
         # Return the raw model prediction without compositing.
         # denoising_model.test() handles the final known/hole composite.

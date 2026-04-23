@@ -273,3 +273,53 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 
 - 直接使用原版 baseline checkpoint 推理；或
 - 做 checkpoint surgery：把 x7 checkpoint 中原版主干权重替换回 baseline，只保留新增模块权重，再做 no-extra/BrushNet-only 推理消融。
+
+## 2026-04-23 12:10 baseline checkpoint parity 有效后的下一步
+
+用户反馈 `ir-sde-baseline-original-checkpoint-gt-parity`：
+
+- 原版 baseline checkpoint 已经能修，边缘/统一颜色区域明显恢复。
+- 仍存在局部黑/深色斑块，复杂纹理区域细节不足。
+
+结合 `STRDIFFUSION_CHECKPOINT_DRIFT.md`：
+
+- baseline vs x7 共享主干 `231` 个 tensor。
+- x7 多出 `189` 个新增模块 tensor。
+- 主干 global `relative_rms≈0.060467`，漂移最大在 `mid_block*`、`ups.*` 和早期 `downs.0`。
+
+结论：
+
+1. 当前 `texture-1` 推理链路已经足够接近原版，原版 baseline checkpoint 可以恢复基本修复能力。
+2. x7 关闭新增模块仍失败，说明 x7 的原版主干被后续训练带偏，而不是推理路径本身坏。
+3. baseline 的黑斑更多像原版随机+D adaptive sampler 的候选选择伪影，尤其在参考先验/GT/LUT 的 hole 区没有暗色内容时，D 仍可能选到局部过暗 proposal。
+
+已新增/修改：
+
+- 增强版 D guard：`D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\utils\sde_utils.py`
+  - 增加 dark-ratio 检查。
+  - enhanced guarded sampler 使用 color_prior/GT/LUT 作为安全参考，而不是黑洞 `mu`。
+  - 日志新增：`[DiscriminatorGuard] rejected_candidates=...`。
+
+- 新增 baseline sampler 对照配置：
+  - `ir-sde-baseline-original-checkpoint-guarded-sampler-gt-parity.yml`
+    - baseline G，enhanced guarded stochastic + D。
+    - 目标：保留纹理同时抑制黑斑。
+  - `ir-sde-baseline-original-checkpoint-deterministic-gt-parity.yml`
+    - baseline G，deterministic + no D。
+    - 目标：验证黑斑是否由 stochastic/D 造成；预期更平滑、纹理更少。
+
+- 新增 checkpoint surgery 脚本：
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\tools\make_baseline_trunk_hybrid.py`
+  - 生成：baseline trunk + x7 added modules。
+  - 默认输出：
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/32000_G.baseline_trunk_x7_extra.pth`
+
+- 新增 hybrid BrushNet-only 对照配置：
+  - `ir-sde-hybrid-baseline-trunk-brushnet-only-guarded-gt-parity.yml`
+  - `ir-sde-hybrid-baseline-trunk-brushnet-only-deterministic-gt-parity.yml`
+
+下一步顺序：
+
+1. 先跑 baseline guarded sampler，看黑斑是否消失同时保留纹理。
+2. 再跑 baseline deterministic，确认黑斑是否由 D/stochastic 引入。
+3. 如果 baseline guarded 较好，再生成 hybrid checkpoint 并跑 hybrid BrushNet-only，验证 x7 的 BrushNet 能否在 baseline 主干上提供颜色/纹理先验。
