@@ -452,3 +452,104 @@ Next no-retrain diagnostic added:
 
 These set `sde_mu_hole_mode=safe_prior`, using the confidence-gated color prior as the hole mu. This is not claiming to match training; it checks whether a better hole anchor than `condition_lut` can give an acceptable no-retrain inference fallback. Logs now include `[MuAnchor Debug]` to detect anchor pass-through.
 
+
+## 2026-04-23 18:45 safe-prior result: useful correction is in x7 trunk, not BrushNet extra
+
+New evidence from the two safe-prior GT-parity logs:
+
+- `test_ir-sde-no-extra-x7-48000-guarded-safe-prior-gt-parity_260423-181721.log`
+  - runtime route:
+    - `pretrain_model_G=.../48000_G.pth`
+    - `no_extra_route=True`
+    - `brushnet.enabled(config/runtime)=False/False`
+    - `texture_core.enabled=False`
+    - `mu_denoiser.enabled=False`
+    - `sde_mu_hole_mode=safe_prior`
+  - `000098_bottom`:
+    - `prior_gt_l1=0.075773`
+    - `lut_gt_l1=0.113057`
+    - `final_gt_l1=0.041911`
+    - `final_prior_l1=0.090143`
+    - `[MuAnchor Debug] ... note=not a pure anchor copy`
+  - `000098_center`:
+    - `prior_gt_l1=0.204111`
+    - `lut_gt_l1=0.271651`
+    - `final_gt_l1=0.127347`
+    - `final_prior_l1=0.124635`
+    - `[MuAnchor Debug] ... note=not a pure anchor copy`
+
+- `test_ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak001-guarded-safe-prior-gt-parity_260423-182212.log`
+  - runtime route:
+    - `pretrain_model_G=.../48000_G.baseline_trunk_x7_extra.pth`
+    - `brushnet.enabled(config/runtime)=True/True`
+    - `brushnet.feature_scale(runtime)=0.01`
+    - `texture_core.enabled=False`
+    - `mu_denoiser.enabled=False`
+    - `sde_mu_hole_mode=safe_prior`
+  - `000098_bottom`:
+    - `prior_gt_l1=0.075773`
+    - `final_gt_l1=0.075746`
+    - `final_prior_l1=0.000506`
+    - `[MuAnchor Debug] ... note=pass-through`
+  - `000098_center`:
+    - `prior_gt_l1=0.204111`
+    - `final_gt_l1=0.205065`
+    - `final_prior_l1=0.001741`
+    - `[MuAnchor Debug] ... note=pass-through`
+
+Decision:
+
+1. The good part of the 48000 no-retrain result is **not** BrushNet.
+2. The useful correction is carried by the **x7 48000 main trunk itself** when all extra modules are bypassed.
+3. The hybrid checkpoint (`baseline trunk + x7 extra tensors`) proves the extra branch is not an independent usable adapter: with BrushNet scale `0.01`, it almost exactly copies the safe-prior anchor; with larger scales it previously injected unrelated texture/artifacts.
+4. Therefore do **not** use the hybrid checkpoint as a repair route. It is a diagnostic only.
+
+Current best no-retrain route:
+
+- wrapper class: `ConditionalUNetWithBrushNet` for key compatibility
+- checkpoint: `.../ir-sde-brushnet-ft-x7/models/48000_G.pth`
+- disabled modules:
+  - `brushnet.enabled=false`
+  - `texture_core.enabled=false`
+  - `mu_denoiser.enabled=false`
+- sampler:
+  - guarded stochastic sampler
+  - `sde_mu_hole_mode=safe_prior`
+  - `restore_S_guidance=true`
+
+Important caveat:
+
+- The good safe-prior run above still used GT-parity routing:
+  - `condition_known_source=gt_if_available`
+  - `structure_source=gt_if_available`
+  - logs show `StructureRoute ... resolved=gt has_gt=True`
+- Before treating it as the actual test/deploy route, it must be checked without GT routing.
+
+New no-GT/current-domain config:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-current-domain.yml`
+  - same as the good no-extra safe-prior route, but:
+    - `condition_known_source: lut`
+    - `structure_source: lut`
+
+Next validation:
+
+```bash
+cd /home/610-wws/Impainting/StrDiffusion/test/texture-1/config/inpainting
+python test.py -opt options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-current-domain.yml
+```
+
+Expected log checks:
+
+- `[RouteCheck] ... no_extra_route=True`
+- `brushnet.enabled(config/runtime)=False/False`
+- `sde_mu_hole_mode=safe_prior`
+- `condition_known_source=lut structure_source=lut`
+- `[StructureRoute] ... resolved=lut`
+- `[MuAnchor Debug] ... note=not a pure anchor copy`
+
+Interpretation:
+
+- If current-domain safe-prior remains close to the GT-parity result, the practical no-retrain solution is confirmed.
+- If it collapses, the remaining dependency is not BrushNet but **GT-derived structure/known-source parity**; the next target should be the LUT/current-domain structure source quality, not further tuning BrushNet.
+
