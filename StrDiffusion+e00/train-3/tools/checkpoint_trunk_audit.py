@@ -27,7 +27,7 @@ DEFAULT_BASELINE = (
 )
 DEFAULT_CURRENT = (
     "/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/"
-    "config/inpainting/log/ir-sde-brushnet-ft-x7/models/32000_G.pth"
+    "config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth"
 )
 
 
@@ -238,7 +238,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--current", default=DEFAULT_CURRENT)
     parser.add_argument(
         "--out",
-        default="D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/STRDIFFUSION_CHECKPOINT_DRIFT.md",
+        default="D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/STRDIFFUSION_CHECKPOINT_DRIFT_48000.md",
         help="Markdown report path.",
     )
     parser.add_argument("--json-out", default=None, help="Optional JSON report path.")

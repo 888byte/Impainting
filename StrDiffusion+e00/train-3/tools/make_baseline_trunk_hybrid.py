@@ -27,12 +27,12 @@ DEFAULT_BASELINE = (
 )
 DEFAULT_CURRENT = (
     "/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/"
-    "config/inpainting/log/ir-sde-brushnet-ft-x7/models/32000_G.pth"
+    "config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth"
 )
 DEFAULT_OUT = (
     "/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/"
     "config/inpainting/log/ir-sde-brushnet-ft-x7/models/"
-    "32000_G.baseline_trunk_x7_extra.pth"
+    "48000_G.baseline_trunk_x7_extra.pth"
 )
 
 

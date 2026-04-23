@@ -323,3 +323,48 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 1. 先跑 baseline guarded sampler，看黑斑是否消失同时保留纹理。
 2. 再跑 baseline deterministic，确认黑斑是否由 D/stochastic 引入。
 3. 如果 baseline guarded 较好，再生成 hybrid checkpoint 并跑 hybrid BrushNet-only，验证 x7 的 BrushNet 能否在 baseline 主干上提供颜色/纹理先验。
+
+## 2026-04-23 14:35 switch to 48000 checkpoint
+
+Result summary for the 32000 comparison set:
+
+- `baseline-original-checkpoint-guarded-sampler-gt-parity`
+  - best current no-retrain result; edge repair is the best and hole region keeps some texture.
+- `baseline-original-checkpoint-deterministic-gt-parity`
+  - stable but smoother; fewer artifacts and fewer details.
+- `hybrid-baseline-trunk-brushnet-only-guarded-gt-parity`
+  - full-scale BrushNet (`feature_scale=0.3`) injects unrelated content.
+- `hybrid-baseline-trunk-brushnet-only-deterministic-gt-parity`
+  - BrushNet still causes split / dark shadow even without stochastic sampler.
+
+Decision:
+
+1. Current best no-retrain route is still **baseline original checkpoint + guarded sampler**.
+2. The x7 `32000_G.pth` BrushNet extra branch is not safe to use directly.
+3. Move to user-requested `48000_G.pth` and test in this order:
+   - current x7 trunk only (no extra modules), guarded sampler;
+   - current x7 trunk only (no extra modules), deterministic no-D;
+   - baseline trunk + x7 48000 extra modules, weak BrushNet only (`feature_scale=0.03` then `0.01`).
+
+New configs:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-gt-parity.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-deterministic-gt-parity.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak003-guarded-gt-parity.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak001-guarded-gt-parity.yml`
+
+Scripts updated for 48000 defaults:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/tools/make_baseline_trunk_hybrid.py`
+  - default current/out -> `48000_G.pth` / `48000_G.baseline_trunk_x7_extra.pth`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/tools/checkpoint_trunk_audit.py`
+  - default current -> `48000_G.pth`
+  - default markdown out -> `STRDIFFUSION_CHECKPOINT_DRIFT_48000.md`
+
+Extra inference log fields added:
+
+- `brushnet.feature_scale(runtime)=...`
+- `brushnet.use_spatial_gate(runtime)=...`
+
+These two fields are required to verify that the weak BrushNet configs are actually active at runtime.
+

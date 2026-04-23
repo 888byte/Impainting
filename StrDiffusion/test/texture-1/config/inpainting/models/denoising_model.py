@@ -189,6 +189,7 @@ class DenoisingModel(BaseModel):
         )
         logger.info(
             "[RouteCheck] brushnet.enabled(config/runtime)=%s/%s "
+            "brushnet.feature_scale(runtime)=%s brushnet.use_spatial_gate(runtime)=%s "
             "texture_core.enabled(config/runtime)=%s/%s "
             "mu_denoiser.enabled(config/available/runtime/has_weights)=%s/%s/%s/%s "
             "restore_S_guidance=%s inference.mode=%s sde_mu_hole_mode=%s "
@@ -197,6 +198,8 @@ class DenoisingModel(BaseModel):
             "force_legacy_reverse=%s condition_known_source=%s structure_source=%s",
             bool(brushnet_opt.get("enabled", False)),
             brushnet_runtime,
+            getattr(module, "brushnet_feature_scale", None),
+            getattr(module, "brushnet_use_spatial_gate", None),
             bool(texture_core_opt.get("enabled", False)),
             texture_core_runtime,
             bool(mu_opt.get("enabled", False)),

@@ -1,0 +1,110 @@
+#### Diagnostic: x7 48000 checkpoint, no extra modules,
+#### deterministic no-D route for pure trunk sanity check.
+name: ir-sde-no-extra-x7-48000-deterministic-gt-parity
+suffix: null
+model: denoising
+distortion: inpainting
+gpu_ids:
+- 0
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+degradation:
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
+datasets:
+  test:
+    name: Mural_Inference_Dataset
+    mode: mural_inference
+    dataroot_degraded: /home/610-wws/Impainting/dataset/裁剪的图片/test/mask_merge
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images
+    dataroot_color_prior: null
+    dataroot_confidence: null
+    gt_mode: full
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
+    lut_alpha: 0.85
+    lut_beta: 0.15
+    lut_inpaint_method: telea
+    lut_strength: 1.0
+    lut_smooth_radius: 1
+    prior_hole_max_weight: 0.5
+    prior_lut_gap_scale: 0.15
+    prior_inpaint_mask_dilate: 3
+    prior_method: quality
+network_G:
+  which_model_G: ConditionalUNetWithBrushNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+network_Gs:
+  which_model_G: ConditionalUNets
+  setting:
+    in_nc: 1
+    out_nc: 1
+    nf: 64
+    depth: 4
+brushnet:
+  enabled: false
+  in_nc: 8
+  nf: 64
+  depth: 4
+  lite: false
+  prior_dropout_prob: 0.0
+  feature_scale: 0.3
+  use_spatial_gate: true
+main_guidance:
+  enabled: false
+  use_observed_input: true
+  use_mask: true
+  zero_init: true
+texture_core:
+  enabled: false
+  name: MGLCBlock
+  insert_mid: true
+  insert_dec: true
+  backend: sem_lite
+  branch_mode: both
+  use_mask_gate: true
+  gate_hidden: 16
+  boundary_width: 3
+  zero_init_last: true
+restore_S_guidance: true
+mu_denoiser:
+  enabled: false
+  in_nc: 5
+  dim: 32
+  num_blocks: 2
+  num_heads: 4
+  predict_residual: true
+  blind_ratio: 0.1
+  lambda_ss: 1.0
+  lambda_tv: 0.01
+  lr: 0.0001
+path:
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth
+  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
+  strict_load: false
+  resume_state: null
+inference:
+  mode: brushnet_final
+  compose_mode: auto
+  save_states: true
+  deterministic_reverse: true
+  sde_mu_hole_mode: known_only
+  force_legacy_reverse: false
+  condition_known_source: gt_if_available
+  structure_source: gt_if_available
+  known_area_projection: true
+  compose_mask_dilate: 3
+  compose_feather: 4
+  compose_white_guard: true
+  compose_white_guard_dilate: 4
+  compose_white_threshold: 0.95
+  save_intermediates: true
+  discriminator_guidance:
+    enabled: false
