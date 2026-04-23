@@ -232,3 +232,44 @@ python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
 - current-domain legacy 能改善：之前问题集中在 enhanced reverse/composite 逻辑。
 - current-domain 仍差但 gt-parity 改善：问题集中在当前推理 condition/structure 构造和原版训练/测试语义不一致。
 - 两者仍差：当前 x7 checkpoint 的主干 score 已经被后续训练/新增模块带偏；无重训关闭模块无法恢复原版能力，需要回到原版收敛 checkpoint 或做主干冻结/小学习率恢复训练。
+
+## 2026-04-23 10:50 legacy reverse + GT parity 仍失败
+
+新日志：
+
+- `test_ir-sde-no-extra-legacy-reverse-current-domain_260423-103607.log`
+- `test_ir-sde-no-extra-legacy-reverse-gt-parity_260423-104051.log`
+
+确认信息：
+
+- `force_legacy_reverse=True`，确实走了原版 `reverse_sde` 分支（`enhanced_inference=false`）。
+- no-extra 路由成立：BrushNet=false, MGLC=false, Mu-Denoiser=false。
+- `loaded 231/231 tensors into ConditionalUNetWithBrushNet`，当前 x7 checkpoint 的原版主干权重全部加载。
+- 起点仍正确：`x_init_hole(mean=0,min=0,max=0)`。
+- GT parity 中结构来源确实为 GT：`[StructureRoute] ... resolved=gt has_gt=True`。
+
+结论：
+
+即使使用原版 sampler 分支，并且在训练集/有 GT 情况下把 condition/structure 尽量贴近原版 StrDiffusion，当前 x7 的 `32000_G.pth` 主干仍不能修复。此时问题基本不在推理分支、起点、D guidance、BrushNet/MGLC/Mu 开关，而是当前 checkpoint 的主干 score 已经偏离原版可修复解。
+
+下一步验证不再继续用 x7 盲调，而是做两件事：
+
+1. **原版 baseline checkpoint parity**
+   - 新增配置：
+     `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-baseline-original-checkpoint-gt-parity.yml`
+   - 默认加载：
+     `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+   - 若它能正常修复，则说明当前推理代码已经足够接近原版，问题集中在 x7 checkpoint 主干被训练带偏。
+   - 若它也不能修复，则还需要继续对齐当前 `texture-1` 测试树与原版 `StrDiffusion/test/texture` 的数据/结构生成。 
+
+2. **checkpoint 主干漂移审计**
+   - 新增脚本：
+     `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\tools\checkpoint_trunk_audit.py`
+   - 比较原版 baseline 和 x7 之间共享的 ConditionalUNet 主干权重漂移。
+   - 输出：
+     `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\STRDIFFUSION_CHECKPOINT_DRIFT.md`
+
+如果 baseline parity 正常且 drift 很大，后续无重训可选方案只有：
+
+- 直接使用原版 baseline checkpoint 推理；或
+- 做 checkpoint surgery：把 x7 checkpoint 中原版主干权重替换回 baseline，只保留新增模块权重，再做 no-extra/BrushNet-only 推理消融。
