@@ -997,6 +997,8 @@ class DenoisingModel(BaseModel):
         if self.state_0 is not None:
             gt = self.state_0.to(device=final.device)
             lut = prepared.get("lut_transformed") if prepared is not None else None
+            final_prior_l1 = self._masked_l1(final, self.color_prior, self.mask_hole) or 0.0
+            final_lut_l1 = self._masked_l1(final, lut, self.mask_hole) or 0.0
             logger.info(
                 "[Target Debug] final_gt_l1=%.6f raw_gt_l1=%.6f prior_gt_l1=%.6f "
                 "lut_gt_l1=%.6f final_prior_l1=%.6f final_lut_l1=%.6f",
@@ -1004,9 +1006,23 @@ class DenoisingModel(BaseModel):
                 self._masked_l1(pred_full, gt, self.mask_hole) or 0.0,
                 self._masked_l1(self.color_prior, gt, self.mask_hole) or 0.0,
                 self._masked_l1(lut, gt, self.mask_hole) or 0.0,
-                self._masked_l1(final, self.color_prior, self.mask_hole) or 0.0,
-                self._masked_l1(final, lut, self.mask_hole) or 0.0,
+                final_prior_l1,
+                final_lut_l1,
             )
+            mu_hole_mode = str(self.inference_opt.get("sde_mu_hole_mode", "known_only")).lower()
+            if mu_hole_mode != "known_only":
+                logger.info(
+                    "[MuAnchor Debug] mode=%s final_lut_l1=%.6f final_prior_l1=%.6f "
+                    "note=%s",
+                    mu_hole_mode,
+                    final_lut_l1,
+                    final_prior_l1,
+                    (
+                        "pass-through: final is almost the hole mu anchor, so the sampler is not adding texture"
+                        if final_lut_l1 < 0.01 or final_prior_l1 < 0.01
+                        else "not a pure anchor copy"
+                    ),
+                )
 
     def load(self):
         """Load texture G, structure Gs, and discriminator D in official order."""

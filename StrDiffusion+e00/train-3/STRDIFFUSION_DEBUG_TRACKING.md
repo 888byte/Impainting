@@ -415,3 +415,40 @@ Expected decision:
 - If train-mu config improves color/texture and reduces `final_gt_l1`, the confirmed problem is train/inference `sde_mu_hole_mode` mismatch.
 - If it worsens or becomes white/over-smooth, then x7 training itself over-relied on `condition_lut` in the hole and did not learn real inpainting from blank-hole starts; future training should use `known_only` or re-enable a gradient-carrying inference-like x0 loss with microbatch/checkpointing.
 
+
+## 2026-04-23 17:50 train-mu parity failed: condition_lut hole anchor is not the fix
+
+New evidence:
+
+- `STRDIFFUSION_CHECKPOINT_DRIFT_48000.md`
+  - 48000 trunk drift relative_rms = `0.062552`.
+  - This is larger than the previous 32000 report (`0.060467`), so continued x7 training did not move the original trunk back toward the known-good baseline; it drifted slightly more.
+- `ir-sde-no-extra-x7-48000-guarded-train-mu-gt-parity`
+  - `sde_mu_hole_mode=condition_lut` removed the train/inference mode mismatch, but the result became white / plain.
+  - Example `000098_bottom`: x_init hole mean `0.7871`, final hole mean `0.9425`.
+  - `final_gt_l1=0.080698`, while `prior_gt_l1=0.075773`; the generated result is not better than the color prior.
+- `ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak001-guarded-train-mu-gt-parity`
+  - Output is almost exactly the LUT anchor, not a repaired texture.
+  - Example `000098_bottom`: `final_lut_l1=0.000458`, `final_gt_l1=0.112950`, `prior_gt_l1=0.075773`.
+
+Conclusion:
+
+The mismatch test is decisive: matching the training `condition_lut` hole mu does **not** restore repair ability. Instead it reveals the current x7 training problem more clearly:
+
+1. The x7 training objective allowed/encouraged a non-black hole mu (`condition_lut`) that already contains a smooth bright fill.
+2. The normal one-step SDE loss is teacher-forced from states generated around that filled mu, so the model can minimize loss without learning to synthesize missing texture from a blank/noisy hole.
+3. The inference-like blank-hole x0 branch in `models/denoising_model.py` is monitor-only (`with torch.no_grad()` and `infer_x0_weighted=None`), so it does not correct this failure.
+4. BrushNet weak injection at 0.01 is almost neutral; at larger scales it injects artifacts. It is not currently a usable texture restoration branch.
+
+Current no-retrain best route remains:
+
+- use the known-good original baseline checkpoint with guarded stochastic sampler; or
+- use x7 48000 known-only guarded as an ablation, but it is not structurally better than the baseline route.
+
+Next no-retrain diagnostic added:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-gt-parity.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak001-guarded-safe-prior-gt-parity.yml`
+
+These set `sde_mu_hole_mode=safe_prior`, using the confidence-gated color prior as the hole mu. This is not claiming to match training; it checks whether a better hole anchor than `condition_lut` can give an acceptable no-retrain inference fallback. Logs now include `[MuAnchor Debug]` to detect anchor pass-through.
+
