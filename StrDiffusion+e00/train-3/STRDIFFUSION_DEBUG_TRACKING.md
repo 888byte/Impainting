@@ -368,3 +368,50 @@ Extra inference log fields added:
 
 These two fields are required to verify that the weak BrushNet configs are actually active at runtime.
 
+
+## 2026-04-23 16:45 48000 results: likely train/inference mu-hole mismatch
+
+New user feedback for 48000:
+
+- `ir-sde-no-extra-x7-48000-guarded-gt-parity` is usable but still not ideal.
+- `ir-sde-no-extra-x7-48000-deterministic-gt-parity` is smoother/gray, as expected for deterministic no-D.
+- `hybrid-baseline-trunk-x7-48000-brushnet-weak003` is gray-ish and does not clearly improve.
+- `hybrid-baseline-trunk-x7-48000-brushnet-weak001` is close to the no-extra guarded route; BrushNet at 0.01 is almost neutral.
+
+Important evidence:
+
+- The uploaded drift report is still for `32000_G.pth`, not 48000:
+  - report current path: `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/32000_G.pth`
+  - so do not use that report as 48000 evidence yet.
+- The active training config `options/train/ir-sde-brushnet-ft.yml` contains:
+  - `train.sde_mu_hole_mode: condition_lut`
+- But the latest 48000 test configs used:
+  - `inference.sde_mu_hole_mode: known_only`
+
+This is now the clearest concrete mismatch: the 48000 checkpoint was trained with non-black, target-domain hole mu (`condition_lut`), but the current no-extra/weak-BrushNet inference was run from a black-hole mu (`known_only`). That is a real distribution shift. It can explain why:
+
+- deterministic reverse becomes gray/smooth;
+- BrushNet at weak scale does not add useful detail;
+- the guarded stochastic sampler partly recovers but remains slightly off from GT.
+
+Code changes added for verification:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - logs `expected_train_sde_mu_hole_mode=...`
+  - warns when train/inference mu-hole modes differ
+  - logs `[Target Debug] final_gt_l1/raw_gt_l1/prior_gt_l1/lut_gt_l1/final_prior_l1/final_lut_l1` for GT-parity runs
+
+New configs for the next direct test:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-train-mu-gt-parity.yml`
+  - no extra modules, 48000 checkpoint, guarded sampler
+  - `sde_mu_hole_mode: condition_lut`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-hybrid-baseline-trunk-x7-48000-brushnet-weak001-guarded-train-mu-gt-parity.yml`
+  - baseline trunk + 48000 extra, weak BrushNet 0.01
+  - `sde_mu_hole_mode: condition_lut`
+
+Expected decision:
+
+- If train-mu config improves color/texture and reduces `final_gt_l1`, the confirmed problem is train/inference `sde_mu_hole_mode` mismatch.
+- If it worsens or becomes white/over-smooth, then x7 training itself over-relied on `condition_lut` in the hole and did not learn real inpainting from blank-hole starts; future training should use `known_only` or re-enable a gradient-carrying inference-like x0 loss with microbatch/checkpointing.
+

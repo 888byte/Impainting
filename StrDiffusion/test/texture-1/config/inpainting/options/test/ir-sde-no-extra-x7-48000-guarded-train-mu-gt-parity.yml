@@ -1,6 +1,6 @@
-#### Diagnostic: x7 48000 checkpoint, keep wrapper for key compatibility,
-#### but disable BrushNet/MGLC/Mu-Denoiser and test only the current trunk with guarded sampler.
-name: ir-sde-no-extra-x7-48000-guarded-gt-parity
+#### Diagnostic: x7 48000 checkpoint with train/inference mu-hole parity.
+#### This matches train.sde_mu_hole_mode=condition_lut from ir-sde-brushnet-ft.yml.
+name: ir-sde-no-extra-x7-48000-guarded-train-mu-gt-parity
 suffix: null
 model: denoising
 distortion: inpainting
@@ -95,7 +95,7 @@ inference:
   compose_mode: auto
   save_states: true
   deterministic_reverse: false
-  sde_mu_hole_mode: known_only
+  sde_mu_hole_mode: condition_lut
   expected_train_sde_mu_hole_mode: condition_lut
   force_legacy_reverse: false
   condition_known_source: gt_if_available

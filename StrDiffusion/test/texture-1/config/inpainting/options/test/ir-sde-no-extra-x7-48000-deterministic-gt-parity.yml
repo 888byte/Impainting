@@ -96,6 +96,7 @@ inference:
   save_states: true
   deterministic_reverse: true
   sde_mu_hole_mode: known_only
+  expected_train_sde_mu_hole_mode: condition_lut
   force_legacy_reverse: false
   condition_known_source: gt_if_available
   structure_source: gt_if_available

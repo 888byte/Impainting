@@ -98,6 +98,12 @@ class DenoisingModel(BaseModel):
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
         self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
+        self.expected_train_sde_mu_hole_mode = str(
+            self.inference_opt.get(
+                "expected_train_sde_mu_hole_mode",
+                opt.get("train", {}).get("sde_mu_hole_mode", ""),
+            )
+        ).lower()
         self.force_legacy_reverse = bool(self.inference_opt.get("force_legacy_reverse", False)) or (
             str(self.inference_mode).lower() == "legacy_reverse"
         )
@@ -193,6 +199,7 @@ class DenoisingModel(BaseModel):
             "texture_core.enabled(config/runtime)=%s/%s "
             "mu_denoiser.enabled(config/available/runtime/has_weights)=%s/%s/%s/%s "
             "restore_S_guidance=%s inference.mode=%s sde_mu_hole_mode=%s "
+            "expected_train_sde_mu_hole_mode=%s "
             "save_states=%s save_intermediates=%s discriminator_guidance=%s "
             "deterministic_reverse=%s known_area_projection=%s "
             "force_legacy_reverse=%s condition_known_source=%s structure_source=%s",
@@ -209,6 +216,7 @@ class DenoisingModel(BaseModel):
             self.restore_s_guidance,
             self.inference_mode,
             inference_opt.get("sde_mu_hole_mode", "known_only"),
+            self.expected_train_sde_mu_hole_mode or "unset",
             bool(inference_opt.get("save_states", False)),
             self.save_intermediates,
             self.discriminator_guidance,
@@ -218,6 +226,18 @@ class DenoisingModel(BaseModel):
             self.condition_known_source,
             self.structure_source,
         )
+        if (
+            self.expected_train_sde_mu_hole_mode
+            and self.expected_train_sde_mu_hole_mode
+            != str(inference_opt.get("sde_mu_hole_mode", "known_only")).lower()
+        ):
+            logger.warning(
+                "[RouteCheck] train/inference sde_mu_hole_mode mismatch: "
+                "expected_train=%s inference=%s. "
+                "This is a real distribution shift for checkpoints trained with a non-black hole mu.",
+                self.expected_train_sde_mu_hole_mode,
+                inference_opt.get("sde_mu_hole_mode", "known_only"),
+            )
         logger.info(
             "[RouteCheck] pretrain_model_G=%s pretrain_model_Gs=%s pretrain_model_D=%s strict_load=%s",
             self.opt["path"].get("pretrain_model_G"),
@@ -915,6 +935,17 @@ class DenoisingModel(BaseModel):
             "white_ratio": float((white / white_denom).item()),
         }
 
+    def _masked_l1(self, lhs, rhs, mask):
+        if lhs is None or rhs is None or mask is None:
+            return None
+        lhs = lhs.detach().float()
+        rhs = rhs.detach().float().to(device=lhs.device)
+        mask = mask.detach().float().to(device=lhs.device)
+        if mask.shape[1] != lhs.shape[1]:
+            mask = mask.expand(-1, lhs.shape[1], -1, -1)
+        denom = mask.sum().clamp_min(1.0)
+        return float(((lhs - rhs).abs() * mask).sum().div(denom).item())
+
     def _log_inference_debug_stats(self, pred_full, final, prepared=None):
         if self.mask_hole is None:
             return
@@ -963,6 +994,19 @@ class DenoisingModel(BaseModel):
             lut_hole.get("max", 0.0),
             lut_hole.get("white_ratio", 0.0),
         )
+        if self.state_0 is not None:
+            gt = self.state_0.to(device=final.device)
+            lut = prepared.get("lut_transformed") if prepared is not None else None
+            logger.info(
+                "[Target Debug] final_gt_l1=%.6f raw_gt_l1=%.6f prior_gt_l1=%.6f "
+                "lut_gt_l1=%.6f final_prior_l1=%.6f final_lut_l1=%.6f",
+                self._masked_l1(final, gt, self.mask_hole) or 0.0,
+                self._masked_l1(pred_full, gt, self.mask_hole) or 0.0,
+                self._masked_l1(self.color_prior, gt, self.mask_hole) or 0.0,
+                self._masked_l1(lut, gt, self.mask_hole) or 0.0,
+                self._masked_l1(final, self.color_prior, self.mask_hole) or 0.0,
+                self._masked_l1(final, lut, self.mask_hole) or 0.0,
+            )
 
     def load(self):
         """Load texture G, structure Gs, and discriminator D in official order."""
