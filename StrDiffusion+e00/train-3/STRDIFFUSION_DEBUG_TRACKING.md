@@ -625,3 +625,67 @@ Decision rules:
 - If `lut-known-gt-structure` recovers most of the GT-parity quality, current LUT structure is the bottleneck.
 - If `gt-known-lut-structure` recovers most quality, the known-source / boundary target-domain alignment is the bottleneck.
 
+
+## 2026-04-23 21:55 structure/known/floor ablation: structure is not the main bottleneck
+
+User visual feedback:
+
+- `floor06-current-domain`
+  - more obvious split/white-edge behavior; forcing low-confidence area to trust prior more is not clean.
+- `gt-known-lut-structure`
+  - visually smoother / blurrier, but less broken.
+- `lut-known-gt-structure`
+  - still has split/white-edge; using GT structure alone does not fix the current-domain artifact.
+
+Log evidence on `000098_bottom`:
+
+- `lut-known-gt-structure`
+  - `condition_known_source=lut`
+  - `structure_source=gt_if_available`
+  - `final_gt_l1=0.063383`
+  - `final_prior_l1=0.098316`
+  - low-confidence split:
+    - `low_ratio=0.4281`
+    - `final_gt_low=0.053104`
+    - `final_gt_high=0.071078`
+  - GT structure alone did not reproduce the earlier good GT-parity quality.
+- `gt-known-lut-structure`
+  - `condition_known_source=gt_if_available`
+  - `structure_source=lut`
+  - `final_gt_l1=0.048132`
+  - `final_prior_l1=0.077393`
+  - this is close to `floor06` numerically, but visually smoother.
+- `floor06-current-domain`
+  - `condition_known_source=lut`
+  - `structure_source=lut`
+  - `safe_prior_min_reliability=0.6`
+  - `final_gt_l1=0.048420`
+  - `prior_gt_l1=0.054512`
+  - `final_prior_l1=0.052530`
+  - `low_ratio=0` because the reliability floor turned the whole hole into high-confidence.
+
+Interpretation:
+
+1. `structure_source=gt_if_available` by itself is **not** the key. It leaves the LUT-known boundary / white-edge problem.
+2. `condition_known_source=gt_if_available` recovers much more quality, even while `structure_source=lut`; the major gap is therefore the known/source-side conditioning and boundary consistency, not the structure network.
+3. `floor06` proves that simply raising confidence globally can improve L1 but worsens visual naturalness. The color prior is not trustworthy enough to dominate the whole low-confidence hole.
+4. Current best practical route is still the original `safe_prior-current-domain` or a mild reliability lift, not `floor06`.
+
+New follow-up configs:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-floor03-current-domain.yml`
+  - weaker floor (`0.3`) to see if it helps low-confidence white without the floor06 split.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-degraded-known-lut-structure.yml`
+  - no-GT replacement for the helpful GT-known route; tests whether the observed degraded known pixels preserve more boundary texture than LUT-known.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-condition-mu-structure.yml`
+  - tests structure generated from the actual `condition_mu`, so edge guidance matches the hole prior instead of pure LUT.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-no-extra-x7-48000-guarded-safe-prior-no-compose-guard-current-domain.yml`
+  - disables final compose dilation/feather/white-guard to test whether visible white rims are introduced by final compositing rather than SDE prediction.
+
+Decision rules:
+
+- If `degraded-known-lut-structure` approaches `gt-known-lut-structure`, use degraded/observed known conditioning instead of LUT-known in current-domain.
+- If `condition-mu-structure` reduces split/white edge, structure should be built from the same `condition_mu` used by the texture SDE.
+- If `no-compose-guard` removes white rims but creates hard mask edges, the final fix should retune compose alpha, not the diffusion path.
+- If `floor03` is better than both floor06 and no-floor, keep a mild reliability floor; otherwise abandon global floor and fix color-prior generation.
+
