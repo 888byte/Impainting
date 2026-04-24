@@ -1062,6 +1062,33 @@ class DenoisingModel(BaseModel):
             lut_hole.get("max", 0.0),
             lut_hole.get("white_ratio", 0.0),
         )
+        if prepared is not None:
+            lut = prepared.get("lut_transformed")
+            denoised = prepared.get("denoised_original")
+            raw_prior = prepared.get("color_prior_raw")
+            prior_debug = prepared.get("prior_debug") or {}
+            if lut is not None and denoised is not None:
+                logger.info(
+                    "[LUTDelta Debug] denoised_to_lut_known=%.6f denoised_to_lut_hole=%.6f "
+                    "condmu_to_lut_known=%.6f condmu_to_lut_hole=%.6f rawprior_to_safeprior_hole=%.6f",
+                    self._masked_l1(denoised, lut, self.mask) or 0.0,
+                    self._masked_l1(denoised, lut, self.mask_hole) or 0.0,
+                    self._masked_l1(self.condition, lut, self.mask) or 0.0,
+                    self._masked_l1(self.condition, lut, self.mask_hole) or 0.0,
+                    self._masked_l1(raw_prior, self.color_prior, self.mask_hole) or 0.0,
+                )
+
+            image_for_lut = prior_debug.get("image_for_lut")
+            color_prior_lut = prior_debug.get("color_prior_lut")
+            if image_for_lut is not None and color_prior_lut is not None:
+                logger.info(
+                    "[ColorTransform Debug] degraded_to_prefill_known=%.6f degraded_to_prefill_hole=%.6f "
+                    "prefill_to_lut_known=%.6f prefill_to_lut_hole=%.6f",
+                    self._masked_l1(self.original_degraded, image_for_lut, self.mask) or 0.0,
+                    self._masked_l1(self.original_degraded, image_for_lut, self.mask_hole) or 0.0,
+                    self._masked_l1(image_for_lut, color_prior_lut, self.mask) or 0.0,
+                    self._masked_l1(image_for_lut, color_prior_lut, self.mask_hole) or 0.0,
+                )
         if self.state_0 is not None:
             gt = self.state_0.to(device=final.device)
             lut = prepared.get("lut_transformed") if prepared is not None else None

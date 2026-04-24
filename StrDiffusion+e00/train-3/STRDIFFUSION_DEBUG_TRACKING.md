@@ -689,3 +689,103 @@ Decision rules:
 - If `no-compose-guard` removes white rims but creates hard mask edges, the final fix should retune compose alpha, not the diffusion path.
 - If `floor03` is better than both floor06 and no-floor, keep a mild reliability floor; otherwise abandon global floor and fix color-prior generation.
 
+
+## 2026-04-23 23:15 latest 4-way current-domain ablation: compose / structure / degraded-known are not the root cause
+
+Files:
+
+- `C:/Users/admin/Desktop/test_ir-sde-no-extra-x7-48000-guarded-safe-prior-floor03-current-domain_260423-225011.log`
+- `C:/Users/admin/Desktop/test_ir-sde-no-extra-x7-48000-guarded-safe-prior-degraded-known-lut-structure_260423-224812.log`
+- `C:/Users/admin/Desktop/test_ir-sde-no-extra-x7-48000-guarded-safe-prior-no-compose-guard-current-domain_260423-224823.log`
+- `C:/Users/admin/Desktop/test_ir-sde-no-extra-x7-48000-guarded-safe-prior-condition-mu-structure_260423-225559.log`
+
+User visual feedback:
+
+- `floor03-current-domain`: still the same failure mode; high-confidence area slightly better, low-confidence area still pale/white.
+- `degraded-known-lut-structure`: close to `floor03`, maybe slightly worse in texture.
+- `no-compose-guard-current-domain`: almost full-white hole; removing compose guard does **not** solve white regions.
+- `condition-mu-structure`: close to the base current-domain route, no decisive improvement.
+
+Key log evidence on `000098_bottom`:
+
+- `floor03-current-domain`
+  - `condition_known_source=lut`
+  - `structure_source=lut`
+  - `safe_prior_min_reliability=0.300`
+  - `final_gt_l1=0.080157`
+  - `final_gt_low=0.067269`
+  - `final_gt_high=0.089806`
+  - `x_init_hole(mean=0.8167,min=0.5815,max=0.9978,white=0.0000)`
+- `degraded-known-lut-structure`
+  - `condition_known_source=degraded`
+  - `structure_source=lut`
+  - `final_gt_l1=0.102415`
+  - `final_gt_low=0.085890`
+  - `final_gt_high=0.114786`
+  - `x_init_hole(mean=0.8138,min=0.5815,max=0.9978,white=0.0000)`
+- `no-compose-guard-current-domain`
+  - `compose_mask_dilate=0`
+  - `compose_feather=0`
+  - `compose_white_guard=False`
+  - `final_gt_l1=0.096035`
+  - `final_gt_low=0.092341`
+  - `final_gt_high=0.098800`
+  - `x_init_hole(mean=0.8138,min=0.5815,max=0.9978,white=0.0000)`
+- `condition-mu-structure`
+  - `structure_source=condition_mu`
+  - `final_gt_l1=0.082993`
+  - `final_gt_low=0.079377`
+  - `final_gt_high=0.085700`
+  - `x_init_hole(mean=0.8138,min=0.5815,max=0.9978,white=0.0000)`
+
+Cross-run interpretation:
+
+1. `no-compose-guard` becoming almost full-white means the white block is **not** a final compose artifact. The compose guard is actually suppressing part of the white failure.
+2. `degraded-known` does not approach the earlier `gt-known` quality, so simply swapping known/source from LUT to degraded is not the main fix.
+3. `condition-mu-structure` is not materially better than the default LUT structure, so structure routing is still secondary.
+4. `floor03` helps some numeric slices but does not change the failure mode. Reliability floor tuning is not the root fix.
+
+Current strongest hypothesis:
+
+- The real structural issue is now narrowed to **training semantics + weak target-domain color transform**:
+  - x7 was trained with `train.sde_mu_hole_mode=condition_lut`, so the hole clean state seen during training is a bright filled target-domain estimate, **not a black/empty hole**.
+  - In current inference runs, `x_init_hole(mean)` is still very bright (`0.61~0.82` depending on sample), so the reverse path starts from a pale anchor rather than a blank hole.
+  - This matches the user observation: high-confidence areas can keep some texture, but low-confidence areas do not synthesize structure and instead stay pale/white.
+  - Therefore the remaining issue is likely **not** “which inference switch to toggle”, but that the x7 checkpoint has learned to denoise around a filled hole anchor instead of learning robust hole generation from noise.
+
+Secondary suspicion confirmed by code inspection:
+
+- The current color transform path is intentionally conservative:
+  - `_build_lut_transformed()` blends LUT output back with the original image using `effective_weight = lut_confidence * lut_strength`.
+  - `ColorPriorGenerator.generate_quality()` heavily smooths Lab deltas (multi-scale + guided/bilateral filtering).
+  - So even `lut_strength: 1.0` does **not** imply a strong visible domain shift; the actual transform can still be weak.
+- This matches the user’s feeling that “变色了和没变色差不多”.
+
+New instrumentation added:
+
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - added `[LUTDelta Debug]`
+    - `denoised_to_lut_known`
+    - `denoised_to_lut_hole`
+    - `condmu_to_lut_known`
+    - `condmu_to_lut_hole`
+    - `rawprior_to_safeprior_hole`
+  - added `[ColorTransform Debug]`
+    - `degraded_to_prefill_known`
+    - `degraded_to_prefill_hole`
+    - `prefill_to_lut_known`
+    - `prefill_to_lut_hole`
+
+Purpose of the new logs:
+
+- directly quantify whether the LUT / color-change branch is actually doing a meaningful transformation,
+- and whether `condition_mu` is already so close to `lut_transformed` / `safe_prior` that the reverse trajectory has no incentive to generate texture in hole pixels.
+
+Practical implication for the next training fix (if retraining is needed):
+
+- We do **not** need to delete BrushNet / color prior / confidence.
+- The likely fix is to keep those modules as auxiliary guidance, but stop using a filled hole anchor as the main SDE clean state:
+  - prefer `train.sde_mu_hole_mode=known_only`
+  - or introduce a mixed schedule where only part of training uses filled hole anchors
+- This preserves the innovation while preventing the color prior from dominating the restoration trajectory.
+
