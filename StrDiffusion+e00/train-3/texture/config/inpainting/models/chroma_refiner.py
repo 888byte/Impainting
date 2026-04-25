@@ -9,9 +9,9 @@ chroma_refiner.py - 轻量级色度精炼网络
 
 核心设计：
 ----------
-1. MDTA-lite: Multi-Dconv Transposed Attention (轻量版)
+1. Compact MDTA: Multi-Dconv Transposed Attention
    - 跨通道注意力 + depthwise conv 引入局部感知
-2. GDFN-lite: Gated-Dconv Feed-forward Network (轻量版)
+2. Compact GDFN: Gated-Dconv Feed-forward Network
    - 门控 FFN，expand ratio = 2
 3. 输出限幅: tanh × learnable_scale，防止 ab 爆炸
 4. 门控机制: 只在低置信区域生效

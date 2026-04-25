@@ -796,3 +796,91 @@ Practical implication for the next training fix (if retraining is needed):
 - Restored the x8 code/config changes after accidental deletion.
 - x8 config comments are ASCII-only to avoid Chinese mojibake in Windows/remote terminals.
 - Chinese dataset path values are still saved as UTF-8 because the Linux dataset paths require them.
+
+
+### 2026-04-25 x8 restore verification
+
+This pass re-checked the restored x8 files and fixed one important config issue.
+
+Files restored/verified:
+
+- Train code:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/color_prior_generator.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/__init__.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/mural_inpainting_dataset.py`
+- Test code:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/color_prior_generator.py`
+- Wrapper cleanup:
+  - `PixelBrushNetLite` / `brushnet_lite` were removed from the PriorBrushNet route.
+  - Only `PixelBrushNet` remains as the color-prior branch used by `ConditionalUNetWithBrushNet`.
+- x8 configs:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x8-knownonly.yml`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x8-knownonly-current-domain.yml`
+
+Important fix:
+
+- The two x8 YAML files had their Linux Chinese dataset directory accidentally saved as `?????`.
+- Restored it to UTF-8 `裁剪的图片` in:
+  - `degradation.mask_root`
+  - `datasets.train.dataroot_GT`
+  - `datasets.train.dataroot_mask`
+  - `datasets.test.dataroot_degraded`
+  - `datasets.test.dataroot_mask`
+  - `datasets.test.dataroot_GT`
+- Keep comments in these YAML files ASCII-only, but keep path values UTF-8.
+
+x8 behavior that must stay fixed:
+
+- `train.sde_mu_hole_mode: known_only`
+  - SDE `condition_mu` keeps only known pixels: `condition_mu = mu_clean_lut * mask_known`.
+  - The hole is not filled by `condition_lut`, `safe_prior`, or raw `color_prior`.
+- `inference.sde_mu_hole_mode: known_only`
+  - The clean `x_init` hole should be black/empty before reverse noise.
+- `BrushNet/PriorBrushNet`
+  - enabled as weak guidance only.
+  - `feature_scale: 0.01`.
+  - color prior is passed through confidence/consistency gating before injection.
+- `MGLC` / `MuCleaner`
+  - train config keeps them enabled for x8 training, as requested.
+  - test config keeps module switches so later ablation can use `--set texture_core.enabled=false` and `--set mu_denoiser.enabled=false`.
+- `lut_delta_gain: 1.5`
+  - applied in both `ColorPriorGenerator` and LUT target construction to make the target-domain color shift visible.
+  - It only strengthens color transform; it must not become a hole SDE anchor.
+
+Validation commands run on 2026-04-25:
+
+- `python -m py_compile` over restored train/test Python files.
+- YAML parse check over all train/test option files.
+- Static x8 route assertion: `X8_ROUTE_STATIC_ASSERT_OK`.
+- Search check for removed PriorBrushNet lite route:
+  - no `PixelBrushNetLite`
+  - no `brushnet_lite`
+  - no remaining `lite:` matches in train/test inpainting Python/YAML files
+- Search check for corrupted `?????` dataset paths:
+  - no remaining `?????` in train/test option YAML files.
+
+Expected logs for the next x8 training/test run:
+
+- Train:
+  - `train.sde_mu_hole_mode=known_only`
+  - `infer_x0_loss_weight=0.0`
+  - `infer_x0_grad=False`
+  - `LUT delta gain=1.500`
+  - `stats_prefill_to_lut_known`
+  - `stats_prefill_to_lut_hole`
+  - `stats_training_target_to_lut`
+- Test:
+  - `sde_mu_hole_mode=known_only`
+  - `expected_train_sde_mu_hole_mode=known_only`
+  - `lut_delta_gain=1.500`
+  - `final_white_ratio_hole`
+
+Next recommended command:
+
+```bash
+cd /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting
+python train.py -opt options/train/ir-sde-brushnet-ft-x8-knownonly.yml
+```

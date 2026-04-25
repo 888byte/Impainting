@@ -16,7 +16,7 @@ sde:
   high_t_min_ratio: 0.60
 
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/?????/train/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
 brushnet:
   enabled: true
@@ -64,8 +64,8 @@ datasets:
   train:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
-    dataroot_GT: /home/610-wws/Impainting/dataset/?????/train/cropped_images
-    dataroot_mask: /home/610-wws/Impainting/dataset/?????/train/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
     gt_mode: full
     lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
     lut_alpha: 0.85
