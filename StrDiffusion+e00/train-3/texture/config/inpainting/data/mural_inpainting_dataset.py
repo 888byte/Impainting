@@ -78,7 +78,8 @@ class MuralInpaintingDataset(Dataset):
         debug_dir: str = './debug_logs',
         lut_alpha: float = 0.7,
         lut_beta: float = 0.3,
-        lut_inpaint_method: str = 'telea'
+        lut_inpaint_method: str = 'telea',
+        lut_delta_gain: float = 1.0
     ):
         """
         初始化数据集
@@ -118,6 +119,7 @@ class MuralInpaintingDataset(Dataset):
             alpha=lut_alpha,
             beta=lut_beta,
             inpaint_method=lut_inpaint_method,
+            lut_delta_gain=self.lut_delta_gain,
             inpaint_mask_dilate=opt.get('prior_inpaint_mask_dilate', opt.get('inpaint_mask_dilate', 3))
         )
         

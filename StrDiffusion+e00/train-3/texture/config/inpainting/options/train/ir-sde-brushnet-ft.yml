@@ -31,7 +31,6 @@ brushnet:
   in_nc: 8
   nf: 64
   depth: 4
-  lite: false
   prior_dropout_prob: 0.05
   #### Keep BrushNet as weak hole-only reference guidance.
   feature_scale: 0.30

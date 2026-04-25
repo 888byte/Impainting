@@ -96,6 +96,7 @@ class DenoisingModel(BaseModel):
         # condition_mu during reverse sampling; holes remain predicted by the model.
         self.known_area_projection = bool(self.inference_opt.get("known_area_projection", True))
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
+        self.lut_delta_gain = max(0.0, float(self.dataset_opt.get("lut_delta_gain", 1.0) or 1.0))
         self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
         self.expected_train_sde_mu_hole_mode = str(
@@ -145,6 +146,7 @@ class DenoisingModel(BaseModel):
                     "prior_inpaint_mask_dilate",
                     self.dataset_opt.get("inpaint_mask_dilate", 3),
                 ),
+                lut_delta_gain=self.lut_delta_gain,
             )
 
         mu_opt = opt.get("mu_denoiser", {})
@@ -219,7 +221,7 @@ class DenoisingModel(BaseModel):
             "deterministic_reverse=%s known_area_projection=%s "
             "force_legacy_reverse=%s condition_known_source=%s structure_source=%s "
             "safe_prior_min_reliability=%.3f safe_prior_confidence_power=%.3f "
-            "confidence_debug_threshold=%.3f",
+            "lut_delta_gain=%.3f confidence_debug_threshold=%.3f",
             bool(brushnet_opt.get("enabled", False)),
             brushnet_runtime,
             getattr(module, "brushnet_feature_scale", None),
@@ -244,6 +246,7 @@ class DenoisingModel(BaseModel):
             self.structure_source,
             self.safe_prior_min_reliability,
             self.safe_prior_confidence_power,
+            self.lut_delta_gain,
             self.confidence_debug_threshold,
         )
         if (
@@ -513,9 +516,11 @@ class DenoisingModel(BaseModel):
             # values >1 saturate the whole image to a full LUT jump.
             strength = float(max(0.0, min(1.0, self.dataset_opt.get("lut_strength", 1.0))))
             effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * strength
-            lut_transformed = (
-                denoised_original * (1 - effective_weight)
-                + lut_transformed * effective_weight
+            lut_delta = lut_transformed - denoised_original
+            lut_transformed = torch.clamp(
+                denoised_original + lut_delta * effective_weight * self.lut_delta_gain,
+                0.0,
+                1.0,
             )
 
         # Align known pixels to CondLUT, then softly gate the hole prior by
@@ -1094,15 +1099,20 @@ class DenoisingModel(BaseModel):
             lut = prepared.get("lut_transformed") if prepared is not None else None
             final_prior_l1 = self._masked_l1(final, self.color_prior, self.mask_hole) or 0.0
             final_lut_l1 = self._masked_l1(final, lut, self.mask_hole) or 0.0
+            final_white_ratio_hole = final_hole.get("white_ratio", 0.0)
+            training_target_to_lut = self._masked_l1(gt, lut, self.mask_hole) or 0.0
             logger.info(
                 "[Target Debug] final_gt_l1=%.6f raw_gt_l1=%.6f prior_gt_l1=%.6f "
-                "lut_gt_l1=%.6f final_prior_l1=%.6f final_lut_l1=%.6f",
+                "lut_gt_l1=%.6f training_target_to_lut=%.6f final_prior_l1=%.6f "
+                "final_lut_l1=%.6f final_white_ratio_hole=%.6f",
                 self._masked_l1(final, gt, self.mask_hole) or 0.0,
                 self._masked_l1(pred_full, gt, self.mask_hole) or 0.0,
                 self._masked_l1(self.color_prior, gt, self.mask_hole) or 0.0,
-                self._masked_l1(lut, gt, self.mask_hole) or 0.0,
+                training_target_to_lut,
+                training_target_to_lut,
                 final_prior_l1,
                 final_lut_l1,
+                final_white_ratio_hole,
                 )
             mu_hole_mode = str(self.inference_opt.get("sde_mu_hole_mode", "known_only")).lower()
             if mu_hole_mode != "known_only":

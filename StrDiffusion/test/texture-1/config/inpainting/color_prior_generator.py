@@ -73,7 +73,8 @@ class ColorPriorGenerator:
         large_mask_threshold: float = 0.3,
         inpaint_conf_known: float = 1.0,
         inpaint_conf_inpainted: float = 0.3,
-        inpaint_mask_dilate: int = 3
+        inpaint_mask_dilate: int = 3,
+        lut_delta_gain: float = 1.0
     ):
         """
         初始化颜色先验生成器
@@ -100,6 +101,7 @@ class ColorPriorGenerator:
         # public hole/known semantics; it only prevents white/gray placeholder
         # borders and downsampled thin mask strokes from being used as known colors.
         self.inpaint_mask_dilate = max(0, int(inpaint_mask_dilate))
+        self.lut_delta_gain = max(0.0, float(lut_delta_gain))
         
         # 修复方法选择
         if inpaint_method.lower() == 'telea':
@@ -119,6 +121,7 @@ class ColorPriorGenerator:
         print(f"  - 修复方法: {inpaint_method}")
         print(f"  - 大面积阈值: {self.large_mask_threshold * 100:.0f}%")
         print(f"  - inpaint mask dilate: {self.inpaint_mask_dilate}px")
+        print(f"  - LUT delta gain: {self.lut_delta_gain:.3f}")
 
     def feather_blend(
         self,
@@ -140,6 +143,35 @@ class ColorPriorGenerator:
         )
         return np.clip(blended, 0.0, 255.0).astype(np.uint8)
 
+    def _apply_lut_delta_gain(self, image: np.ndarray, lut_image: np.ndarray) -> np.ndarray:
+        """Amplify LUT chroma delta while keeping the source luminance stable."""
+        image_u8 = np.clip(image, 0, 255).astype(np.uint8)
+        lut_u8 = np.clip(lut_image, 0, 255).astype(np.uint8)
+        if abs(self.lut_delta_gain - 1.0) < 1e-6:
+            return lut_u8
+
+        orig_lab = cv2.cvtColor(
+            cv2.cvtColor(image_u8, cv2.COLOR_RGB2BGR),
+            cv2.COLOR_BGR2LAB,
+        ).astype(np.float32)
+        lut_lab = cv2.cvtColor(
+            cv2.cvtColor(lut_u8, cv2.COLOR_RGB2BGR),
+            cv2.COLOR_BGR2LAB,
+        ).astype(np.float32)
+        out_lab = orig_lab.copy()
+        out_lab[..., 1] = np.clip(
+            orig_lab[..., 1] + (lut_lab[..., 1] - orig_lab[..., 1]) * self.lut_delta_gain,
+            0,
+            255,
+        )
+        out_lab[..., 2] = np.clip(
+            orig_lab[..., 2] + (lut_lab[..., 2] - orig_lab[..., 2]) * self.lut_delta_gain,
+            0,
+            255,
+        )
+        out_bgr = cv2.cvtColor(out_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+
     def build_target(
         self,
         image: np.ndarray,
@@ -159,7 +191,7 @@ class ColorPriorGenerator:
             [H, W, 3] uint8 target image aligned with training supervision.
         """
         lut_only, _ = self.lut.trilinear_interpolate(image)
-        lut_only = np.clip(lut_only, 0, 255).astype(np.uint8)
+        lut_only = self._apply_lut_delta_gain(image, lut_only)
         if mode == 'full':
             return lut_only
         if mode == 'partial':
@@ -493,9 +525,11 @@ class ColorPriorGenerator:
         # ============================================================
         # Step 4: 应用平滑后的色差生成新的 Lab 图像
         # ============================================================
+        da_smooth = da_smooth * self.lut_delta_gain
+        db_smooth = db_smooth * self.lut_delta_gain
         new_lab = orig_lab.copy()
-        new_lab[..., 1] = orig_lab[..., 1] + da_smooth
-        new_lab[..., 2] = orig_lab[..., 2] + db_smooth
+        new_lab[..., 1] = np.clip(orig_lab[..., 1] + da_smooth, 0, 255)
+        new_lab[..., 2] = np.clip(orig_lab[..., 2] + db_smooth, 0, 255)
         
         # 转回 RGB
         new_bgr = cv2.cvtColor(new_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
@@ -539,7 +573,8 @@ class ColorPriorGenerator:
         }
         
         if debug:
-            result['color_prior_lut'] = color_prior_lut
+            result['color_prior_lut_raw'] = color_prior_lut
+            result['color_prior_lut'] = color_prior_full
             result['color_prior_inpainted'] = color_prior_inpainted
             result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
@@ -613,9 +648,11 @@ class ColorPriorGenerator:
         # ============================================================
         # Step 4: 应用平滑后的色差
         # ============================================================
+        da_smooth = da_smooth * self.lut_delta_gain
+        db_smooth = db_smooth * self.lut_delta_gain
         new_lab = orig_lab.copy()
-        new_lab[..., 1] = orig_lab[..., 1] + da_smooth
-        new_lab[..., 2] = orig_lab[..., 2] + db_smooth
+        new_lab[..., 1] = np.clip(orig_lab[..., 1] + da_smooth, 0, 255)
+        new_lab[..., 2] = np.clip(orig_lab[..., 2] + db_smooth, 0, 255)
         
         new_bgr = cv2.cvtColor(new_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
         color_prior_full = cv2.cvtColor(new_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
@@ -651,7 +688,8 @@ class ColorPriorGenerator:
         }
         
         if debug:
-            result['color_prior_lut'] = color_prior_lut
+            result['color_prior_lut_raw'] = color_prior_lut
+            result['color_prior_lut'] = color_prior_full
             result['color_prior_inpainted'] = color_prior_inpainted
             result['image_for_lut'] = image_for_lut
             result['mask_ratio'] = self._calculate_mask_ratio(mask)
@@ -702,6 +740,7 @@ class ColorPriorGenerator:
         color_priors = []
         confidences = []
         debug_buffers = {
+            'color_prior_lut_raw': [],
             'color_prior_lut': [],
             'color_prior_inpainted': [],
             'image_for_lut': [],

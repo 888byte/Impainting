@@ -789,3 +789,10 @@ Practical implication for the next training fix (if retraining is needed):
   - or introduce a mixed schedule where only part of training uses filled hole anchors
 - This preserves the innovation while preventing the color prior from dominating the restoration trajectory.
 
+
+
+### 2026-04-24 restore note
+
+- Restored the x8 code/config changes after accidental deletion.
+- x8 config comments are ASCII-only to avoid Chinese mojibake in Windows/remote terminals.
+- Chinese dataset path values are still saved as UTF-8 because the Linux dataset paths require them.

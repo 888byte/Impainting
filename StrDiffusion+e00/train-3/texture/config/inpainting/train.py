@@ -121,7 +121,11 @@ def _build_tb_scalar_map(logs):
     add("stats/condition_known_mean", "stats_condition_known_mean")
     add("stats/condition_known_std", "stats_condition_known_std")
     add("stats/condition_lut_delta_known", "stats_condition_lut_delta_known")
-    add("stats/target_lut_delta", "stats_target_lut_delta")
+    add("stats/condition_lut_delta_hole", "stats_condition_lut_delta_hole")
+    add("stats/prefill_to_lut_known", "stats_prefill_to_lut_known")
+    add("stats/prefill_to_lut_hole", "stats_prefill_to_lut_hole")
+    add("stats/training_target_delta", "stats_training_target_delta")
+    add("stats/training_target_to_lut", "stats_training_target_to_lut")
     add("stats/mu_known_mean", "stats_mu_known_mean")
     add("stats/mu_known_std", "stats_mu_known_std")
     add("stats/cond_lut_hole_mean", "stats_cond_lut_hole_mean")
@@ -654,10 +658,9 @@ def main():
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
                     # SDE mu construction for mural mode.
-                    # Default remains original known-only semantics, but mural inpainting can
-                    # explicitly anchor hole pixels with a target-domain estimate.  Never use
-                    # raw degraded-domain pixels here.  ``condition_lut`` is the safest hole
-                    # anchor; ``safe_prior`` is confidence-gated and only for ablation.
+                    # x8 default is original known-only semantics: hole pixels in SDE mu stay
+                    # blank, while color prior/condition_lut are only auxiliary guidance.
+                    # condition_lut and safe_prior remain explicit ablation modes only.
                     mu_hole_mode = opt.get("train", {}).get("sde_mu_hole_mode", "known_only")
                     mask_hole_for_sde = 1 - mask_for_sde
                     if mu_hole_mode == "known_only":

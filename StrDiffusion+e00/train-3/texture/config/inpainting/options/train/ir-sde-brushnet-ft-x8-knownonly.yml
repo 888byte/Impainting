@@ -1,40 +1,38 @@
-#### BrushNet + MGLC-Tex enhanced training config
+# x8 known_only finetune config. Keep comments ASCII to avoid console mojibake.
+# Usage: python train.py -opt options/train/ir-sde-brushnet-ft-x8-knownonly.yml
 
-name: ir-sde-brushnet
+name: ir-sde-brushnet-ft-x8-knownonly
 use_tb_logger: true
 model: denoising
 distortion: inpainting
 gpu_ids: [0]
 
-#### SDE
 sde:
   max_sigma: 30
   T: 400
   schedule: cosine
   eps: 0.005
+  high_t_prob: 0.40
+  high_t_min_ratio: 0.60
 
-#### Degradation
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/?????/train/output_masks
 
-#### BrushNet
 brushnet:
   enabled: true
   in_nc: 8
   nf: 64
   depth: 4
-  prior_dropout_prob: 0.3
+  prior_dropout_prob: 0.5
+  feature_scale: 0.01
+  use_spatial_gate: true
 
-#### Main trunk guidance compatibility field
-#### Keep this disabled so the main repair path stays aligned with original
-#### StrDiffusion semantics: cond/mu = observed_masked input.
 main_guidance:
   enabled: false
   use_observed_input: true
   use_mask: true
   zero_init: true
 
-#### Texture core final enhanced version
 texture_core:
   enabled: true
   name: MGLCBlock
@@ -47,11 +45,8 @@ texture_core:
   boundary_width: 3
   zero_init_last: true
 
-#### Baseline compatibility fix only; not counted as innovation
 restore_S_guidance: true
 
-#### Self-Supervised Mu-Denoiser 配置 (D_mu)
-# 在 SDE 训练前清理条件均值 mu，使用 blind-spot 自监督训练（不需要干净 GT）
 mu_denoiser:
   enabled: true
   in_nc: 5
@@ -62,37 +57,30 @@ mu_denoiser:
   blind_ratio: 0.1
   lambda_ss: 1.0
   lambda_tv: 0.01
-  lr: !!float 1e-4
+  lr: !!float 5e-5
   sde_warmup_iter: 1000
 
-#### Dataset
 datasets:
   train:
     name: MuralInpainting_Dataset
     mode: mural_inpainting
-    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
-    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
-
-    #### full: 整图颜色恢复 + 修补
-    #### partial: 已知区尽量保留，仅 hole 区使用 LUT 目标
+    dataroot_GT: /home/610-wws/Impainting/dataset/?????/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/?????/train/output_masks
     gt_mode: full
-
-    #### 必须显式提供 LUT 文件，不再回退旧默认值
     lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
     lut_alpha: 0.85
     lut_beta: 0.15
     lut_inpaint_method: telea
     lut_strength: 1.0
+    lut_delta_gain: 1.5
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
     prior_lut_gap_scale: 0.15
-
-    #### fast: 更快
-    #### quality: 更稳，正式训练推荐使用
+    prior_inpaint_mask_dilate: 3
     prior_method: quality
-    #### 是否保存 dataset 侧调试图
     debug_mode: false
-
+    observed_hole_fill: white
+    observed_hole_fill_value: 255
     use_shuffle: true
     n_workers: 32
     batch_size: 16
@@ -104,7 +92,6 @@ datasets:
     use_rot: true
     color: RGB
 
-#### Network
 network_G:
   which_model_G: ConditionalUNetWithBrushNet
   setting:
@@ -113,38 +100,41 @@ network_G:
     nf: 64
     depth: 4
 
-#### Paths
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/experiments/inpainting/ir-sde/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth
   strict_load: false
   resume_state: ~
 
-#### Training
 train:
   optimizer: Adam
-  lr_G: !!float 1e-5
+  lr_G: !!float 5e-6
+  lr_new: !!float 1e-5
   lr_scheme: MultiStepLR
   beta1: 0.9
   beta2: 0.999
-  niter: 150000
-  warmup_iter: 5000
-  lr_steps: [40000, 80000, 110000]
+  niter: 50000
+  warmup_iter: 800
+  lr_steps: [8000, 20000, 35000]
   lr_gamma: 0.5
   eta_min: !!float 1e-7
-
-  is_weighted: False
+  is_weighted: false
   loss_type: l1
   weight: 1.0
-  # Auxiliary supervision for the model-implied x0.  It keeps the final
-  # reverse result in the target color domain and prevents white-hole
-  # saturation that can be hidden by a low one-step x_t -> x_{t-1} loss.
-  x0_recon_loss_weight: 0.3
+  enable_g_score_aux: false
+  x0_recon_loss_weight: 0.03
+  x0_high_t_decay: 2.0
   x0_recon_loss_start_iter: 0
   x0_recon_clamp_b_min: !!float 1e-3
-
+  infer_x0_loss_weight: 0.0
+  infer_x0_loss_start_iter: 0
+  infer_x0_t_min_ratio: 0.10
+  infer_x0_t_max_ratio: 0.70
+  infer_x0_grad: false
+  infer_x0_loss_interval: 1
+  infer_x0_microbatch: 0
+  sde_mu_hole_mode: known_only
   manual_seed: 0
 
-#### Debug  长图保存
 debug:
   enabled: false
   log_dir: debug_logs/
@@ -156,8 +146,8 @@ debug:
     - confidence_map
     - masked_input
 
-#### Logger
 logger:
   print_freq: 100
-  save_checkpoint_freq: 5000
+  save_checkpoint_freq: 2000
+  best_save_start_iter: 2000
   use_tb_logger: true

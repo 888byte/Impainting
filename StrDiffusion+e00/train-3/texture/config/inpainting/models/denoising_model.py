@@ -137,11 +137,21 @@ class DenoisingModel(BaseModel):
             if lut_path:
                 logger.warning(f"[Model] LUT 文件不存在: {lut_path}")
         
-        # 获取 LUT 相关配置
+        # LUT / target-domain configuration.
         self.gt_mode = train_dataset_opt.get('gt_mode', 'full')
-        self.lut_strength = train_dataset_opt.get('lut_strength', 1.0)  # LUT 强度
-        self.lut_smooth_radius = train_dataset_opt.get('lut_smooth_radius', 0)  # 平滑半径
-        logger.info(f"[Model] GT 模式: {self.gt_mode}, LUT 强度: {self.lut_strength}, 平滑半径: {self.lut_smooth_radius}")
+        self.lut_strength = float(train_dataset_opt.get('lut_strength', 1.0))
+        self.lut_delta_gain = max(0.0, float(train_dataset_opt.get('lut_delta_gain', 1.0)))
+        self.lut_smooth_radius = int(train_dataset_opt.get('lut_smooth_radius', 0))
+        logger.info(
+            f"[Model] GT mode={self.gt_mode}, LUT strength={self.lut_strength}, "
+            f"LUT delta gain={self.lut_delta_gain}, smooth radius={self.lut_smooth_radius}"
+        )
+        logger.info(
+            "[Model] train.sde_mu_hole_mode=%s infer_x0_loss_weight=%s infer_x0_grad=%s",
+            opt.get('train', {}).get('sde_mu_hole_mode', 'known_only'),
+            opt.get('train', {}).get('infer_x0_loss_weight', 0.0),
+            opt.get('train', {}).get('infer_x0_grad', False),
+        )
         
         # ============ 初始化 Self-Supervised Mu-Denoiser ============
         mu_denoiser_opt = opt.get('mu_denoiser', {})
@@ -931,9 +941,20 @@ class DenoisingModel(BaseModel):
         condition_lut_delta_known = (
             (condition_lut_for_mu - self.original_degraded).abs() * mask_3c
         ).sum() / known_denom
-        target_lut_delta = (training_target - self.reference_degraded).abs().mean()
+        mask_hole_for_stats = 1 - self.mask
+        mask_hole_3c_for_stats = mask_hole_for_stats.expand(-1, condition_lut_for_mu.shape[1], -1, -1)
+        hole_denom_for_stats = mask_hole_3c_for_stats.sum().clamp_min(1.0)
+        condition_lut_delta_hole = (
+            (condition_lut_for_mu - self.original_degraded).abs() * mask_hole_3c_for_stats
+        ).sum() / hole_denom_for_stats
+        training_target_delta = (training_target - self.reference_degraded).abs().mean()
+        training_target_to_lut = (training_target - condition_lut_for_mu).abs().mean()
         self.log_dict["stats_condition_lut_delta_known"] = float(condition_lut_delta_known.item())
-        self.log_dict["stats_target_lut_delta"] = float(target_lut_delta.item())
+        self.log_dict["stats_condition_lut_delta_hole"] = float(condition_lut_delta_hole.item())
+        self.log_dict["stats_prefill_to_lut_known"] = float(condition_lut_delta_known.item())
+        self.log_dict["stats_prefill_to_lut_hole"] = float(condition_lut_delta_hole.item())
+        self.log_dict["stats_training_target_delta"] = float(training_target_delta.item())
+        self.log_dict["stats_training_target_to_lut"] = float(training_target_to_lut.item())
 
         if x0_hat_clamped is not None:
             mask_hole = (1 - self.mask).to(dtype=x0_hat_clamped.dtype, device=x0_hat_clamped.device)
@@ -1076,9 +1097,11 @@ class DenoisingModel(BaseModel):
         # an over-strong color cast while still keeping the LUT target-domain path.
         strength = float(max(0.0, min(1.0, self.lut_strength)))
         effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * strength
-        lut_transformed = (
-            denoised_image * (1 - effective_weight) +
-            lut_transformed * effective_weight
+        lut_delta = lut_transformed - denoised_image
+        lut_transformed = torch.clamp(
+            denoised_image + lut_delta * effective_weight * self.lut_delta_gain,
+            0.0,
+            1.0,
         )
         return lut_transformed, lut_confidence
     
@@ -1340,4 +1363,3 @@ class DenoisingModel(BaseModel):
         
         torch.save(combined_state, save_path)
         #logger.info(f"[Model] 模型已保存到 {save_path}")
-

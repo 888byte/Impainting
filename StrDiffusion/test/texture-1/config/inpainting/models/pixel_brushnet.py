@@ -318,102 +318,6 @@ class PixelBrushNet(nn.Module):
         
         return self.forward(noisy_img, mask, color_prior, confidence, timestep)
 
-
-class PixelBrushNetLite(nn.Module):
-    """
-    轻量级PixelBrushNet - 减少计算开销
-    
-    相比完整版本：
-    - 移除Attention层
-    - 减少ResBlock数量
-    - 适用于资源受限场景
-    """
-    
-    def __init__(
-        self,
-        in_nc: int = 8,
-        nf: int = 64,
-        depth: int = 4,
-        time_emb_dim: Optional[int] = None
-    ):
-        super().__init__()
-        
-        self.depth = depth
-        self.nf = nf
-        
-        if time_emb_dim is None:
-            time_emb_dim = nf * 4
-        self.time_dim = time_emb_dim
-        
-        block_class = functools.partial(ResBlock, conv=default_conv, act=NonLinearity())
-        
-        # 时间嵌入
-        sinu_pos_emb = SinusoidalPosEmb(nf)
-        self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
-            nn.Linear(nf, time_emb_dim),
-            nn.GELU(),
-            nn.Linear(time_emb_dim, time_emb_dim)
-        )
-        
-        # 初始卷积
-        self.init_conv = default_conv(in_nc, nf, kernel_size=3)
-        
-        # 下采样块（简化版，每层只有一个ResBlock）
-        self.downs = nn.ModuleList([])
-        self.zero_convs = nn.ModuleList([])
-        
-        for i in range(depth):
-            dim_in = nf * int(math.pow(2, i))
-            dim_out = nf * int(math.pow(2, i + 1))
-            
-            self.downs.append(nn.ModuleList([
-                block_class(dim_in=dim_in, dim_out=dim_in, time_emb_dim=time_emb_dim),
-                Downsample(dim_in, dim_out) if i != (depth - 1) else default_conv(dim_in, dim_out)
-            ]))
-            
-            self.zero_convs.append(ZeroConv2d(dim_in, dim_in))
-        
-        # 中间块
-        mid_dim = nf * int(math.pow(2, depth))
-        self.mid_block = block_class(dim_in=mid_dim, dim_out=mid_dim, time_emb_dim=time_emb_dim)
-        self.zero_conv_mid = ZeroConv2d(mid_dim, mid_dim)
-        
-        print(f"[PixelBrushNetLite] 轻量级模式，depth={depth}, nf={nf}")
-    
-    def forward(
-        self,
-        noisy_img: torch.Tensor,
-        mask: torch.Tensor,
-        color_prior: torch.Tensor,
-        confidence: torch.Tensor,
-        timestep: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """前向传播"""
-        if isinstance(timestep, (int, float)):
-            timestep = torch.tensor([timestep], device=noisy_img.device)
-        
-        x = torch.cat([noisy_img, mask, color_prior, confidence], dim=1)
-        t_emb = self.time_mlp(timestep)
-        x = self.init_conv(x)
-        
-        down_features = []
-        
-        for blocks, zc in zip(self.downs, self.zero_convs):
-            resblock, downsample = blocks
-            x = resblock(x, t_emb)
-            down_features.append(zc(x))
-            x = downsample(x)
-        
-        x = self.mid_block(x, t_emb)
-        mid_feature = self.zero_conv_mid(x)
-        
-        return {
-            'down_features': down_features,
-            'mid_feature': mid_feature
-        }
-
-
 # =============================================================================
 # 单元测试
 # =============================================================================
@@ -452,16 +356,6 @@ if __name__ == "__main__":
     expected_down_features = 8  # depth=4, 每层2个特征
     assert len(output['down_features']) == expected_down_features, \
         f"下采样特征数量错误: {len(output['down_features'])} vs {expected_down_features}"
-    
-    # 测试轻量版
-    print("\n[测试2] PixelBrushNetLite (轻量版)...")
-    model_lite = PixelBrushNetLite(in_nc=8, nf=64, depth=4).to(device)
-    
-    with torch.no_grad():
-        output_lite = model_lite(noisy_img, mask, color_prior, confidence, timestep)
-    
-    print(f"  下采样特征数量: {len(output_lite['down_features'])}")
-    print(f"  中间层特征形状: {output_lite['mid_feature'].shape}")
     
     # 测试Zero-Conv初始输出
     print("\n[测试3] 验证Zero-Conv初始输出为0...")

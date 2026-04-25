@@ -74,6 +74,7 @@ def create_dataset(dataset_opt):
         lut_alpha = dataset_opt.get('lut_alpha', 0.7)
         lut_beta = dataset_opt.get('lut_beta', 0.3)
         lut_inpaint_method = dataset_opt.get('lut_inpaint_method', 'telea')
+        lut_delta_gain = dataset_opt.get('lut_delta_gain', 1.0)
         
         dataset = D(
             opt=dataset_opt,
@@ -83,7 +84,8 @@ def create_dataset(dataset_opt):
             debug_mode=debug_mode,
             lut_alpha=lut_alpha,
             lut_beta=lut_beta,
-            lut_inpaint_method=lut_inpaint_method
+            lut_inpaint_method=lut_inpaint_method,
+            lut_delta_gain=lut_delta_gain
         )
     else:
         raise NotImplementedError("Dataset [{:s}] is not recognized.".format(mode))

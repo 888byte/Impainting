@@ -29,7 +29,7 @@ from .modules.module_util import (
     Downsample,
     default_conv,
 )
-from .pixel_brushnet import PixelBrushNet, PixelBrushNetLite
+from .pixel_brushnet import PixelBrushNet
 
 
 class ConditionalUNetWithBrushNet(nn.Module):
@@ -43,7 +43,6 @@ class ConditionalUNetWithBrushNet(nn.Module):
         depth: int = 4,
         brushnet_in_nc: int = 8,
         brushnet_enabled: bool = True,
-        brushnet_lite: bool = False,
         brushnet_prior_dropout_prob: float = 0.0,
         brushnet_feature_scale: float = 0.10,
         brushnet_use_spatial_gate: bool = True,
@@ -189,17 +188,10 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.final_conv = nn.Conv2d(nf, out_nc, 3, 1, 1)
 
         if brushnet_enabled:
-            if brushnet_lite:
-                self.brushnet = PixelBrushNetLite(
-                    in_nc=brushnet_in_nc, nf=nf, depth=depth
-                )
-            else:
-                self.brushnet = PixelBrushNet(
-                    in_nc=brushnet_in_nc, nf=nf, depth=depth
-                )
-            print(
-                f"[ConditionalUNetWithBrushNet] BrushNet enabled (lite={brushnet_lite})"
+            self.brushnet = PixelBrushNet(
+                in_nc=brushnet_in_nc, nf=nf, depth=depth
             )
+            print("[ConditionalUNetWithBrushNet] PriorBrushNet enabled")
         else:
             self.brushnet = None
             print("[ConditionalUNetWithBrushNet] BrushNet disabled")
@@ -430,7 +422,6 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         depth=network_opt.get("depth", 4),
         brushnet_in_nc=brushnet_opt.get("in_nc", 8),
         brushnet_enabled=brushnet_opt.get("enabled", True),
-        brushnet_lite=brushnet_opt.get("lite", False),
         brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
         brushnet_feature_scale=brushnet_opt.get("feature_scale", 0.10),
         brushnet_use_spatial_gate=brushnet_opt.get("use_spatial_gate", True),

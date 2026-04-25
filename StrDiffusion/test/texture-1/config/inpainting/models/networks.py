@@ -38,7 +38,6 @@ def define_G(opt):
             depth=setting.get("depth", 4),
             brushnet_in_nc=brushnet_opt.get("in_nc", 8),
             brushnet_enabled=brushnet_opt.get("enabled", True),
-            brushnet_lite=brushnet_opt.get("lite", False),
             brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
             brushnet_feature_scale=brushnet_opt.get("feature_scale", 0.10),
             brushnet_use_spatial_gate=brushnet_opt.get("use_spatial_gate", True),
