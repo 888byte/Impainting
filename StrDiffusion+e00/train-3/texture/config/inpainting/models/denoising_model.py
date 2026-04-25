@@ -249,12 +249,33 @@ class DenoisingModel(BaseModel):
             self.infer_x0_loss_start_iter = int(train_opt.get("infer_x0_loss_start_iter", 0))
             self.infer_x0_t_min_ratio = float(train_opt.get("infer_x0_t_min_ratio", 0.10))
             self.infer_x0_t_max_ratio = float(train_opt.get("infer_x0_t_max_ratio", 0.70))
+            self.infer_x0_grad = bool(train_opt.get("infer_x0_grad", False))
+            self.infer_x0_loss_interval = max(1, int(train_opt.get("infer_x0_loss_interval", 1)))
+            self.infer_x0_microbatch = max(0, int(train_opt.get("infer_x0_microbatch", 0)))
+            self.require_infer_x0_grad_for_known_only = bool(
+                train_opt.get("require_infer_x0_grad_for_known_only", False)
+            )
+            _mu_mode_for_guard = str(train_opt.get("sde_mu_hole_mode", "known_only")).lower()
+            _infer_grad_ok = self.infer_x0_loss_weight > 0 and self.infer_x0_grad
+            if _mu_mode_for_guard == "known_only" and not _infer_grad_ok:
+                _msg = (
+                    "[X8Guard] known_only removes target/color content from hole during inference; "
+                    "training must enable a real inference-like blank-hole loss. "
+                    f"Got infer_x0_loss_weight={self.infer_x0_loss_weight}, "
+                    f"infer_x0_grad={self.infer_x0_grad}."
+                )
+                if self.require_infer_x0_grad_for_known_only:
+                    raise ValueError(_msg)
+                logger.warning(_msg)
             if self.infer_x0_loss_weight > 0:
                 logger.info(
                     "[Model] inference-like blank-hole x0 loss enabled: "
                     f"weight={self.infer_x0_loss_weight}, "
                     f"start_iter={self.infer_x0_loss_start_iter}, "
-                    f"t_range=[{self.infer_x0_t_min_ratio}, {self.infer_x0_t_max_ratio}]"
+                    f"t_range=[{self.infer_x0_t_min_ratio}, {self.infer_x0_t_max_ratio}], "
+                    f"grad={self.infer_x0_grad}, "
+                    f"interval={self.infer_x0_loss_interval}, "
+                    f"microbatch={self.infer_x0_microbatch}"
                 )
 
             # optimizers
@@ -700,6 +721,9 @@ class DenoisingModel(BaseModel):
         infer_x0_loss_components = None
         infer_x0_hat_clamped = None
         infer_timesteps = None
+        infer_x0_grad_active = False
+        infer_x0_microbatch_used = 0
+        infer_x0_mask_for_stats = None
         if (
             self.x0_recon_loss_weight > 0
             and step >= self.x0_recon_loss_start_iter
@@ -745,55 +769,72 @@ class DenoisingModel(BaseModel):
         if (
             self.infer_x0_loss_weight > 0
             and step >= self.infer_x0_loss_start_iter
+            and (int(step) % self.infer_x0_loss_interval == 0)
         ):
             T_val = int(getattr(sde, "T", 400))
             t_min = max(2, min(T_val, int(round(T_val * self.infer_x0_t_min_ratio))))
             t_max = max(t_min, min(T_val, int(round(T_val * self.infer_x0_t_max_ratio))))
             batch = training_target.shape[0]
+            mb = batch
+            if self.infer_x0_grad and self.infer_x0_microbatch > 0:
+                mb = min(batch, self.infer_x0_microbatch)
+            infer_x0_microbatch_used = int(mb)
+            infer_x0_grad_active = bool(self.infer_x0_grad)
+            infer_slice = slice(0, mb)
             infer_timesteps = torch.randint(
                 t_min,
                 t_max + 1,
-                (batch, 1, 1, 1),
+                (mb, 1, 1, 1),
                 device=self.device,
             ).long()
 
             with torch.no_grad():
-                normal_state_mean = sde.mu_bar(training_target, infer_timesteps)
+                training_target_mb = training_target[infer_slice]
+                condition_mb = self.condition[infer_slice]
+                mask_mb = self.mask[infer_slice]
+                infer_x0_mask_for_stats = mask_mb
+                normal_state_mean = sde.mu_bar(training_target_mb, infer_timesteps)
                 sigma_bar_infer = sde.sigma_bar(infer_timesteps).to(
-                    dtype=training_target.dtype, device=training_target.device
+                    dtype=training_target_mb.dtype, device=training_target_mb.device
                 )
-                blank_hole_state = self.condition + torch.randn_like(training_target) * sigma_bar_infer
+                blank_hole_state = condition_mb + torch.randn_like(training_target_mb) * sigma_bar_infer
                 infer_state = (
-                    normal_state_mean.to(dtype=training_target.dtype, device=training_target.device) * self.mask
-                    + blank_hole_state * (1 - self.mask)
+                    normal_state_mean.to(dtype=training_target_mb.dtype, device=training_target_mb.device) * mask_mb
+                    + blank_hole_state * (1 - mask_mb)
                 ).to(torch.float32)
                 _, S_infer_optimum = self.S_sde.generate_random_states_texture(
-                    x0=self.S_GT,
-                    mu=self.S_LQ * self.mask,
+                    x0=self.S_GT[infer_slice],
+                    mu=self.S_LQ[infer_slice] * mask_mb,
                     timesteps=infer_timesteps,
                 )
                 S_infer_optimum = self.S_sde.reverse_optimum_step(
-                    S_infer_optimum, self.S_GT, infer_timesteps
+                    S_infer_optimum, self.S_GT[infer_slice], infer_timesteps
                 )
 
-            # NOTE: wrapped in no_grad to avoid a second full forward pass keeping
-            # activations alive.  This branch currently serves as a diagnostic
-            # monitor (stats_infer_x0_hat_hole_*) rather than a training signal.
-            # Remove the no_grad context once the loss is confirmed effective and
-            # sufficient VRAM is available.
-            with torch.no_grad():
+            brushnet_kwargs_infer = {}
+            for key, value in brushnet_kwargs.items():
+                if torch.is_tensor(value) and value.shape[0] == batch:
+                    brushnet_kwargs_infer[key] = value[infer_slice]
+                else:
+                    brushnet_kwargs_infer[key] = value
+
+            # x8 known_only needs this branch to be a real training signal:
+            # the normal xt still contains B(t) * target in the hole, while
+            # inference starts from condition_mu/noise with no target content.
+            # Use a tiny microbatch + interval to avoid the old "VRAM doubled"
+            # failure, but keep gradients when infer_x0_grad=true.
+            if infer_x0_grad_active:
                 infer_model_output = sde.noise_fn(
                     infer_state,
-                    infer_timesteps.squeeze(),
+                    infer_timesteps.view(-1),
                     S_infer_optimum,
-                    **brushnet_kwargs,
+                    **brushnet_kwargs_infer,
                 )
-                infer_noise = infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output
                 infer_x0_hat = self._estimate_x0_from_noise(
                     sde=sde,
                     xt=infer_state,
-                    mu=self.condition,
-                    noise=infer_noise,
+                    mu=condition_mb,
+                    noise=infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output,
                     timesteps=infer_timesteps,
                 )
                 infer_x0_hat_for_loss = torch.nan_to_num(
@@ -801,10 +842,34 @@ class DenoisingModel(BaseModel):
                 ).clamp(-1.0, 2.0)
                 infer_x0_hat_clamped = infer_x0_hat.clamp(0.0, 1.0)
                 infer_x0_loss_components = self.loss_fn.compute_components(
-                    infer_x0_hat_for_loss, training_target, self.mask
+                    infer_x0_hat_for_loss, training_target_mb, mask_mb
                 )
                 infer_x0_loss = infer_x0_loss_components["loss_total"]
-            infer_x0_weighted = None  # no gradient signal; monitor only
+                infer_x0_weighted = self.infer_x0_loss_weight * infer_x0_loss
+            else:
+                with torch.no_grad():
+                    infer_model_output = sde.noise_fn(
+                        infer_state,
+                        infer_timesteps.view(-1),
+                        S_infer_optimum,
+                        **brushnet_kwargs_infer,
+                    )
+                    infer_noise = infer_model_output[0] if isinstance(infer_model_output, (tuple, list)) else infer_model_output
+                    infer_x0_hat = self._estimate_x0_from_noise(
+                        sde=sde,
+                        xt=infer_state,
+                        mu=condition_mb,
+                        noise=infer_noise,
+                        timesteps=infer_timesteps,
+                    )
+                    infer_x0_hat_for_loss = torch.nan_to_num(
+                        infer_x0_hat, nan=0.0, posinf=2.0, neginf=-1.0
+                    ).clamp(-1.0, 2.0)
+                    infer_x0_hat_clamped = infer_x0_hat.clamp(0.0, 1.0)
+                    infer_x0_loss_components = self.loss_fn.compute_components(
+                        infer_x0_hat_for_loss, training_target_mb, mask_mb
+                    )
+                    infer_x0_loss = infer_x0_loss_components["loss_total"]
         # 总损失 = 扩散损失 + x0重建辅助损失 + Mu-Denoiser损失（如果有）
         total_loss = loss
         if x0_recon_weighted is not None:
@@ -868,6 +933,10 @@ class DenoisingModel(BaseModel):
             float(infer_timesteps.detach().float().mean().item())
             if infer_timesteps is not None else 0.0
         )
+        self.log_dict["stats_infer_x0_grad_enabled"] = 1.0 if self.infer_x0_grad else 0.0
+        self.log_dict["stats_infer_x0_grad_active"] = 1.0 if infer_x0_grad_active else 0.0
+        self.log_dict["stats_infer_x0_interval"] = float(self.infer_x0_loss_interval)
+        self.log_dict["stats_infer_x0_microbatch"] = float(infer_x0_microbatch_used)
         self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
         self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
         self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
@@ -938,6 +1007,32 @@ class DenoisingModel(BaseModel):
 
         mask_3c = self.mask.expand(-1, condition_lut_for_mu.shape[1], -1, -1)
         known_denom = mask_3c.sum().clamp_min(1.0)
+        state_hole_mask = (1 - self.mask).expand_as(training_target)
+        state_hole_denom = state_hole_mask.sum().clamp_min(1.0)
+        state_hole = self.state.detach() * state_hole_mask
+        target_hole = training_target.detach() * state_hole_mask
+        cond_hole = self.condition.detach() * state_hole_mask
+        state_hole_mean = state_hole.sum() / state_hole_denom
+        target_hole_mean = target_hole.sum() / state_hole_denom
+        cond_hole_mean = cond_hole.sum() / state_hole_denom
+        state_hole_white_map = (self.state.detach().clamp(0.0, 1.0) > 0.95).all(dim=1, keepdim=True).float()
+        target_hole_white_map = (training_target.detach().clamp(0.0, 1.0) > 0.95).all(dim=1, keepdim=True).float()
+        hole_mask_1c = 1 - self.mask
+        self.log_dict["stats_train_state_hole_mean"] = float(state_hole_mean.item())
+        self.log_dict["stats_train_target_hole_mean"] = float(target_hole_mean.item())
+        self.log_dict["stats_train_condition_hole_mean"] = float(cond_hole_mean.item())
+        self.log_dict["stats_train_state_hole_white_ratio"] = float(
+            (state_hole_white_map * hole_mask_1c).sum().div(hole_mask_1c.sum().clamp_min(1.0)).item()
+        )
+        self.log_dict["stats_train_target_hole_white_ratio"] = float(
+            (target_hole_white_map * hole_mask_1c).sum().div(hole_mask_1c.sum().clamp_min(1.0)).item()
+        )
+        self.log_dict["stats_train_state_to_target_hole"] = float(
+            ((self.state.detach() - training_target.detach()).abs() * state_hole_mask).sum().div(state_hole_denom).item()
+        )
+        self.log_dict["stats_train_state_to_condition_hole"] = float(
+            ((self.state.detach() - self.condition.detach()).abs() * state_hole_mask).sum().div(state_hole_denom).item()
+        )
         condition_lut_delta_known = (
             (condition_lut_for_mu - self.original_degraded).abs() * mask_3c
         ).sum() / known_denom
@@ -971,7 +1066,8 @@ class DenoisingModel(BaseModel):
             self.log_dict["stats_x0_hat_hole_white_ratio"] = 0.0
 
         if infer_x0_hat_clamped is not None:
-            mask_hole = (1 - self.mask).to(
+            _infer_mask_known = infer_x0_mask_for_stats if infer_x0_mask_for_stats is not None else self.mask
+            mask_hole = (1 - _infer_mask_known).to(
                 dtype=infer_x0_hat_clamped.dtype,
                 device=infer_x0_hat_clamped.device,
             )

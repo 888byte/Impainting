@@ -31,7 +31,7 @@ datasets:
     lut_beta: 0.15
     lut_inpaint_method: telea
     lut_strength: 1.0
-    lut_delta_gain: 1.5
+    lut_delta_gain: 4.5
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
     prior_lut_gap_scale: 0.15
@@ -96,7 +96,7 @@ mu_denoiser:
   lr: 0.0001
 
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x8-knownonly/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x8-knownonly/models/best_G.pth
   pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
   pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
   strict_load: false

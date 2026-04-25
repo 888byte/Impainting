@@ -884,3 +884,169 @@ Next recommended command:
 cd /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting
 python train.py -opt options/train/ir-sde-brushnet-ft-x8-knownonly.yml
 ```
+
+
+### 2026-04-25 x8 white-mask regression: root cause and config fix
+
+User-reported symptom:
+
+- `train_ir-sde-brushnet-ft-x8-knownonly_260425-110746.log` + `test_ir-sde-brushnet-x8-knownonly-current-domain_260425-172411.log`
+- Inference output regressed to a bright/white mask area again, although `x_init` / `condition_mu` hole looked black.
+- LUT/color shift was still visually weak.
+
+Confirmed from logs:
+
+- `known_only` itself was active, so the route did not silently fall back to `safe_prior` / `condition_lut` as the SDE hole anchor.
+  - Train: `stats_sde_mu_hole_mean: 0.0000e+00`
+  - Test: `x_init_hole(mean=0.0000,min=0.0000,max=0.0000,white=0.0000)`
+- The actual failure was checkpoint/config drift:
+  - Train loaded the wrong x7 initializer:
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x7/models/best_G.pth`
+  - Intended x7 initializer is:
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth`
+  - Train writes x8 checkpoints under:
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x8-knownonly/models`
+  - Test loaded a stale/different x8 checkpoint path:
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x8-knownonly/models/best_G.pth`
+- Therefore the 2026-04-25 white-mask test result should not be used to judge the corrected x8 design: it was not testing the intended x8 checkpoint flow.
+
+Config changes made in this pass:
+
+- Train config fixed:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x8-knownonly.yml`
+  - `path.pretrain_model_G` now points to the x7 `48000_G.pth` initializer.
+  - `datasets.train.lut_delta_gain` raised from `1.5` to `3.0`.
+- Test config fixed:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x8-knownonly-current-domain.yml`
+  - `path.pretrain_model_G` now points to the actual x8 experiment output:
+    `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x8-knownonly/models/best_G.pth`
+  - `datasets.test.lut_delta_gain` raised from `1.5` to `3.0`.
+
+Why LUT gain was changed:
+
+- Failed test log showed weak visible color shift:
+  - `prefill_to_lut_known=0.016292`
+  - `prefill_to_lut_hole=0.016817`
+- Target for the next run: move typical `prefill_to_lut_known/hole` closer to roughly `0.03-0.06` without using LUT/color prior as the SDE hole anchor.
+
+Validation run locally after the fix:
+
+- YAML parse OK for both x8 train/test configs.
+- UTF-8 Chinese dataset path values survived; no `?` replacement in dataset path lines.
+- No `PixelBrushNetLite`, `brushnet_lite`, or `lite:` references in the two x8 configs.
+- Python compile OK for touched train/test code paths.
+- Static checks confirm:
+  - train config still has `train.sde_mu_hole_mode=known_only`
+  - test config still has `inference.sde_mu_hole_mode=known_only`
+  - `brushnet.feature_scale=0.01`
+  - train/test both have `lut_delta_gain=3.0`
+
+Next commands that should be used:
+
+```bash
+cd /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting
+python train.py -opt options/train/ir-sde-brushnet-ft-x8-knownonly.yml
+```
+
+Expected train log must include:
+
+```text
+Loading model for G [/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth]
+train.sde_mu_hole_mode=known_only
+LUT delta gain=3.000
+```
+
+After a checkpoint is produced, infer with:
+
+```bash
+cd /home/610-wws/Impainting/StrDiffusion/test/texture-1/config/inpainting
+python test.py -opt options/test/ir-sde-brushnet-x8-knownonly-current-domain.yml --set inference.save_intermediates=true
+```
+
+Expected test log must include:
+
+```text
+Loading model for G [/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x8-knownonly/models/best_G.pth]
+sde_mu_hole_mode=known_only
+expected_train_sde_mu_hole_mode=known_only
+lut_delta_gain=3.000
+x_init_hole(mean=0.0000
+```
+
+If testing a numbered checkpoint before `best_G.pth` is updated, override explicitly:
+
+```bash
+--set path.pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x8-knownonly/models/10000_G.pth
+```
+
+
+## 2026-04-25 correction: checkpoint path was not the root cause; x8 needed real blank-hole training signal
+
+User confirmed the two x8 checkpoint directories contain the same weights, so the previous checkpoint-path-only explanation is not the root cause.
+
+What the x8 run actually showed:
+
+- `known_only` route was active: `stats_sde_mu_hole_mean=0`, and inference `x_init_hole(mean=0)`.
+- However the normal training state still comes from `sde.generate_random_states(x0=training_target, mu=condition_mu)`, so the hole part of `state` contains the teacher-forced `B(t) * training_target` component.
+- Inference does not have this target component in the hole. It starts from `condition_mu + noise`, with known_only hole near zero/noise.
+- The old `infer_x0` branch was disabled in config and, even if enabled, was wrapped in `torch.no_grad()`, so it only logged metrics and gave no gradient.
+- Therefore x8 trained on teacher-forced hole states but was tested on blank/noisy hole states, which reproduces the old white-mask failure.
+
+Fix implemented in code:
+
+- `texture/config/inpainting/models/denoising_model.py`
+  - Added a real gradient path for the inference-like blank-hole x0 loss.
+  - It uses microbatch + interval to avoid the previous VRAM doubling:
+    - `infer_x0_microbatch`
+    - `infer_x0_loss_interval`
+    - `infer_x0_grad`
+  - Added `require_infer_x0_grad_for_known_only`; x8 config now fails fast if known_only is used without active infer_x0 gradient.
+  - Added training diagnostics:
+    - `stats_train_state_hole_mean`
+    - `stats_train_target_hole_mean`
+    - `stats_train_condition_hole_mean`
+    - `stats_train_state_hole_white_ratio`
+    - `stats_train_target_hole_white_ratio`
+    - `stats_train_state_to_target_hole`
+    - `stats_train_state_to_condition_hole`
+    - `stats_infer_x0_grad_enabled`
+    - `stats_infer_x0_grad_active`
+    - `stats_infer_x0_interval`
+    - `stats_infer_x0_microbatch`
+- `texture/config/inpainting/train.py`
+  - Added TensorBoard scalar mappings for the new diagnostics.
+- `texture/config/inpainting/options/train/ir-sde-brushnet-ft-x8-knownonly.yml`
+  - `infer_x0_loss_weight: 0.01`
+  - `infer_x0_grad: true`
+  - `infer_x0_loss_interval: 4`
+  - `infer_x0_microbatch: 2`
+  - `require_infer_x0_grad_for_known_only: true`
+  - `x0_recon_loss_weight: 0.01`
+  - `lut_delta_gain: 4.5`
+  - `logger.print_freq: 20`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - Added `target_like_gt_l1` to `[Target Debug]`.
+  - Added `[WhiteMask Alert]` when final hole becomes too white/bright, so bad inference is obvious from the log.
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x8-knownonly-current-domain.yml`
+  - `lut_delta_gain: 4.5` to match x8 train config.
+
+Expected early train log after this fix:
+
+- `[Model] train.sde_mu_hole_mode=known_only infer_x0_loss_weight=0.01 infer_x0_grad=True`
+- `[Model] inference-like blank-hole x0 loss enabled: ... grad=True, interval=4, microbatch=2`
+- No `[X8Guard]` exception.
+- At the first printed iteration that is divisible by 4 (with print_freq=20, iter 20):
+  - `loss_infer_x0` must be non-zero.
+  - `stats_infer_x0_grad_enabled: 1.0000e+00`
+  - `stats_infer_x0_grad_active: 1.0000e+00`
+  - `stats_infer_x0_microbatch: 2.0000e+00`
+  - `stats_sde_mu_hole_mean` should remain near 0 for known_only.
+
+If `loss_infer_x0` is still 0 at iter 20/40/60, stop immediately; that means the old broken no-gradient path is still running.
+
+Expected inference log after retraining with this fix:
+
+- `[RouteCheck] ... sde_mu_hole_mode=known_only ... x_init_hole(mean=0.0000...)`
+- `[Target Debug] ... final_white_ratio_hole=... target_like_gt_l1=...`
+- No `[WhiteMask Alert]` for normal samples.
+

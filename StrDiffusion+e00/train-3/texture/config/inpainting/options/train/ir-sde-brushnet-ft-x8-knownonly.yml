@@ -72,7 +72,7 @@ datasets:
     lut_beta: 0.15
     lut_inpaint_method: telea
     lut_strength: 1.0
-    lut_delta_gain: 1.5
+    lut_delta_gain: 4.5
     lut_smooth_radius: 1
     prior_hole_max_weight: 0.5
     prior_lut_gap_scale: 0.15
@@ -101,7 +101,7 @@ network_G:
     depth: 4
 
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x7/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/48000_G.pth
   strict_load: false
   resume_state: ~
 
@@ -121,17 +121,18 @@ train:
   loss_type: l1
   weight: 1.0
   enable_g_score_aux: false
-  x0_recon_loss_weight: 0.03
+  x0_recon_loss_weight: 0.01
   x0_high_t_decay: 2.0
   x0_recon_loss_start_iter: 0
   x0_recon_clamp_b_min: !!float 1e-3
-  infer_x0_loss_weight: 0.0
+  infer_x0_loss_weight: 0.01
   infer_x0_loss_start_iter: 0
-  infer_x0_t_min_ratio: 0.10
-  infer_x0_t_max_ratio: 0.70
-  infer_x0_grad: false
-  infer_x0_loss_interval: 1
-  infer_x0_microbatch: 0
+  infer_x0_t_min_ratio: 0.05
+  infer_x0_t_max_ratio: 0.50
+  infer_x0_grad: true
+  infer_x0_loss_interval: 4
+  infer_x0_microbatch: 2
+  require_infer_x0_grad_for_known_only: true
   sde_mu_hole_mode: known_only
   manual_seed: 0
 
@@ -147,7 +148,7 @@ debug:
     - masked_input
 
 logger:
-  print_freq: 100
+  print_freq: 20
   save_checkpoint_freq: 2000
   best_save_start_iter: 2000
   use_tb_logger: true

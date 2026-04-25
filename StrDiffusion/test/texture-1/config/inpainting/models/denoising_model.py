@@ -694,6 +694,7 @@ class DenoisingModel(BaseModel):
                 mu_clean = prepared["mu_clean"]
                 prior_debug = prepared.get("prior_debug", {})
                 target_like = self._build_training_target_like()
+                prepared["training_target_like"] = target_like
                 self.condition = prepared["condition_mu"]
                 sde.set_mu(self.condition)
                 x_init = self.condition
@@ -1097,14 +1098,16 @@ class DenoisingModel(BaseModel):
         if self.state_0 is not None:
             gt = self.state_0.to(device=final.device)
             lut = prepared.get("lut_transformed") if prepared is not None else None
+            target_like = prepared.get("training_target_like") if prepared is not None else None
             final_prior_l1 = self._masked_l1(final, self.color_prior, self.mask_hole) or 0.0
             final_lut_l1 = self._masked_l1(final, lut, self.mask_hole) or 0.0
             final_white_ratio_hole = final_hole.get("white_ratio", 0.0)
             training_target_to_lut = self._masked_l1(gt, lut, self.mask_hole) or 0.0
+            target_like_to_gt = self._masked_l1(target_like, gt, self.mask_hole) if target_like is not None else float("nan")
             logger.info(
                 "[Target Debug] final_gt_l1=%.6f raw_gt_l1=%.6f prior_gt_l1=%.6f "
                 "lut_gt_l1=%.6f training_target_to_lut=%.6f final_prior_l1=%.6f "
-                "final_lut_l1=%.6f final_white_ratio_hole=%.6f",
+                "final_lut_l1=%.6f final_white_ratio_hole=%.6f target_like_gt_l1=%.6f",
                 self._masked_l1(final, gt, self.mask_hole) or 0.0,
                 self._masked_l1(pred_full, gt, self.mask_hole) or 0.0,
                 self._masked_l1(self.color_prior, gt, self.mask_hole) or 0.0,
@@ -1113,6 +1116,16 @@ class DenoisingModel(BaseModel):
                 final_prior_l1,
                 final_lut_l1,
                 final_white_ratio_hole,
+                target_like_to_gt,
+                )
+            if final_white_ratio_hole > 0.05 or final_hole.get("mean", 0.0) > 0.85:
+                logger.warning(
+                    "[WhiteMask Alert] sample=%s final_hole_mean=%.4f final_white_ratio_hole=%.4f "
+                    "sde_mu_hole_mode=%s. This is the old white-mask failure; do not treat this run as fixed.",
+                    self.sample_name,
+                    final_hole.get("mean", 0.0),
+                    final_white_ratio_hole,
+                    self.inference_opt.get("sde_mu_hole_mode", "known_only"),
                 )
             mu_hole_mode = str(self.inference_opt.get("sde_mu_hole_mode", "known_only")).lower()
             if mu_hole_mode != "known_only":
