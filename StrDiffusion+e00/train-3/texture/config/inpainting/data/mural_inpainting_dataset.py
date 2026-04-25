@@ -107,6 +107,7 @@ class MuralInpaintingDataset(Dataset):
         self.prior_method = prior_method.lower()
         self.debug_mode = debug_mode
         self.debug_dir = debug_dir
+        self.lut_delta_gain = max(0.0, float(lut_delta_gain))
         
         # 验证gt_mode
         valid_modes = ['full', 'partial', 'mixed']
