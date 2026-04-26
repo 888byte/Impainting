@@ -1,4 +1,4 @@
-﻿# StrDiffusion 排错跟踪：no-retrain 原版路径消融
+# StrDiffusion 排错跟踪：no-retrain 原版路径消融
 
 更新时间：2026-04-22
 工作区：`D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3`
@@ -1049,4 +1049,45 @@ Expected inference log after retraining with this fix:
 - `[RouteCheck] ... sde_mu_hole_mode=known_only ... x_init_hole(mean=0.0000...)`
 - `[Target Debug] ... final_white_ratio_hole=... target_like_gt_l1=...`
 - No `[WhiteMask Alert]` for normal samples.
+
+## 2026-04-26 x9-clean: 回归原版 StrDiffusion 训练语义
+
+### 问题根因
+
+x8 的 `infer_x0` + `x0_recon` 辅助 loss 额外做了一次 `sde.noise_fn()` 前向+反向（VRAM 翻倍），
+且 teacher-forcing 导致模型在 hole 区只见过含 `B(t)*target` 的分布，推理时 hole 从 0 开始则偏白。
+`lut_delta_gain=4.5` 导致全局颜色偏黄。
+
+### x9-clean 改动
+
+| 文件 | 改动 |
+|------|------|
+| `denoising_model.py` (训练) | 删除 `_estimate_x0_from_noise`、`x0_recon`、`infer_x0` 全部参数和 loss 分支；简化 `optimize_parameters` 为原版单 loss + MuDenoiser |
+| `denoising_model.py` (训练) | `_build_lut_transformed` 改为自适应 fade-degree LUT |
+| `train.py` | `condition_mu = training_target * mask_for_sde`（hole=0），删除 `mu_hole_mode` 分支 |
+| `denoising_model.py` (推理) | LUT 逻辑同步为 fade-degree-aware；`condition_mu = known_source * mask_known` |
+| 新增 `ir-sde-brushnet-ft-x9-clean.yml` | 训练配置，从 `best_G.pth` 初始化 |
+| 新增 `ir-sde-brushnet-x9-clean-current-domain.yml` | 推理配置 |
+
+### 首 100 步必须验证的指标
+
+| 指标 | 正常范围 | 含义 |
+|------|----------|------|
+| `stats_sde_mu_hole_mean` | ≈ 0.0 | SDE mu 在 hole 区必须为零 |
+| `stats_train_target_hole_mean` | 0.3~0.6 | target 是正常壁画颜色 |
+| `stats_training_target_delta` | 0.02~0.04 | LUT 变色不过激 |
+| `stats_noise_std` | 0.5~2.0 | 模型输出噪声正常 |
+
+### 命令
+
+```bash
+# 训练
+cd /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting
+python train.py -opt options/train/ir-sde-brushnet-ft-x9-clean.yml
+
+# 推理
+cd /home/610-wws/Impainting/StrDiffusion/test/texture-1/config/inpainting
+python test.py -opt options/test/ir-sde-brushnet-x9-clean-current-domain.yml
+```
+
 

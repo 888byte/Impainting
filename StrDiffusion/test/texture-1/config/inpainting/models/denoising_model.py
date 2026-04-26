@@ -96,7 +96,9 @@ class DenoisingModel(BaseModel):
         # condition_mu during reverse sampling; holes remain predicted by the model.
         self.known_area_projection = bool(self.inference_opt.get("known_area_projection", True))
         self.gt_mode = self.dataset_opt.get("gt_mode", "partial")
-        self.lut_delta_gain = max(0.0, float(self.dataset_opt.get("lut_delta_gain", 1.0) or 1.0))
+        self.lut_strength = float(max(0.0, min(1.0, self.dataset_opt.get("lut_strength", 1.0))))
+        self.lut_fade_boost = float(max(1.0, self.dataset_opt.get("lut_fade_boost", 3.0)))
+        self.lut_smooth_radius = int(self.dataset_opt.get("lut_smooth_radius", 0))
         self.prior_method = str(self.dataset_opt.get("prior_method", "quality")).lower()
         self.inference_mode = self.inference_opt.get("mode", "auto")
         self.expected_train_sde_mu_hole_mode = str(
@@ -146,7 +148,6 @@ class DenoisingModel(BaseModel):
                     "prior_inpaint_mask_dilate",
                     self.dataset_opt.get("inpaint_mask_dilate", 3),
                 ),
-                lut_delta_gain=self.lut_delta_gain,
             )
 
         mu_opt = opt.get("mu_denoiser", {})
@@ -503,24 +504,43 @@ class DenoisingModel(BaseModel):
 
         lut_transformed = denoised_original
         if self.lut_processor is not None:
-            lut_transformed, lut_confidence = self.lut_processor.apply_to_tensor(
+            lut_raw, lut_confidence = self.lut_processor.apply_to_tensor(
                 denoised_original
             )
-            if self.dataset_opt.get("lut_smooth_radius", 0) > 0:
-                lut_transformed = self._guided_smooth(
-                    lut_transformed,
+            if self.lut_smooth_radius > 0:
+                lut_raw = self._guided_smooth(
+                    lut_raw,
                     guide=denoised_original,
-                    radius=self.dataset_opt.get("lut_smooth_radius", 5),
+                    radius=self.lut_smooth_radius,
                 )
-            # Interpret lut_strength as max global blend strength. Do not let
-            # values >1 saturate the whole image to a full LUT jump.
-            strength = float(max(0.0, min(1.0, self.dataset_opt.get("lut_strength", 1.0))))
-            effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * strength
-            lut_delta = lut_transformed - denoised_original
+            lut_delta = lut_raw - denoised_original
+
+            # Adaptive fade-degree-aware LUT (MUST match training exactly)
+            with torch.no_grad():
+                r = denoised_original[:, 0:1]
+                g = denoised_original[:, 1:2]
+                b = denoised_original[:, 2:3]
+                max_rgb = torch.max(torch.max(r, g), b)
+                min_rgb = torch.min(torch.min(r, g), b)
+                chroma = max_rgb - min_rgb
+                brightness = max_rgb
+                saturation = chroma / brightness.clamp(min=0.01)
+                fade_degree = ((1.0 - saturation) * brightness).clamp(0.0, 1.0)
+
+            adaptive_strength = self.lut_strength * (
+                1.0 + fade_degree * (self.lut_fade_boost - 1.0)
+            )
+            effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * adaptive_strength
             lut_transformed = torch.clamp(
-                denoised_original + lut_delta * effective_weight * self.lut_delta_gain,
+                denoised_original + lut_delta * effective_weight,
                 0.0,
                 1.0,
+            )
+            logger.info(
+                "[LUT] fade_degree_mean=%.4f adaptive_strength_mean=%.4f lut_delta_mean=%.4f",
+                float(fade_degree.mean().item()),
+                float(adaptive_strength.mean().item()),
+                float(lut_delta.abs().mean().item()),
             )
 
         # Align known pixels to CondLUT, then softly gate the hole prior by
@@ -593,22 +613,9 @@ class DenoisingModel(BaseModel):
                 "expected lut|degraded|gt|gt_if_available"
             )
 
-        # SDE mu construction must match training.  Do not use raw degraded input.
-        # known_only preserves the original inpainting semantics; condition_lut anchors
-        # holes with the target-domain LUT estimate; safe_prior uses the confidence-gated
-        # BrushNet prior and should be treated as an ablation.
-        mu_hole_mode = self.inference_opt.get("sde_mu_hole_mode", "known_only")
-        if mu_hole_mode == "known_only":
-            condition_mu = known_source * mask_known
-        elif mu_hole_mode == "condition_lut":
-            condition_mu = known_source * mask_known + lut_transformed * mask_hole
-        elif mu_hole_mode == "safe_prior":
-            condition_mu = known_source * mask_known + color_prior * mask_hole
-        else:
-            raise ValueError(
-                f"Unsupported inference.sde_mu_hole_mode={mu_hole_mode!r}; "
-                "expected known_only|condition_lut|safe_prior"
-            )
+        # SDE mu: match training semantics exactly.
+        # mu = known_source * mask (hole = 0)
+        condition_mu = known_source * mask_known
 
         return {
             "denoised_original": denoised_original,

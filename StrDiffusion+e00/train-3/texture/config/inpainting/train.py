@@ -87,68 +87,41 @@ def _build_tb_scalar_map(logs):
         if value is not None:
             scalar_map[tag] = value
 
+    # Core losses
     add("train/loss_main", "loss_main")
     add("train/loss_total", "loss_total")
     add("train/loss_hole", "loss_hole")
     add("train/loss_known", "loss_known")
     add("train/loss_hole_weighted", "loss_hole_weighted")
-    add("train/loss_x0", "loss_x0")
-    add("train/loss_x0_raw", "loss_x0_raw")
-    add("train/loss_x0_known", "loss_x0_known")
-    add("train/loss_x0_hole", "loss_x0_hole")
-    add("train/loss_x0_hole_weighted", "loss_x0_hole_weighted")
-    add("train/loss_infer_x0", "loss_infer_x0")
-    add("train/loss_infer_x0_raw", "loss_infer_x0_raw")
-    add("train/loss_infer_x0_known", "loss_infer_x0_known")
-    add("train/loss_infer_x0_hole", "loss_infer_x0_hole")
-    add("train/loss_infer_x0_hole_weighted", "loss_infer_x0_hole_weighted")
     add("train/loss_mu_total", "loss_mu_total")
     add("train/loss_mu_ss", "loss_mu_ss")
     add("train/loss_mu_tv", "loss_mu_tv")
     add("train/lr_main", "lr_main")
+    add("train/lr_new", "lr_new")
     add("train/lr_mu", "lr_mu")
     add("train/ema_texture_loss", "ema_texture_loss")
     add("train/ema_total_loss", "ema_total_loss")
     add("train/best_metric", "best_metric")
     add("train/best_total_metric", "best_total_metric")
     add("train/mask_hole_ratio", "mask_hole_ratio")
-    add("train/texture_condition_gap", "texture_condition_gap")
+    # Key consistency checks (check these first 100 steps!)
+    add("consistency/sde_mu_hole_mean", "stats_sde_mu_hole_mean")
+    add("consistency/train_condition_hole_mean", "stats_train_condition_hole_mean")
+    add("consistency/train_target_hole_mean", "stats_train_target_hole_mean")
+    add("consistency/training_target_delta", "stats_training_target_delta")
+    # Noise / prediction stats
+    add("stats/noise_mean", "stats_noise_mean")
+    add("stats/noise_std", "stats_noise_std")
+    add("stats/pred_opt_diff_hole", "stats_pred_opt_diff_hole")
+    add("stats/pred_opt_diff_known", "stats_pred_opt_diff_known")
+    add("stats/timestep_mean", "stats_timestep_mean")
+    # Color prior stats
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
-    add("stats/color_prior_hole_std", "stats_color_prior_hole_std")
     add("stats/color_prior_hole_white_ratio", "stats_color_prior_hole_white_ratio")
-    add("stats/color_prior_lut_gap_hole", "stats_color_prior_lut_gap_hole")
     add("stats/confidence_hole_mean", "stats_confidence_hole_mean")
     add("stats/condition_known_mean", "stats_condition_known_mean")
-    add("stats/condition_known_std", "stats_condition_known_std")
-    add("stats/condition_lut_delta_known", "stats_condition_lut_delta_known")
-    add("stats/condition_lut_delta_hole", "stats_condition_lut_delta_hole")
-    add("stats/prefill_to_lut_known", "stats_prefill_to_lut_known")
-    add("stats/prefill_to_lut_hole", "stats_prefill_to_lut_hole")
-    add("stats/training_target_delta", "stats_training_target_delta")
-    add("stats/training_target_to_lut", "stats_training_target_to_lut")
-    add("stats/mu_known_mean", "stats_mu_known_mean")
-    add("stats/mu_known_std", "stats_mu_known_std")
     add("stats/cond_lut_hole_mean", "stats_cond_lut_hole_mean")
-    add("stats/cond_lut_hole_std", "stats_cond_lut_hole_std")
-    add("stats/sde_mu_hole_mean", "stats_sde_mu_hole_mean")
-    add("stats/train_state_hole_mean", "stats_train_state_hole_mean")
-    add("stats/train_target_hole_mean", "stats_train_target_hole_mean")
-    add("stats/train_condition_hole_mean", "stats_train_condition_hole_mean")
-    add("stats/train_state_hole_white_ratio", "stats_train_state_hole_white_ratio")
-    add("stats/train_target_hole_white_ratio", "stats_train_target_hole_white_ratio")
-    add("stats/train_state_to_target_hole", "stats_train_state_to_target_hole")
-    add("stats/train_state_to_condition_hole", "stats_train_state_to_condition_hole")
-    add("stats/x0_hat_hole_mean", "stats_x0_hat_hole_mean")
-    add("stats/x0_hat_hole_white_ratio", "stats_x0_hat_hole_white_ratio")
-    add("stats/infer_x0_hat_hole_mean", "stats_infer_x0_hat_hole_mean")
-    add("stats/infer_x0_hat_hole_white_ratio", "stats_infer_x0_hat_hole_white_ratio")
-    add("stats/infer_timestep_mean", "stats_infer_timestep_mean")
-    add("stats/infer_x0_grad_enabled", "stats_infer_x0_grad_enabled")
-    add("stats/infer_x0_grad_active", "stats_infer_x0_grad_active")
-    add("stats/infer_x0_interval", "stats_infer_x0_interval")
-    add("stats/infer_x0_microbatch", "stats_infer_x0_microbatch")
-    add("train/condition_target_gap", "condition_target_gap")
-    add("train/degraded_target_gap", "degraded_target_gap")
+    add("stats/sde_mu_known_mean", "stats_sde_mu_known_mean")
 
     return scalar_map
 
@@ -375,11 +348,7 @@ def main():
     ema_texture_loss = None
     ema_total_loss = None
     ema_beta = 0.98  # 越大越平滑（0.98~0.995都可）
-    metric_version = (
-        "x0_recon_v1"
-        if float(opt.get("train", {}).get("x0_recon_loss_weight", 0.0)) > 0
-        else "base"
-    )
+    metric_version = "x9_clean"
 
     # 3) 确保 training_state 目录存在（避免 save_training_state 失败）
     if rank <= 0 and opt.get("path", {}).get("training_state", None):
@@ -668,21 +637,11 @@ def main():
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    # SDE mu construction for mural mode.
-                    # x8 default is original known-only semantics: hole pixels in SDE mu stay
-                    # blank, while color prior/condition_lut are only auxiliary guidance.
-                    # condition_lut and safe_prior remain explicit ablation modes only.
-                    mu_hole_mode = opt.get("train", {}).get("sde_mu_hole_mode", "known_only")
-                    mask_hole_for_sde = 1 - mask_for_sde
-                    if mu_hole_mode == "known_only":
-                        condition_mu = mu_clean_lut * mask_for_sde
-                    elif mu_hole_mode == "condition_lut":
-                        condition_mu = mu_clean_lut * mask_for_sde + condition_lut * mask_hole_for_sde
-                    elif mu_hole_mode == "safe_prior":
-                        hole_mu = color_prior_for_sde if color_prior_for_sde is not None else condition_lut
-                        condition_mu = mu_clean_lut * mask_for_sde + hole_mu * mask_hole_for_sde
-                    else:
-                        raise ValueError(f"Unsupported train.sde_mu_hole_mode={mu_hole_mode!r}; expected known_only|condition_lut|safe_prior")
+                    # SDE mu: original StrDiffusion semantics.
+                    # mu = training_target * mask (hole = 0).
+                    # This ensures training/inference consistency: inference also uses
+                    # condition_lut * mask as mu.
+                    condition_mu = training_target * mask_for_sde
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu
