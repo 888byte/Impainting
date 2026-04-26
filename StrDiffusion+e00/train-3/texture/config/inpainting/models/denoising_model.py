@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from collections import OrderedDict
 import os
 import numpy as np
@@ -548,6 +548,34 @@ class DenoisingModel(BaseModel):
             else None
         )
 
+
+    def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
+        """
+        Return target-domain MuCleanr output for the current condition_lut.
+
+        condition_lut is already LUT(denoised(observed_degraded)); MuCleanr must
+        never receive raw degraded-domain input for SDE mu construction.
+        If MuDenoiser is training from scratch, keep SDE mu on plain CondLUT for
+        a warmup period so random early MuCleanr weights cannot tint condition_mu.
+        """
+        if (
+            not self.use_mu_denoiser
+            or self.mu_denoiser is None
+            or not getattr(self, "mu_denoiser_has_weights", False)
+        ):
+            return condition_lut
+
+        if not getattr(self, "mu_denoiser_loaded_weights", False):
+            warmup_iter = int(self.mu_denoiser_opt.get("sde_warmup_iter", 1000))
+            if step is None or step < warmup_iter:
+                return condition_lut
+
+        with torch.no_grad():
+            mu_clean_lut = self.mu_denoiser_trainer.inference(
+                condition_lut, mask_known, confidence
+            )
+
+        return mu_clean_lut.clamp(0.0, 1.0)
 
     def optimize_parameters(self, step, timesteps, sde=None):
         self.optimizer.zero_grad()
