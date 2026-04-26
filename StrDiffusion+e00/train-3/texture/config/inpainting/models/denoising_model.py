@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from collections import OrderedDict
 import os
 import numpy as np
@@ -20,17 +20,17 @@ from models.modules.loss import MatchingLoss
 
 from .base_model import BaseModel
 
-# LUT婢跺嫮鎮婇崳顭掔礄閻劋绨€电懓骞撻崳顏勬禈閸嶅繐绨查悽銊╊杹閼规彃褰夐幑顫礆
+# LUT处理器（用于对去噪图像应用颜色变换）
 from lut_processor import LUTProcessor
 
 # ============ Self-Supervised Mu-Denoiser ============
-# 閻劋绨崷?SDE 鐠侇厾绮岄崜宥嗙閻炲棙娼禒璺烘綆閸?mu
+# 用于在 SDE 训练前清理条件均值 mu
 try:
     from models.mu_denoiser import MuDenoiser, MuDenoiserTrainer
     HAS_MU_DENOISER = True
 except ImportError:
     HAS_MU_DENOISER = False
-    print("[Warning] MuDenoiser 閺堫亝澹橀崚甯礉鐏忓棔濞囬悽銊ュ斧婵?mu")
+    print("[Warning] MuDenoiser 未找到，将使用原始 mu")
 
 logger = logging.getLogger("base")
 
@@ -119,34 +119,41 @@ class DenoisingModel(BaseModel):
         self.model = self.model.to(self.device)
         self.dis = self.dis.to(self.device)
         
-        #韫囧懏鏁?
+        #必改
         gpu_ids = opt.get('gpu_ids', None)
         if gpu_ids is not None and len(gpu_ids) > 1:
             self.model = DataParallel(self.model, device_ids=gpu_ids, output_device=gpu_ids[0])
             self.dis   = DataParallel(self.dis,   device_ids=gpu_ids, output_device=gpu_ids[0])
 
-        # ============ 閸旂姾娴?LUT 婢跺嫮鎮婇崳?============
-        # 閻劋绨€电懓骞撻崳顏勬倵閻ㄥ嫬娴橀崓蹇撶安閻劑顤侀懝鎻掑綁閹?        train_dataset_opt = opt.get('datasets', {}).get('train', {})
+        # ============ 加载 LUT 处理器 ============
+        # 用于对去噪后的图像应用颜色变换
+        train_dataset_opt = opt.get('datasets', {}).get('train', {})
         lut_path = train_dataset_opt.get('lut_path', None)
         if lut_path is not None and os.path.exists(lut_path):
             self.lut_processor = LUTProcessor(lut_path)
-            logger.info(f"[Model] 瀹告彃濮炴潪?LUT 婢跺嫮鎮婇崳? {lut_path}")
+            logger.info(f"[Model] 已加载 LUT 处理器: {lut_path}")
         else:
             self.lut_processor = None
             if lut_path:
-                logger.warning(f"[Model] LUT 閺傚洣娆㈡稉宥呯摠閸? {lut_path}")
+                logger.warning(f"[Model] LUT 文件不存在: {lut_path}")
         
         # LUT / target-domain configuration.
         self.gt_mode = train_dataset_opt.get('gt_mode', 'full')
         self.lut_strength = float(train_dataset_opt.get('lut_strength', 1.0))
-        self.lut_fade_boost = max(1.0, float(train_dataset_opt.get('lut_fade_boost', 1.0)))
+        self.lut_delta_gain = max(0.0, float(train_dataset_opt.get('lut_delta_gain', 1.0)))
         self.lut_smooth_radius = int(train_dataset_opt.get('lut_smooth_radius', 0))
         logger.info(
             f"[Model] GT mode={self.gt_mode}, LUT strength={self.lut_strength}, "
-            f"LUT fade_boost={self.lut_fade_boost}, smooth radius={self.lut_smooth_radius}"
+            f"LUT delta gain={self.lut_delta_gain}, smooth radius={self.lut_smooth_radius}"
+        )
+        logger.info(
+            "[Model] train.sde_mu_hole_mode=%s infer_x0_loss_weight=%s infer_x0_grad=%s",
+            opt.get('train', {}).get('sde_mu_hole_mode', 'known_only'),
+            opt.get('train', {}).get('infer_x0_loss_weight', 0.0),
+            opt.get('train', {}).get('infer_x0_grad', False),
         )
         
-        # ============ 閸掓繂顫愰崠?Self-Supervised Mu-Denoiser ============
+        # ============ 初始化 Self-Supervised Mu-Denoiser ============
         mu_denoiser_opt = opt.get('mu_denoiser', {})
         self.mu_denoiser_opt = mu_denoiser_opt
         self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
@@ -162,16 +169,17 @@ class DenoisingModel(BaseModel):
                 predict_residual=mu_denoiser_opt.get('predict_residual', True),
             ).to(self.device)
             
-            # 鐠侇厾绮岄崳銊ョ殱鐟佸懓鍤滈惄鎴犳奖鐠侇厾绮岄柅鏄忕帆
+            # 训练器封装自监督训练逻辑
             self.mu_denoiser_trainer = MuDenoiserTrainer(
                 self.mu_denoiser,
                 blind_ratio=mu_denoiser_opt.get('blind_ratio', 0.1)
             )
             
-            # 鐡掑懎寮弫?            self.lambda_ss = mu_denoiser_opt.get('lambda_ss', 1.0)
+            # 超参数
+            self.lambda_ss = mu_denoiser_opt.get('lambda_ss', 1.0)
             self.lambda_tv = mu_denoiser_opt.get('lambda_tv', 0.01)
             
-            logger.info(f"[Model] Mu-Denoiser 瀹告彃鎯庨悽? dim={mu_denoiser_opt.get('dim', 32)}, "
+            logger.info(f"[Model] Mu-Denoiser 已启用: dim={mu_denoiser_opt.get('dim', 32)}, "
                         f"blocks={mu_denoiser_opt.get('num_blocks', 2)}, "
                         f"blind_ratio={mu_denoiser_opt.get('blind_ratio', 0.1)}")
         else:
@@ -181,7 +189,7 @@ class DenoisingModel(BaseModel):
             self.scheduler_mu = None
             self._optimizer_mu_init_lr = None
             if mu_denoiser_opt.get('enabled', False) and not HAS_MU_DENOISER:
-                logger.warning("[Model] Mu-Denoiser 闁板秶鐤嗗鎻掓儙閻劋绲惧Ο鈥虫健閺堫亝澹橀崚?)
+                logger.warning("[Model] Mu-Denoiser 配置已启用但模块未找到")
         
         # Load checkpoints after Mu-Denoiser is constructed so optional
         # mu_denoiser.* weights can be restored when present.
@@ -197,6 +205,78 @@ class DenoisingModel(BaseModel):
             self.loss_tri = nn.TripletMarginLoss().to(self.device)
             self.adversarial_loss = AdversarialLoss(type = 'hinge').to(self.device)
             self.weight = opt['train']['weight']
+            # Optional x0 reconstruction auxiliary loss.
+            #
+            # The original one-step SDE supervision optimizes x_t -> x_{t-1}.
+            # In mural inpainting the inference failure can still happen at the
+            # final x0 hole region: the one-step loss is low, but the accumulated
+            # reverse trajectory saturates the hole to white.  This auxiliary
+            # term does not change the SDE formula or network structure; it only
+            # decodes the current model-predicted noise back to an estimated x0
+            # using the existing forward relation and supervises it against the
+            # target-domain training_target.
+            self.x0_recon_loss_weight = float(train_opt.get("x0_recon_loss_weight", 0.0))
+            self.x0_recon_loss_start_iter = int(train_opt.get("x0_recon_loss_start_iter", 0))
+            self.x0_recon_clamp_b_min = float(train_opt.get("x0_recon_clamp_b_min", 1e-3))
+            # Timestep-aware decay for x0 auxiliary loss.
+            # At high-noise timesteps B(t) is small, so x0_hat = mu + (xt-mu-sigma*noise)/B
+            # amplifies noise prediction errors.  We decay the x0 loss weight as t increases
+            # so the high-t curriculum does not inadvertently amplify x0 gradients.
+            # weight_at_t = x0_recon_loss_weight * exp(-x0_high_t_decay * t/T)
+            # x0_high_t_decay=0 disables the decay (original behavior).
+            self.x0_high_t_decay = float(train_opt.get("x0_high_t_decay", 0.0))
+            if self.x0_recon_loss_weight > 0:
+                logger.info(
+                    "[Model] x0 reconstruction auxiliary loss enabled: "
+                    f"weight={self.x0_recon_loss_weight}, "
+                    f"start_iter={self.x0_recon_loss_start_iter}, "
+                    f"clamp_b_min={self.x0_recon_clamp_b_min}, "
+                    f"high_t_decay={self.x0_high_t_decay}"
+                )
+            # Extra mural inpainting bootstrap loss.
+            #
+            # The normal one-step target samples xt from the forward process of
+            # training_target, so hole pixels still contain B(t) * target
+            # information.  In inference, however, the hole part of x_init is
+            # condition_mu plus noise (known-only mode uses 0 in holes).  If the reverse trajectory
+            # drifts off-manifold, late low-noise steps see blank/white holes
+            # that the model was not trained to correct.  This auxiliary branch
+            # keeps the SDE formula unchanged but trains the same network call on
+            # an inference-like state: known area follows the normal forward
+            # state, hole area is blank/noisy from condition_mu.  It directly
+            # supervises the implied x0 against the target-domain GT.
+            self.infer_x0_loss_weight = float(train_opt.get("infer_x0_loss_weight", 0.0))
+            self.infer_x0_loss_start_iter = int(train_opt.get("infer_x0_loss_start_iter", 0))
+            self.infer_x0_t_min_ratio = float(train_opt.get("infer_x0_t_min_ratio", 0.10))
+            self.infer_x0_t_max_ratio = float(train_opt.get("infer_x0_t_max_ratio", 0.70))
+            self.infer_x0_grad = bool(train_opt.get("infer_x0_grad", False))
+            self.infer_x0_loss_interval = max(1, int(train_opt.get("infer_x0_loss_interval", 1)))
+            self.infer_x0_microbatch = max(0, int(train_opt.get("infer_x0_microbatch", 0)))
+            self.require_infer_x0_grad_for_known_only = bool(
+                train_opt.get("require_infer_x0_grad_for_known_only", False)
+            )
+            _mu_mode_for_guard = str(train_opt.get("sde_mu_hole_mode", "known_only")).lower()
+            _infer_grad_ok = self.infer_x0_loss_weight > 0 and self.infer_x0_grad
+            if _mu_mode_for_guard == "known_only" and not _infer_grad_ok:
+                _msg = (
+                    "[X8Guard] known_only removes target/color content from hole during inference; "
+                    "training must enable a real inference-like blank-hole loss. "
+                    f"Got infer_x0_loss_weight={self.infer_x0_loss_weight}, "
+                    f"infer_x0_grad={self.infer_x0_grad}."
+                )
+                if self.require_infer_x0_grad_for_known_only:
+                    raise ValueError(_msg)
+                logger.warning(_msg)
+            if self.infer_x0_loss_weight > 0:
+                logger.info(
+                    "[Model] inference-like blank-hole x0 loss enabled: "
+                    f"weight={self.infer_x0_loss_weight}, "
+                    f"start_iter={self.infer_x0_loss_start_iter}, "
+                    f"t_range=[{self.infer_x0_t_min_ratio}, {self.infer_x0_t_max_ratio}], "
+                    f"grad={self.infer_x0_grad}, "
+                    f"interval={self.infer_x0_loss_interval}, "
+                    f"microbatch={self.infer_x0_microbatch}"
+                )
 
             # optimizers
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
@@ -257,7 +337,8 @@ class DenoisingModel(BaseModel):
 
             self.optimizers.append(self.optimizer)
             
-            # Mu-Denoiser 娴兼ê瀵查崳顭掔礄閻欘剛鐝涙禍搴濆瘜缂冩垹绮堕敍?            if self.use_mu_denoiser:
+            # Mu-Denoiser 优化器（独立于主网络）
+            if self.use_mu_denoiser:
                 self.optimizer_mu = torch.optim.Adam(
                     self.mu_denoiser.parameters(),
                     lr=mu_denoiser_opt.get('lr', 1e-4),
@@ -265,7 +346,7 @@ class DenoisingModel(BaseModel):
                 )
                 self._optimizer_mu_init_lr = mu_denoiser_opt.get('lr', 1e-4)
                 self.scheduler_mu = self._build_mu_scheduler(train_opt)
-                logger.info(f"[Model] Mu-Denoiser 娴兼ê瀵查崳銊ュ嚒閸掓稑缂? lr={mu_denoiser_opt.get('lr', 1e-4)}")
+                logger.info(f"[Model] Mu-Denoiser 优化器已创建: lr={mu_denoiser_opt.get('lr', 1e-4)}")
 
             # schedulers
             if train_opt["lr_scheme"] == "MultiStepLR":
@@ -382,13 +463,13 @@ class DenoisingModel(BaseModel):
         if "optimizer_mu" in resume_state:
             self.optimizer_mu.load_state_dict(resume_state["optimizer_mu"])
         else:
-            logger.warning("[Model] resume_state 娑擃厾宸辩亸?optimizer_mu閿涘苯鐨㈤幐澶婄秼閸撳秷鍑禒锝呮倱濮?Mu-Denoiser 鐎涳缚绡勯悳鍥モ偓?)
+            logger.warning("[Model] resume_state 中缺少 optimizer_mu，将按当前迭代同步 Mu-Denoiser 学习率。")
 
         if self.scheduler_mu is not None:
             if "scheduler_mu" in resume_state:
                 self.scheduler_mu.load_state_dict(resume_state["scheduler_mu"])
             else:
-                logger.warning("[Model] resume_state 娑擃厾宸辩亸?scheduler_mu閿涘苯鐨㈤幐澶婄秼閸撳秷鍑禒锝嗗腹閺?Mu-Denoiser 鐎涳缚绡勯悳鍥モ偓?)
+                logger.warning("[Model] resume_state 中缺少 scheduler_mu，将按当前迭代推断 Mu-Denoiser 学习率。")
                 self._sync_mu_lr_to_iter(
                     int(float(resume_state["iter"])),
                     self.train_opt.get("warmup_iter", -1),
@@ -401,37 +482,43 @@ class DenoisingModel(BaseModel):
                   condition_lut=None, mu_clean_lut=None,
                   denoised_observed_mask_aware=None):
         """
-        閸旂姾娴囩拋顓犵矊閺佺増宓?
+        加载训练数据
         
         Args:
-            state: 閸ｎ亜锛愰悩鑸碘偓?            LQ: 娴ｅ氦宸濋柌蹇氱翻閸忋儻绱欓弶鈥叉閿涘苯褰查懗钘夌敨 mask 濞戝倿绮﹂敍?            GT: Ground Truth閿涘湢UT 閸欐ɑ宕查崥搴ｆ畱閻╊喗鐖ｉ敍?            mask: 閹衡晝鐖?
-            S_sde: 缂佹挻鐎疭DE
-            S_GT: 缂佹挻鐎疓T
-            S_LQ: 缂佹挻鐎疞Q
-            color_prior: [閸欘垶鈧、 妫版粏澹婇崗鍫ョ崣閸ユ拝绱濋悽銊ょ艾BrushNet
-            confidence: [閸欘垶鈧、 缂冾喕淇婃惔锕€娴橀敍宀€鏁ゆ禍宥ushNet
-            conf_lut: [閸欘垶鈧、 LUT缂冾喕淇婃惔锕€娴?
-            original_degraded: [閸欘垶鈧、 瑜版挸澧犵憴鍌涚ゴ鏉堟挸鍙嗛敍鍫㈡埂鐎圭偟宸遍幑鐔奉樆鐟欏偊绱氶敍宀€鏁ゆ禍搴㈡蒋娴犲爼鎽?
-            reference_degraded: [閸欘垶鈧、 鐎瑰本鏆ｇ憸顏囧閸欏倽鈧啫娴橀敍灞肩矌閻劋绨拋顓犵矊閻╊喗鐖ｉ悽鐔稿灇
+            state: 噪声状态
+            LQ: 低质量输入（条件，可能带 mask 涂黑）
+            GT: Ground Truth（LUT 变换后的目标）
+            mask: 掩码
+            S_sde: 结构SDE
+            S_GT: 结构GT
+            S_LQ: 结构LQ
+            color_prior: [可选] 颜色先验图，用于BrushNet
+            confidence: [可选] 置信度图，用于BrushNet
+            conf_lut: [可选] LUT置信度图
+            original_degraded: [可选] 当前观测输入（真实缺损外观），用于条件链
+            reference_degraded: [可选] 完整褪色参考图，仅用于训练目标生成
         """
         self.state = state.to(self.device)    # noisy_state
-        self.condition = LQ.to(self.device)   # LQ閿涘牆褰查懗钘夌敨 mask 濞戝倿绮﹂敍?        self.state_0 = GT.to(self.device)     # GT
+        self.condition = LQ.to(self.device)   # LQ（可能带 mask 涂黑）
+        self.state_0 = GT.to(self.device)     # GT
         self.mask = mask.to(self.device)      # mask
         self.S_sde = S_sde
         self.S_GT = S_GT.to(self.device)
         self.S_LQ = S_LQ.to(self.device)
         
-        # 瑜版挸澧犵憴鍌涚ゴ鏉堟挸鍙嗛敍姘侀幏鐔烘埂鐎圭偞甯归悶鍡樻瀹歌尙绮＄€涙ê婀紓鐑樺疮閻ㄥ嫯绶崗銉ユ禈閸?        if original_degraded is not None:
+        # 当前观测输入：模拟真实推理时已经存在缺损的输入图像
+        if original_degraded is not None:
             self.original_degraded = original_degraded.to(self.device)
         else:
             self.original_degraded = self.condition
 
-        # 鐎瑰本鏆ｉ崣鍌濃偓鍐ㄦ禈閿涙艾褰ч悽銊ょ艾閺嬪嫰鈧姾顔勭紒鍐窗閺嶅浄绱濇稉宥呭棘娑撳孩甯归悶鍡樻閻ㄥ嫭娼禒鍓佹晸閹?        if reference_degraded is not None:
+        # 完整参考图：只用于构造训练目标，不参与推理时的条件生成
+        if reference_degraded is not None:
             self.reference_degraded = reference_degraded.to(self.device)
         else:
             self.reference_degraded = self.original_degraded
         
-        # BrushNet閺夆€叉
+        # BrushNet条件
         if color_prior is not None:
             self.color_prior = color_prior.to(self.device)
         else:
@@ -442,7 +529,8 @@ class DenoisingModel(BaseModel):
         else:
             self.confidence = None
         
-        # LUT缂冾喕淇婃惔?        if conf_lut is not None:
+        # LUT置信度
+        if conf_lut is not None:
             self.conf_lut = conf_lut.to(self.device)
         else:
             self.conf_lut = None
@@ -461,188 +549,97 @@ class DenoisingModel(BaseModel):
         )
 
 
-    def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
-        """
-        Return target-domain MuCleanr output for the current condition_lut.
-
-        condition_lut is already LUT(denoised(observed_degraded)); MuCleanr must
-        never receive raw degraded-domain input for SDE mu construction.
-        If MuDenoiser is training from scratch, keep SDE mu on plain CondLUT for
-        a warmup period so random early MuCleanr weights cannot tint condition_mu.
-        """
-        if (
-            not self.use_mu_denoiser
-            or self.mu_denoiser is None
-            or not getattr(self, "mu_denoiser_has_weights", False)
-        ):
-            return condition_lut
-
-        if not getattr(self, "mu_denoiser_loaded_weights", False):
-            warmup_iter = int(self.mu_denoiser_opt.get("sde_warmup_iter", 1000))
-            if step is None or step < warmup_iter:
-                return condition_lut
-
-        with torch.no_grad():
-            mu_clean_lut = self.mu_denoiser_trainer.inference(
-                condition_lut, mask_known, confidence
-            )
-
-        return mu_clean_lut.clamp(0.0, 1.0)
-
     def optimize_parameters(self, step, timesteps, sde=None):
-        self.log_dict = OrderedDict()
+        self.optimizer.zero_grad()
+        if self.use_mu_denoiser and getattr(self, "optimizer_mu", None) is not None:
+            self.optimizer_mu.zero_grad()
 
-        training_target = self.state_0
-        condition_lut_for_mu = getattr(self, "condition_lut", self.condition)
-        mu_clean_lut = getattr(self, "mu_clean_lut", condition_lut_for_mu)
-        mu_losses = {}
+        # =========== 1. 主干扩散模型（预测噪声） ===========
+        l_total = 0.0
+        loss_dict = {}
+        
+        # 使用真实的 sde 状态
+        states = self.state
+        condition_mu = self.condition
 
-        # ============ Self-Supervised Mu-Denoiser training ============
-        mu_denoiser_loss = None
-        if self.use_mu_denoiser and self.is_train:
+        # Model forward
+        noise_level = sde.noise_schedule(timesteps)
+        model_out = self.model(states, noise_level, condition_mu)
+        
+        # Denoising loss
+        err = sde.noise_fn(self.state_0, condition_mu, timesteps) - model_out
+        loss_pixel = torch.mean(torch.abs(err), dim=1, keepdim=True)
+        
+        # 统计 hole 和 known 区域的 loss
+        if self.mask_hole is not None:
+            mask_hole_3c = self.mask_hole.expand(-1, 3, -1, -1)
+            mask_known_3c = self.mask.expand(-1, 3, -1, -1)
+            hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+            known_denom = mask_known_3c.sum().clamp_min(1.0)
+            loss_hole = (loss_pixel * self.mask_hole).sum() / hole_denom
+            loss_known = (loss_pixel * self.mask).sum() / known_denom
+            
+            # 使用 weight 调整 hole/known 权重
+            w = self.train_opt.get("weight", 1.0)
+            loss_hole_weighted = loss_hole * w
+            loss_main = loss_hole_weighted + loss_known
+            
+            loss_dict["loss_hole"] = loss_hole.item()
+            loss_dict["loss_known"] = loss_known.item()
+            loss_dict["loss_hole_weighted"] = loss_hole_weighted.item()
+        else:
+            loss_main = loss_pixel.mean()
+
+        loss_dict["loss_main"] = loss_main.item()
+        l_total += loss_main
+
+        # =========== 2. Mu-Denoiser 训练 ===========
+        loss_mu = torch.tensor(0.0, device=self.device)
+        if self.use_mu_denoiser and self.mu_denoiser_trainer is not None:
             y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
-                y_degraded=condition_lut_for_mu.detach(),
+                y_degraded=self.condition_lut.detach(),
                 mask_known=self.mask,
                 confidence=self.confidence,
                 lambda_ss=self.lambda_ss,
                 lambda_tv=self.lambda_tv,
             )
-            mu_clean_lut = y_hat.detach().clamp(0.0, 1.0)
-            mu_denoiser_loss = loss_mu
-            for key, val in mu_losses.items():
-                self.log_dict[key] = val
-
-        # SDE mu = condition (= training_target * mask, built in train.py)
-        sde.set_mu(self.condition)
-        
-        yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
-        timesteps = timesteps.to(self.device)
-        
-        S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps=timesteps)
-        S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
-        
-        # ============ BrushNet conditions ============
-        brushnet_kwargs = {}
-        if self.color_prior is not None:
-            brushnet_kwargs['color_prior'] = self.color_prior
-        if self.confidence is not None:
-            brushnet_kwargs['confidence'] = self.confidence
-        if hasattr(self, 'mask') and self.mask is not None:
-            brushnet_kwargs['mask'] = 1 - self.mask
-
-        model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
-        if isinstance(model_output, (tuple, list)):
-            noise = model_output[0]
+            loss_dict.update({f"loss_mu_{k}": v for k, v in mu_losses.items()})
+            loss_dict["loss_mu_total"] = loss_mu.item()
+            l_total += loss_mu
+            self.mu_clean_lut = y_hat.detach().clamp(0.0, 1.0)
         else:
-            noise = model_output
-        
-        score = sde.get_score_from_noise(noise, timesteps)
-        yt_1_expection = sde.reverse_sde_step_mean(self.state, score, timesteps)
-        
-        # ============ Optimizer ============
-        self.optimizer.zero_grad()
-        if self.use_mu_denoiser:
-            self.optimizer_mu.zero_grad()
-        
-        # Main loss: original StrDiffusion single diffusion loss
-        loss_components = self.loss_fn.compute_components(
-            yt_1_expection, yt_1_optimum, self.mask
-        )
-        loss = loss_components["loss_total"]
+            self.mu_clean_lut = self.condition_lut
 
-        # Total = diffusion + MuDenoiser (independent module)
-        total_loss = loss
-        if mu_denoiser_loss is not None:
-            total_loss = total_loss + mu_denoiser_loss
-        
-        total_loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # =========== 3. 反向传播 ===========
+        l_total.backward()
+        loss_dict["loss_total"] = l_total.item()
         self.optimizer.step()
         
-        if self.use_mu_denoiser:
-            torch.nn.utils.clip_grad_norm_(self.mu_denoiser.parameters(), max_norm=1.0)
+        if self.use_mu_denoiser and getattr(self, "optimizer_mu", None) is not None:
             self.optimizer_mu.step()
-            self.mu_denoiser_has_weights = True
 
-        # ============ Core training metrics ============
-        self.log_dict["loss"] = loss.item()
-        self.log_dict["loss_main"] = loss.item()
-        self.log_dict["loss_total"] = total_loss.item()
-        self.log_dict["loss_known"] = loss_components["loss_known"].item()
-        self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
-        self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
-        self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
-        self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
-        self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
-        self.log_dict["lr_main"] = float(self.optimizer.param_groups[0]["lr"])
-        if len(self.optimizer.param_groups) > 1:
-            self.log_dict["lr_new"] = float(self.optimizer.param_groups[1]["lr"])
-        if self.use_mu_denoiser:
-            self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
-        self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+        # EMA 更新
+        self._update_ema(loss_dict["loss_main"], loss_dict["loss_total"])
 
-        # ============ Key diagnostics (check within first 100 steps) ============
-        timesteps_float = timesteps.detach().float()
+        # Stats 更新
+        self.log_dict = loss_dict
+        if hasattr(self, "_compute_condition_stats"):
+            stats = self._compute_condition_stats(
+                self.color_prior, self.condition_lut, self.mu_clean_lut, self.confidence, self.mask
+            )
+            self.log_dict.update(stats)
+            
         with torch.no_grad():
-            self.log_dict["stats_noise_mean"] = float(noise.detach().mean().item())
-            self.log_dict["stats_noise_std"] = float(noise.detach().std().item())
-            _pred_opt_diff = (yt_1_expection - yt_1_optimum).detach().abs()
-            _mask_h3 = (1 - self.mask).expand_as(_pred_opt_diff)
-            _mask_k3 = self.mask.expand_as(_pred_opt_diff)
-            self.log_dict["stats_pred_opt_diff_hole"] = float(
-                (_pred_opt_diff * _mask_h3).sum().item() / _mask_h3.sum().clamp_min(1.0).item()
-            )
-            self.log_dict["stats_pred_opt_diff_known"] = float(
-                (_pred_opt_diff * _mask_k3).sum().item() / _mask_k3.sum().clamp_min(1.0).item()
-            )
-        self.log_dict["stats_timestep_mean"] = float(timesteps_float.mean().item())
-
-        # ============ Train/inference consistency checks ============
-        with torch.no_grad():
-            state_hole_mask = (1 - self.mask).expand_as(training_target)
-            state_hole_denom = state_hole_mask.sum().clamp_min(1.0)
-            # condition hole mean (MUST = 0, verifies mu=target*mask with hole=0)
-            cond_hole = self.condition.detach() * state_hole_mask
-            self.log_dict["stats_train_condition_hole_mean"] = float(
-                cond_hole.sum().item() / state_hole_denom.item()
-            )
-            self.log_dict["stats_sde_mu_hole_mean"] = self.log_dict["stats_train_condition_hole_mean"]
-            # target hole mean (normal color, not white)
-            target_hole = training_target.detach() * state_hole_mask
-            self.log_dict["stats_train_target_hole_mean"] = float(
-                target_hole.sum().item() / state_hole_denom.item()
-            )
-            # LUT color shift magnitude (target range: 0.02~0.04)
-            training_target_delta = (training_target - self.reference_degraded).abs().mean()
-            self.log_dict["stats_training_target_delta"] = float(training_target_delta.item())
-
-        self.log_dict.update(self._compute_condition_stats(
-            color_prior=self.color_prior,
-            condition_lut=condition_lut_for_mu,
-            mu_clean_lut=mu_clean_lut,
-            confidence=self.confidence,
-            mask_known=self.mask,
-        ))
-
-        denoised_observed = getattr(self, "denoised_observed_mask_aware", None)
-        self._debug_refiner_info = {
-            'original_degraded': self.original_degraded.detach(),
-            'reference_degraded': self.reference_degraded.detach(),
-            'denoised_observed_mask_aware': denoised_observed.detach() if denoised_observed is not None else None,
-            'condition_lut': condition_lut_for_mu.detach(),
-            'condition_mu': self.condition.detach(),
-            'mu_clean_lut': mu_clean_lut.detach(),
-            'training_target': training_target.detach(),
-            'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
-            'confidence': self.confidence.detach() if self.confidence is not None else None,
-            'mask_known': self.mask.detach(),
-            'mask_hole': (1 - self.mask).detach(),
-            'structure_gray_from_target': self.S_GT.detach(),
-            'structure_edge_from_target': self.S_LQ.detach(),
-        }
-
-
+            self.log_dict["stats_noise_mean"] = float(model_out.mean().item())
+            self.log_dict["stats_noise_std"] = float(model_out.std().item())
+            self.log_dict["stats_timestep_mean"] = float(timesteps.float().mean().item())
+            if self.mask_hole is not None:
+                mask_hole_3c = self.mask_hole.expand(-1, 3, -1, -1)
+                hole_denom = mask_hole_3c.sum().clamp_min(1.0)
+                pred_diff = (model_out - sde.noise_fn(self.state_0, condition_mu, timesteps)).abs()
+                self.log_dict["stats_pred_opt_diff_hole"] = float((pred_diff * self.mask_hole).sum().item() / hole_denom.item())
+                known_denom = (1 - self.mask_hole).expand(-1, 3, -1, -1).sum().clamp_min(1.0)
+                self.log_dict["stats_pred_opt_diff_known"] = float((pred_diff * (1 - self.mask_hole)).sum().item() / known_denom.item())
     def _masked_mean_std(self, tensor, mask):
         if tensor is None or mask is None:
             return 0.0, 0.0
@@ -699,6 +696,7 @@ class DenoisingModel(BaseModel):
             ]
         )
 
+
     def _build_lut_transformed(self, denoised_image):
         """
         自适应褪色程度的 LUT 色彩变换（训练/推理共享）。
@@ -708,6 +706,7 @@ class DenoisingModel(BaseModel):
 
         Args:
             denoised_image: [B, 3, H, W]，已完成预去噪的输入
+
         Returns:
             lut_transformed: [B, 3, H, W]
             lut_confidence: [B, 1, H, W]
@@ -717,7 +716,7 @@ class DenoisingModel(BaseModel):
 
         lut_raw, lut_confidence = self.lut_processor.apply_to_tensor(denoised_image)
 
-        if self.lut_smooth_radius > 0:
+        if getattr(self, "lut_smooth_radius", 0) > 0:
             lut_raw = self._guided_smooth(
                 lut_raw,
                 guide=denoised_image,
@@ -740,8 +739,8 @@ class DenoisingModel(BaseModel):
             fade_degree = ((1.0 - saturation) * brightness).clamp(0.0, 1.0)
 
         # 自适应强度：褪色区域获得更强的 LUT 复原
-        adaptive_strength = self.lut_strength * (
-            1.0 + fade_degree * (self.lut_fade_boost - 1.0)
+        adaptive_strength = getattr(self, "lut_strength", 1.0) * (
+            1.0 + fade_degree * (getattr(self, "lut_fade_boost", 3.0) - 1.0)
         )
         effective_weight = torch.clamp(lut_confidence, 0.0, 1.0) * adaptive_strength
 
@@ -751,7 +750,6 @@ class DenoisingModel(BaseModel):
             1.0,
         )
         return lut_transformed, lut_confidence
-    
     def _denoise_image(self, image, mask_known=None):
         """
         Lightweight edge-preserving smoothing before LUT.
@@ -813,15 +811,17 @@ class DenoisingModel(BaseModel):
 
     def _guided_smooth(self, image, guide, radius=5):
         """
-        娴ｈ法鏁ら懕鏂挎値閸欏矁绔熷銈嗗皾楠炶櫕绮﹂崶鎯у剼閿涘奔浜?guide 娑撳搫绱╃€甸棿绻氶幐浣界珶缂?        
-        鏉╂瑥褰叉禒銉ュ櫤鐏?LUT 閸欐ɑ宕查崥搴ｆ畱妫版粏澹婇崜鑼额棁閿涘矁顔€閻╅晲鎶€妫版粏澹婇崠鍝勭厵閼惧嘲绶遍弴缈犵閼峰娈戦崣妯诲床缂佹挻鐏?
+        使用联合双边滤波平滑图像，以 guide 为引导保持边缘
+        
+        这可以减少 LUT 变换后的颜色割裂，让相似颜色区域获得更一致的变换结果
         
         Args:
-            image: [B, 3, H, W] 闂団偓鐟曚礁閽╁鎴犳畱閸ユ儳鍎氶敍鍦燯T 閸欐ɑ宕茬紒鎾寸亯閿?            guide: [B, 3, H, W] 瀵洖顕遍崶鎯у剼閿涘牆骞撻崳顏勬倵閻ㄥ嫬甯崶鎾呯礆
-            radius: 濠娿倖灏濋崡濠傜窞
+            image: [B, 3, H, W] 需要平滑的图像（LUT 变换结果）
+            guide: [B, 3, H, W] 引导图像（去噪后的原图）
+            radius: 滤波半径
         
         Returns:
-            smoothed: [B, 3, H, W] 楠炶櫕绮﹂崥搴ｆ畱閸ユ儳鍎?
+            smoothed: [B, 3, H, W] 平滑后的图像
         """
         import cv2
         
@@ -829,26 +829,29 @@ class DenoisingModel(BaseModel):
         results = []
         
         for b in range(B):
-            # 鏉烆剚宕叉稉?numpy [H, W, 3]
+            # 转换为 numpy [H, W, 3]
             img_np = image[b].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
             guide_np = guide[b].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
             
-            # 鏉烆剚宕叉稉?uint8
+            # 转换为 uint8
             img_uint8 = (np.clip(img_np, 0, 1) * 255).astype(np.uint8)
             guide_uint8 = (np.clip(guide_np, 0, 1) * 255).astype(np.uint8)
             
-            # 閼辨柨鎮庨崣宀冪珶濠娿倖灏?
-            # sigma_color: 妫版粏澹婄粚娲？濠娿倖灏濋惃?sigma閿涘矁绶濇径褍鈧吋鍓伴崨宕囨絻閺囨潙顦挎０婊嗗濞ｅ嘲鎮?
-            # sigma_space: 閸ф劖鐖ｇ粚娲？濠娿倖灏濋惃?sigma
+            # 联合双边滤波
+            # sigma_color: 颜色空间滤波的 sigma，较大值意味着更多颜色混合
+            # sigma_space: 坐标空间滤波的 sigma
             d = radius * 2 + 1
-            sigma_color = 50  # 妫版粏澹婇惄闀愭妧鎼达箓妲囬崐?            sigma_space = radius  # 缁屾椽妫跨捄婵堫瀲 sigma
+            sigma_color = 50  # 颜色相似度阈值
+            sigma_space = radius  # 空间距离 sigma
             
-            # 娴ｈ法鏁?guide 娴ｆ粈璐熼崣鍌濃偓鍐箻鐞涘矁浠堥崥鍫濆蓟鏉堣鎶ゅ▔?            # OpenCV 濞屸剝婀侀惄瀛樺复閻?joint bilateral filter閿涘本鍨滄禒顒€鍨庨柅姘朵壕婢跺嫮鎮?
+            # 使用 guide 作为参考进行联合双边滤波
+            # OpenCV 没有直接的 joint bilateral filter，我们分通道处理
             smoothed = np.zeros_like(img_uint8, dtype=np.float32)
             for c in range(3):
-                # 娴ｈ法鏁?guide 閻ㄥ嫮浼嗘惔锔跨稊娑撻缚绔熺紓妯哄棘閼?                guide_gray = cv2.cvtColor(guide_uint8, cv2.COLOR_RGB2GRAY)
+                # 使用 guide 的灰度作为边缘参考
+                guide_gray = cv2.cvtColor(guide_uint8, cv2.COLOR_RGB2GRAY)
                 
-                # 閸欏矁绔熷銈嗗皾
+                # 双边滤波
                 filtered = cv2.bilateralFilter(
                     img_uint8[:, :, c], 
                     d=d, 
@@ -857,7 +860,7 @@ class DenoisingModel(BaseModel):
                 )
                 smoothed[:, :, c] = filtered.astype(np.float32) / 255.0
             
-            # 鏉烆剙娲?tensor
+            # 转回 tensor
             smoothed_tensor = torch.from_numpy(smoothed).permute(2, 0, 1).to(image.device)
             results.append(smoothed_tensor)
         
@@ -913,14 +916,17 @@ class DenoisingModel(BaseModel):
             print('load-------------------------------')
             logger.info("Loading model for G [{:s}] ...".format(load_path_G))
             
-            # 閸旂姾娴囩€瑰本鏆?checkpoint閿涘牆褰查懗钘夊瘶閸?mu_denoiser閿?            checkpoint = torch.load(load_path_G, map_location=self.device)
+            # 加载完整 checkpoint（可能包含 mu_denoiser）
+            checkpoint = torch.load(load_path_G, map_location=self.device)
             
-            # 閸掑棛顬囨稉缁樐侀崹瀣嫲 D_mu 閻ㄥ嫭娼堥柌?            model_state = {}
+            # 分离主模型和 D_mu 的权重
+            model_state = {}
             mu_denoiser_state = {}
             
             for k, v in checkpoint.items():
                 if k.startswith('mu_denoiser.'):
-                    # D_mu 閺夊啴鍣搁敍鍫濆箵閹哄澧犵紓鈧敍?                    mu_denoiser_state[k[len('mu_denoiser.'):]] = v
+                    # D_mu 权重（去掉前缀）
+                    mu_denoiser_state[k[len('mu_denoiser.'):]] = v
                 elif k.startswith('module.mu_denoiser.'):
                     mu_denoiser_state[k[len('module.mu_denoiser.'):]] = v
                 elif k.startswith('module.'):
@@ -928,23 +934,25 @@ class DenoisingModel(BaseModel):
                 else:
                     model_state[k] = v
             
-            # 閸旂姾娴囨稉缁樐侀崹?            self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
+            # 加载主模型
+            self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
             
-            # 閸旂姾娴?D_mu閿涘牆顩ч弸婊勬箒閿?            use_mu_denoiser = getattr(self, 'use_mu_denoiser', False)
+            # 加载 D_mu（如果有）
+            use_mu_denoiser = getattr(self, 'use_mu_denoiser', False)
             mu_denoiser = getattr(self, 'mu_denoiser', None)
             if use_mu_denoiser and mu_denoiser is not None and len(mu_denoiser_state) > 0:
                 try:
                     mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
                     self.mu_denoiser_has_weights = True
                     self.mu_denoiser_loaded_weights = True
-                    logger.info(f"[Model] Mu-Denoiser 閺夊啴鍣稿鎻掑鏉?({len(mu_denoiser_state)} 娑擃亜寮弫?")
+                    logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
                 except Exception as e:
-                    logger.warning(f"[Model] Mu-Denoiser 閺夊啴鍣搁崝鐘烘祰婢惰精瑙? {e}")
+                    logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
             elif use_mu_denoiser and len(mu_denoiser_state) == 0:
-                logger.info("[Model] Checkpoint 娑擃厽婀幍鎯у煂 Mu-Denoiser 閺夊啴鍣搁敍灞界殺娴犲骸銇旂拋顓犵矊")
+                logger.info("[Model] Checkpoint 中未找到 Mu-Denoiser 权重，将从头训练")
     
     def load_network_from_state(self, state_dict, network, strict=True):
-        """娴?state_dict 閸旂姾娴囩純鎴犵捕閿涘牐绶熼崝鈺傛煙濞夋洩绱?""
+        """从 state_dict 加载网络（辅助方法）"""
         from torch.nn.parallel import DataParallel, DistributedDataParallel
         if isinstance(network, (DataParallel, DistributedDataParallel)):
             network = network.module
@@ -968,12 +976,15 @@ class DenoisingModel(BaseModel):
 
     def save(self, iter_label):
         """
-        娣囨繂鐡ㄥΟ鈥崇€烽弶鍐櫢閿涘牆瀵橀崥顐″瘜濡€崇€?+ D_mu閿?        
-        閺夊啴鍣搁弬鍥︽缂佹挻鐎?
+        保存模型权重（包含主模型 + D_mu）
+        
+        权重文件结构:
         {
-            'conv1.weight': ...,       # 娑撶粯膩閸ㄥ寮弫?            'conv1.bias': ...,
+            'conv1.weight': ...,       # 主模型参数
+            'conv1.bias': ...,
             ...
-            'mu_denoiser.stem.weight': ...,  # D_mu 閸欏倹鏆熼敍鍫濈敨閸撳秶绱戦敍?            'mu_denoiser.stem.bias': ...,
+            'mu_denoiser.stem.weight': ...,  # D_mu 参数（带前缀）
+            'mu_denoiser.stem.bias': ...,
             ...
         }
         """
@@ -983,16 +994,17 @@ class DenoisingModel(BaseModel):
         save_filename = "{}_{}.pth".format(iter_label, "G")
         save_path = os.path.join(self.opt["path"]["models"], save_filename)
         
-        # 閼惧嘲褰囨稉缁樐侀崹?state_dict
+        # 获取主模型 state_dict
         model = self.model
         if isinstance(model, (DataParallel, DistributedDataParallel)):
             model = model.module
         combined_state = {k: v.cpu() for k, v in model.state_dict().items()}
         
-        # 濞ｈ濮?D_mu state_dict閿涘牆鐢崜宥囩磻閿涘矂娼ゆ妯诲潑閸旂姳绗夐幍鎾冲祪閿?        if self.use_mu_denoiser and self.mu_denoiser is not None:
+        # 添加 D_mu state_dict（带前缀，静默添加不打印）
+        if self.use_mu_denoiser and self.mu_denoiser is not None:
             for k, v in self.mu_denoiser.state_dict().items():
                 combined_state[f'mu_denoiser.{k}'] = v.cpu()
-            #logger.info(f"[Model] 娣囨繂鐡ㄩ弶鍐櫢閸栧懎鎯?Mu-Denoiser ({sum(1 for k in combined_state if k.startswith('mu_denoiser.'))} 娑擃亜寮弫?")
+            #logger.info(f"[Model] 保存权重包含 Mu-Denoiser ({sum(1 for k in combined_state if k.startswith('mu_denoiser.'))} 个参数)")
         
         torch.save(combined_state, save_path)
-        #logger.info(f"[Model] 濡€崇€峰韫箽鐎涙ê鍩?{save_path}")
+        #logger.info(f"[Model] 模型已保存到 {save_path}")
