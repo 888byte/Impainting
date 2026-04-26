@@ -578,96 +578,247 @@ class DenoisingModel(BaseModel):
         return mu_clean_lut.clamp(0.0, 1.0)
 
     def optimize_parameters(self, step, timesteps, sde=None):
-        self.optimizer.zero_grad()
-        if self.use_mu_denoiser and getattr(self, "optimizer_mu", None) is not None:
-            self.optimizer_mu.zero_grad()
+        from collections import OrderedDict
+        import torch.nn as nn
+        self.log_dict = OrderedDict()
 
-        # =========== 1. 主干扩散模型（预测噪声） ===========
-        l_total = 0.0
-        loss_dict = {}
-        
-        # 使用真实的 sde 状态
-        states = self.state
-        condition_mu = self.condition
+        # train.py has already built the single mural target domain and passed it
+        # through feed_data(GT=...).  Do not recompute denoised/LUT targets here.
+        training_target = self.state_0
+        condition_lut_for_mu = getattr(self, "condition_lut", self.condition)
+        mu_clean_lut = getattr(self, "mu_clean_lut", condition_lut_for_mu)
+        mu_losses = {}
 
-        # Model forward
-        noise_level = sde.noise_schedule(timesteps)
-        model_out = self.model(states, noise_level, condition_mu)
-        
-        # Denoising loss
-        err = sde.noise_fn(self.state_0, condition_mu, timesteps) - model_out
-        loss_pixel = torch.mean(torch.abs(err), dim=1, keepdim=True)
-        
-        # 统计 hole 和 known 区域的 loss
-        if self.mask_hole is not None:
-            mask_hole_3c = self.mask_hole.expand(-1, 3, -1, -1)
-            mask_known_3c = self.mask.expand(-1, 3, -1, -1)
-            hole_denom = mask_hole_3c.sum().clamp_min(1.0)
-            known_denom = mask_known_3c.sum().clamp_min(1.0)
-            loss_hole = (loss_pixel * self.mask_hole).sum() / hole_denom
-            loss_known = (loss_pixel * self.mask).sum() / known_denom
-            
-            # 使用 weight 调整 hole/known 权重
-            w = self.train_opt.get("weight", 1.0)
-            loss_hole_weighted = loss_hole * w
-            loss_main = loss_hole_weighted + loss_known
-            
-            loss_dict["loss_hole"] = loss_hole.item()
-            loss_dict["loss_known"] = loss_known.item()
-            loss_dict["loss_hole_weighted"] = loss_hole_weighted.item()
-        else:
-            loss_main = loss_pixel.mean()
-
-        loss_dict["loss_main"] = loss_main.item()
-        l_total += loss_main
-
-        # =========== 2. Mu-Denoiser 训练 ===========
-        loss_mu = torch.tensor(0.0, device=self.device)
-        if self.use_mu_denoiser and self.mu_denoiser_trainer is not None:
+        # ============ Self-Supervised Mu-Denoiser training ============
+        mu_denoiser_loss = None
+        if self.use_mu_denoiser and self.is_train:
             y_hat, loss_mu, mu_losses = self.mu_denoiser_trainer.train_step(
-                y_degraded=self.condition_lut.detach(),
+                y_degraded=condition_lut_for_mu.detach(),
                 mask_known=self.mask,
                 confidence=self.confidence,
                 lambda_ss=self.lambda_ss,
                 lambda_tv=self.lambda_tv,
             )
-            loss_dict.update({f"loss_mu_{k}": v for k, v in mu_losses.items()})
-            loss_dict["loss_mu_total"] = loss_mu.item()
-            l_total += loss_mu
-            self.mu_clean_lut = y_hat.detach().clamp(0.0, 1.0)
-        else:
-            self.mu_clean_lut = self.condition_lut
+            mu_clean_lut = y_hat.detach().clamp(0.0, 1.0)
+            mu_denoiser_loss = loss_mu
+            for key, val in mu_losses.items():
+                self.log_dict[key] = val
 
-        # =========== 3. 反向传播 ===========
-        l_total.backward()
-        loss_dict["loss_total"] = l_total.item()
+        # Texture SDE mu is exactly the feed_data condition_mu built in train.py:
+        # target-domain condition_lut * mask, or MuCleanr(condition_lut) * mask.
+        sde.set_mu(self.condition)
+        
+        # 使用 GT 计算最优逆步骤
+        yt_1_optimum = sde.reverse_optimum_step(self.state, training_target, timesteps)
+        timesteps = timesteps.to(self.device)
+        
+        # Get noise and score
+        S_timestep, S_optimum = self.S_sde.generate_random_states_texture(x0=self.S_GT, mu=self.S_LQ * self.mask, timesteps = timesteps)
+        S_optimum = self.S_sde.reverse_optimum_step(S_optimum, self.S_GT, timesteps)
+        
+        # ============ 传递BrushNet条件 ============
+        brushnet_kwargs = {}
+        if self.color_prior is not None:
+            brushnet_kwargs['color_prior'] = self.color_prior
+        if self.confidence is not None:
+            brushnet_kwargs['confidence'] = self.confidence
+        if hasattr(self, 'mask') and self.mask is not None:
+            # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
+            brushnet_kwargs['mask'] = 1 - self.mask
+
+        model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
+        if isinstance(model_output, (tuple, list)):
+            noise = model_output[0]
+            maybe_gate = model_output[1] if len(model_output) > 1 else None
+            enable_g_score_aux = self.train_opt.get("enable_g_score_aux", False) is True
+            is_real_gate = (
+                maybe_gate is not None
+                and torch.is_tensor(maybe_gate)
+                and maybe_gate is not noise
+                and maybe_gate.dim() == noise.dim()
+                and maybe_gate.shape[0] == noise.shape[0]
+                and maybe_gate.shape[-2:] == noise.shape[-2:]
+                and maybe_gate.shape[1] == 1
+            )
+            g_score = maybe_gate if (enable_g_score_aux and is_real_gate) else None
+        else:
+            noise = model_output
+            g_score = None
+        # ============ 传递BrushNet条件完成 ============
+        
+        score = sde.get_score_from_noise(noise, timesteps)
+        yt_1_expection = sde.reverse_sde_step_mean(self.state, score, timesteps)
+        
+        # ============ 优化器更新 ============
+        self.optimizer.zero_grad()
+        if self.use_mu_denoiser:
+            self.optimizer_mu.zero_grad()
+        
+        # 主损失：模型输出 vs GT
+        loss_components = self.loss_fn.compute_components(
+            yt_1_expection, yt_1_optimum, self.mask
+        )
+        loss = loss_components["loss_total"]
+
+        # ============ 可选 g_score 辅助损失 ============
+        g_score_loss_val = 0.0
+        if g_score is not None:
+            mask_hole = 1 - self.mask  # 1=hole, 0=known
+            ones_like_gs = torch.ones_like(g_score)
+            _l1 = nn.L1Loss(reduction='mean')
+            _l2 = nn.MSELoss()
+            g_score_hole_loss = 0.1 * (
+                _l1(ones_like_gs * mask_hole, g_score * mask_hole)
+                + _l2(ones_like_gs * mask_hole, g_score * mask_hole)
+            )
+            g_score_blend_loss = _l1(
+                yt_1_expection * g_score + (1 - g_score) * yt_1_optimum,
+                yt_1_optimum,
+            )
+            g_score_total = g_score_hole_loss + g_score_blend_loss
+            loss = loss + g_score_total
+            g_score_loss_val = float(g_score_total.item())
+
+        # 总损失 = 扩散损失 + Mu-Denoiser损失（如果有）
+        total_loss = loss
+        if mu_denoiser_loss is not None:
+            total_loss = total_loss + mu_denoiser_loss
+        
+        total_loss.backward()
+        
+        # 梯度裁剪（主网络）
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
-        if self.use_mu_denoiser and getattr(self, "optimizer_mu", None) is not None:
+        # Mu-Denoiser 优化器更新
+        if self.use_mu_denoiser:
+            torch.nn.utils.clip_grad_norm_(self.mu_denoiser.parameters(), max_norm=1.0)
             self.optimizer_mu.step()
+            self.mu_denoiser_has_weights = True
 
-        # EMA 更新
-        self._update_ema(loss_dict["loss_main"], loss_dict["loss_total"])
+        # set log
+        self.log_dict["loss"] = loss.item()
+        self.log_dict["loss_main"] = loss.item()
+        self.log_dict["loss_total"] = total_loss.item()
+        self.log_dict["loss_known"] = loss_components["loss_known"].item()
+        self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
+        self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
+        self.log_dict["loss_g_score"] = g_score_loss_val
+        self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 
-        # Stats 更新
-        self.log_dict = loss_dict
-        if hasattr(self, "_compute_condition_stats"):
-            stats = self._compute_condition_stats(
-                self.color_prior, self.condition_lut, self.mu_clean_lut, self.confidence, self.mask
-            )
-            self.log_dict.update(stats)
-            
+        self.log_dict["loss_mu_total"] = float(mu_denoiser_loss.item()) if mu_denoiser_loss is not None else 0.0
+        self.log_dict["loss_mu_ss"] = float(mu_losses.get("l_ss", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
+        self.log_dict["loss_mu_tv"] = float(mu_losses.get("l_tv", 0.0)) if self.use_mu_denoiser and self.is_train else 0.0
+        self.log_dict["lr_main"] = float(self.optimizer.param_groups[0]["lr"])
+        if len(self.optimizer.param_groups) > 1:
+            self.log_dict["lr_new"] = float(self.optimizer.param_groups[1]["lr"])
+        if self.use_mu_denoiser:
+            self.log_dict["lr_mu"] = float(self.optimizer_mu.param_groups[0]["lr"])
+        self.log_dict["mask_hole_ratio"] = float((1 - self.mask).mean().item())
+        timesteps_float = timesteps.detach().float()
+
+        # ============ 额外诊断指标 ============
+        if g_score is not None:
+            with torch.no_grad():
+                _mask_hole_g = (1 - self.mask).to(dtype=g_score.dtype)
+                _mask_known_g = self.mask.to(dtype=g_score.dtype)
+                if g_score.shape[1] != _mask_hole_g.shape[1]:
+                    _mhg = _mask_hole_g.expand_as(g_score)
+                    _mkg = _mask_known_g.expand_as(g_score)
+                else:
+                    _mhg = _mask_hole_g
+                    _mkg = _mask_known_g
+                self.log_dict["stats_g_score_hole_mean"] = float((g_score * _mhg).sum().item() / _mhg.sum().clamp_min(1.0).item())
+                self.log_dict["stats_g_score_known_mean"] = float((g_score * _mkg).sum().item() / _mkg.sum().clamp_min(1.0).item())
+                self.log_dict["stats_g_score_global_mean"] = float(g_score.mean().item())
+        else:
+            self.log_dict["stats_g_score_hole_mean"] = 0.0
+            self.log_dict["stats_g_score_known_mean"] = 0.0
+            self.log_dict["stats_g_score_global_mean"] = 0.0
+
         with torch.no_grad():
-            self.log_dict["stats_noise_mean"] = float(model_out.mean().item())
-            self.log_dict["stats_noise_std"] = float(model_out.std().item())
-            self.log_dict["stats_timestep_mean"] = float(timesteps.float().mean().item())
-            if self.mask_hole is not None:
-                mask_hole_3c = self.mask_hole.expand(-1, 3, -1, -1)
-                hole_denom = mask_hole_3c.sum().clamp_min(1.0)
-                pred_diff = (model_out - sde.noise_fn(self.state_0, condition_mu, timesteps)).abs()
-                self.log_dict["stats_pred_opt_diff_hole"] = float((pred_diff * self.mask_hole).sum().item() / hole_denom.item())
-                known_denom = (1 - self.mask_hole).expand(-1, 3, -1, -1).sum().clamp_min(1.0)
-                self.log_dict["stats_pred_opt_diff_known"] = float((pred_diff * (1 - self.mask_hole)).sum().item() / known_denom.item())
+            self.log_dict["stats_noise_mean"] = float(noise.detach().mean().item())
+            self.log_dict["stats_noise_std"] = float(noise.detach().std().item())
+            self.log_dict["stats_noise_abs_max"] = float(noise.detach().abs().max().item())
+            _sb = sde.sigma_bar(timesteps).to(noise.device, noise.dtype)
+            _score_mag = (noise.detach().abs() / _sb.clamp_min(1e-8)).mean()
+            self.log_dict["stats_score_magnitude"] = float(_score_mag.item())
+            _pred_opt_diff = (yt_1_expection - yt_1_optimum).detach().abs()
+            _mask_h3 = (1 - self.mask).expand_as(_pred_opt_diff)
+            _mask_k3 = self.mask.expand_as(_pred_opt_diff)
+            self.log_dict["stats_pred_opt_diff_hole"] = float((_pred_opt_diff * _mask_h3).sum().item() / _mask_h3.sum().clamp_min(1.0).item())
+            self.log_dict["stats_pred_opt_diff_known"] = float((_pred_opt_diff * _mask_k3).sum().item() / _mask_k3.sum().clamp_min(1.0).item())
+
+        self.log_dict["stats_timestep_mean"] = float(timesteps_float.mean().item())
+        high_t_min_ratio = float(getattr(sde, "high_t_min_ratio", 0.65))
+        self.log_dict["stats_timestep_high_ratio"] = float((timesteps_float >= (high_t_min_ratio * float(getattr(sde, "T", 400)))).float().mean().item())
+
+        texture_condition_gap = ((self.condition - self.original_degraded) * self.mask).abs().sum() / self.mask.expand_as(self.condition).sum().clamp_min(1.0)
+        self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
+        condition_target_gap = (self.condition - training_target * self.mask).abs().mean()
+        self.log_dict["condition_target_gap"] = float(condition_target_gap.item())
+        degraded_target_gap = (self.original_degraded * self.mask - training_target * self.mask).abs().mean()
+        self.log_dict["degraded_target_gap"] = float(degraded_target_gap.item())
+
+        mask_3c = self.mask.expand(-1, condition_lut_for_mu.shape[1], -1, -1)
+        known_denom = mask_3c.sum().clamp_min(1.0)
+        state_hole_mask = (1 - self.mask).expand_as(training_target)
+        state_hole_denom = state_hole_mask.sum().clamp_min(1.0)
+        state_hole = self.state.detach() * state_hole_mask
+        target_hole = training_target.detach() * state_hole_mask
+        cond_hole = self.condition.detach() * state_hole_mask
+        state_hole_mean = state_hole.sum() / state_hole_denom
+        target_hole_mean = target_hole.sum() / state_hole_denom
+        cond_hole_mean = cond_hole.sum() / state_hole_denom
+        state_hole_white_map = (self.state.detach().clamp(0.0, 1.0) > 0.95).all(dim=1, keepdim=True).float()
+        target_hole_white_map = (training_target.detach().clamp(0.0, 1.0) > 0.95).all(dim=1, keepdim=True).float()
+        hole_mask_1c = 1 - self.mask
+        self.log_dict["stats_train_state_hole_mean"] = float(state_hole_mean.item())
+        self.log_dict["stats_train_target_hole_mean"] = float(target_hole_mean.item())
+        self.log_dict["stats_train_condition_hole_mean"] = float(cond_hole_mean.item())
+        self.log_dict["stats_train_state_hole_white_ratio"] = float((state_hole_white_map * hole_mask_1c).sum().div(hole_mask_1c.sum().clamp_min(1.0)).item())
+        self.log_dict["stats_train_target_hole_white_ratio"] = float((target_hole_white_map * hole_mask_1c).sum().div(hole_mask_1c.sum().clamp_min(1.0)).item())
+        self.log_dict["stats_train_state_to_target_hole"] = float(((self.state.detach() - training_target.detach()).abs() * state_hole_mask).sum().div(state_hole_denom).item())
+        self.log_dict["stats_train_state_to_condition_hole"] = float(((self.state.detach() - self.condition.detach()).abs() * state_hole_mask).sum().div(state_hole_denom).item())
+        
+        condition_lut_delta_known = ((condition_lut_for_mu - self.original_degraded).abs() * mask_3c).sum() / known_denom
+        mask_hole_for_stats = 1 - self.mask
+        mask_hole_3c_for_stats = mask_hole_for_stats.expand(-1, condition_lut_for_mu.shape[1], -1, -1)
+        hole_denom_for_stats = mask_hole_3c_for_stats.sum().clamp_min(1.0)
+        condition_lut_delta_hole = ((condition_lut_for_mu - self.original_degraded).abs() * mask_hole_3c_for_stats).sum() / hole_denom_for_stats
+        training_target_delta = (training_target - self.reference_degraded).abs().mean()
+        training_target_to_lut = (training_target - condition_lut_for_mu).abs().mean()
+        self.log_dict["stats_condition_lut_delta_known"] = float(condition_lut_delta_known.item())
+        self.log_dict["stats_condition_lut_delta_hole"] = float(condition_lut_delta_hole.item())
+        self.log_dict["stats_prefill_to_lut_known"] = float(condition_lut_delta_known.item())
+        self.log_dict["stats_prefill_to_lut_hole"] = float(condition_lut_delta_hole.item())
+        self.log_dict["stats_training_target_delta"] = float(training_target_delta.item())
+        self.log_dict["stats_training_target_to_lut"] = float(training_target_to_lut.item())
+
+        self.log_dict.update(self._compute_condition_stats(
+            color_prior=self.color_prior,
+            condition_lut=condition_lut_for_mu,
+            mu_clean_lut=mu_clean_lut,
+            confidence=self.confidence,
+            mask_known=self.mask,
+        ))
+
+        denoised_observed = getattr(self, "denoised_observed_mask_aware", None)
+        self._debug_refiner_info = {
+            'original_degraded': self.original_degraded.detach(),
+            'reference_degraded': self.reference_degraded.detach(),
+            'denoised_observed_mask_aware': denoised_observed.detach() if denoised_observed is not None else None,
+            'condition_lut': condition_lut_for_mu.detach(),
+            'condition_mu': self.condition.detach(),
+            'mu_clean_lut': mu_clean_lut.detach(),
+            'training_target': training_target.detach(),
+            'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
+            'confidence': self.confidence.detach() if self.confidence is not None else None,
+            'mask_known': self.mask.detach(),
+            'mask_hole': (1 - self.mask).detach(),
+            'structure_gray_from_target': self.S_GT.detach(),
+            'structure_edge_from_target': self.S_LQ.detach(),
+        }
     def _masked_mean_std(self, tensor, mask):
         if tensor is None or mask is None:
             return 0.0, 0.0
