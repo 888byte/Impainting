@@ -222,7 +222,7 @@ class DenoisingModel(BaseModel):
             "deterministic_reverse=%s known_area_projection=%s "
             "force_legacy_reverse=%s condition_known_source=%s structure_source=%s "
             "safe_prior_min_reliability=%.3f safe_prior_confidence_power=%.3f "
-            "lut_delta_gain=%.3f confidence_debug_threshold=%.3f",
+            "lut_fade_boost=%.3f confidence_debug_threshold=%.3f",
             bool(brushnet_opt.get("enabled", False)),
             brushnet_runtime,
             getattr(module, "brushnet_feature_scale", None),
@@ -247,7 +247,7 @@ class DenoisingModel(BaseModel):
             self.structure_source,
             self.safe_prior_min_reliability,
             self.safe_prior_confidence_power,
-            self.lut_delta_gain,
+            self.lut_fade_boost,
             self.confidence_debug_threshold,
         )
         if (
