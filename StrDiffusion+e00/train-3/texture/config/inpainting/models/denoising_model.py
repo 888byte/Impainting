@@ -707,6 +707,8 @@ class DenoisingModel(BaseModel):
         if hasattr(self, 'mask') and self.mask is not None:
             # mask约定: self.mask=1表示已知, BrushNet需要1=需要修复
             brushnet_kwargs['mask'] = 1 - self.mask
+        if getattr(self, 'original_degraded', None) is not None:
+            brushnet_kwargs['observed_degraded'] = self.original_degraded
 
         model_output = sde.noise_fn(self.state, timesteps.squeeze(), S_optimum, **brushnet_kwargs)
         if isinstance(model_output, (tuple, list)):
@@ -1197,6 +1199,7 @@ class DenoisingModel(BaseModel):
             
             # 加载主模型
             self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
+            self._maybe_bootstrap_brushnet_from_trunk()
             
             # 加载 D_mu（如果有）
             use_mu_denoiser = getattr(self, 'use_mu_denoiser', False)
@@ -1242,6 +1245,42 @@ class DenoisingModel(BaseModel):
             logger.warning("[LoadCheck] missing keys sample: %s", missing[:20])
         if unexpected:
             logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
+
+    def _maybe_bootstrap_brushnet_from_trunk(self):
+        brushnet_opt = self.opt.get("brushnet", {})
+        if not bool(brushnet_opt.get("bootstrap_from_pretrained_trunk", False)):
+            return
+
+        model_ref = self.model.module if isinstance(self.model, (DataParallel, DistributedDataParallel)) else self.model
+        bootstrap_fn = getattr(model_ref, "bootstrap_brushnet_from_trunk", None)
+        if bootstrap_fn is None:
+            return
+
+        loaded_names = set(getattr(self, "loaded_model_param_names", set()) or set())
+        brushnet_core_prefixes = (
+            "brushnet.init_conv.",
+            "brushnet.time_mlp.",
+            "brushnet.downs.",
+            "brushnet.mid_block1.",
+            "brushnet.mid_attn.",
+            "brushnet.mid_block2.",
+        )
+        has_brushnet_weights = any(
+            any(name.startswith(prefix) for prefix in brushnet_core_prefixes)
+            for name in loaded_names
+        )
+        if has_brushnet_weights:
+            logger.info(
+                "[BrushNetInit] skip trunk bootstrap because checkpoint already contains BrushNet encoder weights"
+            )
+            return
+
+        bootstrap_fn(
+            reset_zero_convs=bool(brushnet_opt.get("bootstrap_reset_zero_convs", True))
+        )
+        logger.info(
+            "[BrushNetInit] initialized BrushNet encoder from pretrained trunk (official BrushNet-style from_unet)"
+        )
 
     def save(self, iter_label):
         """

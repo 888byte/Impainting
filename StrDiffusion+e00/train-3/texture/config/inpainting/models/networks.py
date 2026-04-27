@@ -9,7 +9,6 @@ from models import modules as M
 
 logger = logging.getLogger("base")
 
-# Generator
 def define_G(opt):
     opt_net = opt["network_G"]
     which_model = opt_net["which_model_G"]
@@ -36,6 +35,9 @@ def define_G(opt):
             brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
             brushnet_feature_scale=brushnet_opt.get("feature_scale", 0.10),
             brushnet_use_spatial_gate=brushnet_opt.get("use_spatial_gate", True),
+            brushnet_use_confidence_gate=brushnet_opt.get("use_confidence_gate", False),
+            brushnet_confidence_floor=brushnet_opt.get("confidence_floor", 0.0),
+            brushnet_input_source=brushnet_opt.get("input_source", "residual"),
             texture_core_opt=texture_core_opt,
             main_guidance_opt=main_guidance_opt,
             restore_S_guidance=restore_S_guidance,

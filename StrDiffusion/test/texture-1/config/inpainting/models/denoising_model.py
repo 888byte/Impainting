@@ -816,6 +816,7 @@ class DenoisingModel(BaseModel):
                         mask_hole=self.mask_hole,
                         color_prior=self.color_prior,
                         confidence=self.confidence,
+                        observed_degraded=self.original_degraded,
                         restore_S_guidance=self.restore_s_guidance,
                         discriminator_guidance=self.discriminator_guidance,
                         deterministic_reverse=self.deterministic_reverse,

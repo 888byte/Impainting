@@ -178,6 +178,44 @@ class PixelBrushNet(nn.Module):
         print(f"  - 特征维度序列: ", end="")
         dims = [self.nf * int(math.pow(2, i)) for i in range(self.depth + 1)]
         print(" -> ".join(map(str, dims)))
+
+    @torch.no_grad()
+    def bootstrap_from_main_unet(
+        self,
+        main_unet: nn.Module,
+        reset_zero_convs: bool = True,
+    ) -> None:
+        """Initialize BrushNet encoder from the pretrained main UNet."""
+
+        src_init = getattr(main_unet, "init_conv", None)
+        if src_init is None or getattr(src_init, "weight", None) is None:
+            raise ValueError("main_unet.init_conv is required for BrushNet bootstrap")
+        if src_init.weight.shape[1] < 6:
+            raise ValueError(
+                f"Expected main_unet.init_conv to have at least 6 input channels, got {src_init.weight.shape}"
+            )
+
+        self.init_conv.weight.zero_()
+        self.init_conv.weight[:, 0:3].copy_(src_init.weight[:, 0:3])
+        self.init_conv.weight[:, 4:7].copy_(src_init.weight[:, 3:6])
+        if self.init_conv.bias is not None and getattr(src_init, "bias", None) is not None:
+            self.init_conv.bias.copy_(src_init.bias)
+
+        self.time_mlp.load_state_dict(main_unet.time_mlp.state_dict(), strict=True)
+        self.downs.load_state_dict(main_unet.downs.state_dict(), strict=False)
+        self.mid_block1.load_state_dict(main_unet.mid_block1.state_dict(), strict=True)
+        self.mid_attn.load_state_dict(main_unet.mid_attn.state_dict(), strict=True)
+        self.mid_block2.load_state_dict(main_unet.mid_block2.state_dict(), strict=True)
+
+        if reset_zero_convs:
+            for zero_blocks in self.zero_convs_down:
+                for zero_conv in zero_blocks:
+                    nn.init.zeros_(zero_conv.conv.weight)
+                    if zero_conv.conv.bias is not None:
+                        nn.init.zeros_(zero_conv.conv.bias)
+            nn.init.zeros_(self.zero_conv_mid.conv.weight)
+            if self.zero_conv_mid.conv.bias is not None:
+                nn.init.zeros_(self.zero_conv_mid.conv.bias)
     
     def check_image_size(self, x: torch.Tensor, h: int, w: int) -> torch.Tensor:
         """

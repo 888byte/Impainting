@@ -437,7 +437,7 @@ The mismatch test is decisive: matching the training `condition_lut` hole mu doe
 
 1. The x7 training objective allowed/encouraged a non-black hole mu (`condition_lut`) that already contains a smooth bright fill.
 2. The normal one-step SDE loss is teacher-forced from states generated around that filled mu, so the model can minimize loss without learning to synthesize missing texture from a blank/noisy hole.
-3. The inference-like blank-hole x0 branch in `models/denoising_model.py` is monitor-only (`with torch.no_grad()` and `infer_x0_weighted=None`), so it does not correct this failure.
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
 4. BrushNet weak injection at 0.01 is almost neutral; at larger scales it injects artifacts. It is not currently a usable texture restoration branch.
 
 Current no-retrain best route remains:
@@ -806,12 +806,12 @@ Files restored/verified:
 
 - Train code:
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
-  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/color_prior_generator.py`
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/__init__.py`
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/mural_inpainting_dataset.py`
 - Test code:
-  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
   - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/color_prior_generator.py`
 - Wrapper cleanup:
   - `PixelBrushNetLite` / `brushnet_lite` were removed from the PriorBrushNet route.
@@ -994,7 +994,7 @@ What the x8 run actually showed:
 
 Fix implemented in code:
 
-- `texture/config/inpainting/models/denoising_model.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
   - Added a real gradient path for the inference-like blank-hole x0 loss.
   - It uses microbatch + interval to avoid the previous VRAM doubling:
     - `infer_x0_microbatch`
@@ -1091,3 +1091,159 @@ python test.py -opt options/test/ir-sde-brushnet-x9-clean-current-domain.yml
 ```
 
 
+
+
+## 2026-04-27 x10-consistent verdict: trunk still drifts on hard samples, stop this line
+
+### Key evidence
+
+1. `test_ir-sde-brushnet-x10-consistent-current-domain_260427-181445.log`
+   - Loaded `12000_G.pth`.
+   - Training log already showed `[Freeze] unfroze pretrained trunk at iter 10000` on `2026-04-27 17:00:42`.
+   - Therefore `12000_G` is already **2000 steps after trunk unfreeze**.
+
+2. `test_ir-sde-x10-12000-no-extra-no-structure_260427-185212.log`
+   - `pure_no_extra_route=True`
+   - `brushnet=False`
+   - `texture_core=False`
+   - `mu_denoiser=False`
+   - `restore_S_guidance=False`
+   - This means **the diffusion trunk alone is still bad even after all extra branches are removed**.
+
+3. Hard samples are still clearly worse than the prior:
+   - `000098_center: final_gt_l1=0.263132, prior_gt_l1=0.204685`
+   - `000098_left:   final_gt_l1=0.322030, prior_gt_l1=0.217610`
+   - `000098_right:  final_gt_l1=0.098969, prior_gt_l1=0.092670`
+   - `000098_bottom: final_gt_l1=0.072646, prior_gt_l1=0.079317`
+
+### Conclusion
+
+- `x10-consistent` proved that train/infer condition alignment alone is not enough.
+- Directly forcing the main diffusion trunk to learn the current LUT target domain still pushes hard samples toward a bright average-looking solution.
+- Do **not** continue this line to `14000/16000/20000`.
+
+### Errors already ruled out (do not repeat)
+
+1. **Not a BrushNet-only failure**: results were still bad after `no-extra`.
+2. **Not a structure-guidance-only failure**: results were still bad after `no-extra + no-structure`.
+3. **Not simply because trunk was still frozen**: `12000_G` was already after unfreeze.
+4. **Not a wrong checkpoint / wrong route mix-up**: logs explicitly showed `12000_G.pth` and the correct route flags.
+
+## 2026-04-27 x11-officialinit: keep innovation, but move BrushNet closer to official training semantics
+
+Goal: **preserve the innovation branch, but stop an unreliable color prior from dominating the main reverse trajectory.**
+
+### Official BrushNet reference
+
+Reference repo:
+- `https://github.com/TencentARC/BrushNet`
+
+The official pattern is:
+- `BrushNetModel.from_unet(...)`
+- freeze the original UNet trunk
+- train the BrushNet branch as a safe residual conditioner
+
+### Changes made in this round
+
+#### 1. Initialize BrushNet from the pretrained trunk instead of random init
+
+Files:
+- `D:\code\kyihua\Impainting\StrDiffusion+e00	rain-3	exture\config\inpainting\models\pixel_brushnet.py`
+- `D:\code\kyihua\Impainting\StrDiffusion	est	exture-1\config\inpainting\models\pixel_brushnet.py`
+
+Added:
+- `bootstrap_from_main_unet(main_unet, reset_zero_convs=True)`
+
+Meaning:
+- BrushNet encoder / mid layers copy weights from the baseline trunk.
+- Zero-conv outputs remain zero-initialized, so the branch starts as a safe residual path.
+
+#### 2. Feed BrushNet with the observed image known area, not just `xt-cond`
+
+Files:
+- `D:\code\kyihua\Impainting\StrDiffusion+e00	rain-3	exture\config\inpainting\modelsrushnet_wrapper.py`
+- `D:\code\kyihua\Impainting\StrDiffusion	est	exture-1\config\inpainting\modelsrushnet_wrapper.py`
+- `D:\code\kyihua\Impainting\StrDiffusion+e00	rain-3	exture\config\inpainting\models
+etworks.py`
+- `D:\code\kyihua\Impainting\StrDiffusion	est	exture-1\config\inpainting\models
+etworks.py`
+
+Added config:
+- `brushnet.input_source`
+
+Supported values:
+- `residual`
+- `xt`
+- `observed_raw`
+- `observed_known`
+
+Current recommendation:
+- `input_source: observed_known`
+
+Meaning:
+- BrushNet now uses the real observed image in the known area as its primary anchor.
+- This is much closer to the official BrushNet masked-image conditioning style.
+- The real known area becomes the main reference, while the color prior becomes only auxiliary guidance.
+
+#### 3. Keep color prior and confidence as weak auxiliary inputs
+
+Current policy:
+- `color_prior` and `confidence` are still fed into BrushNet.
+- Confidence is **not** used as a hard output gate by default.
+- `feature_scale` stays small.
+- `prior_dropout_prob` is set to `0.10` so BrushNet cannot overfit to the color prior.
+
+This keeps the innovation branch, but weakens the prior so that it does not dominate the repair direction.
+
+#### 4. Pass `observed_degraded` explicitly in both training and inference
+
+Files:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+
+Added:
+- train: `brushnet_kwargs['observed_degraded'] = self.original_degraded`
+- test: `observed_degraded=self.original_degraded`
+
+This closes the remaining gap so that `observed_known` is not only supported by the wrapper, but also really receives the observed image from the upper call chain.
+
+#### 5. x11 config updated
+
+Files:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x11-officialinit.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x11-officialinit-current-domain.yml`
+
+Updated values:
+- `brushnet.input_source: observed_known`
+- `brushnet.prior_dropout_prob: 0.10`
+
+### Current judgement on MGLC / MuCleaner
+
+#### MGLC
+
+- It is **not** just a harmless denoiser.
+- It directly changes mid / decoder feature trajectories inside the main network.
+- Therefore it should stay off until BrushNet-only is proven stable.
+
+#### MuCleaner / MuDenoiser
+
+- It is mild only when used as an analysis or auxiliary denoising module.
+- Once it is used to build `condition_mu` or `known_source`, it directly changes the SDE condition distribution.
+- So it is **not** a pure denoising post-filter; it can change the main train/infer structure.
+
+Recommended re-introduction order:
+1. prove BrushNet-only is stable first
+2. then try MGLC
+3. only after that, try MuCleaner in the `condition_mu` path
+
+### Cleanup
+
+Deleted unused local reference files:
+- `D:/code/ky/bihua/Impainting/_refs_brushnet.py`
+- `D:/code/ky/bihua/Impainting/_refs_train_brushnet.py`
+
+### Note on mojibake / encoding
+
+- New comments added in this round are kept in UTF-8-friendly English to avoid more mojibake.
+- Some historical comments in old files are still garbled, but this does **not** affect runtime logic.
+- If needed later, do a separate comment-only cleanup pass instead of mixing it into model logic changes.

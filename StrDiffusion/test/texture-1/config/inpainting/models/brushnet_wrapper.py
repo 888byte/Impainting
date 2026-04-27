@@ -46,6 +46,9 @@ class ConditionalUNetWithBrushNet(nn.Module):
         brushnet_prior_dropout_prob: float = 0.0,
         brushnet_feature_scale: float = 0.10,
         brushnet_use_spatial_gate: bool = True,
+        brushnet_use_confidence_gate: bool = False,
+        brushnet_confidence_floor: float = 0.0,
+        brushnet_input_source: str = "residual",
         texture_core_opt: Optional[dict] = None,
         main_guidance_opt: Optional[dict] = None,
         restore_S_guidance: bool = False,
@@ -59,8 +62,23 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.brushnet_prior_dropout_prob = float(brushnet_prior_dropout_prob)
         self.brushnet_feature_scale = float(brushnet_feature_scale)
         self.brushnet_use_spatial_gate = bool(brushnet_use_spatial_gate)
+        self.brushnet_use_confidence_gate = bool(brushnet_use_confidence_gate)
+        self.brushnet_confidence_floor = float(brushnet_confidence_floor)
+        self.brushnet_input_source = str(brushnet_input_source or "residual")
+        self._brushnet_bootstrapped_from_trunk = False
         if not 0.0 <= self.brushnet_prior_dropout_prob <= 1.0:
             raise ValueError("brushnet_prior_dropout_prob must be in [0, 1]")
+        if not 0.0 <= self.brushnet_confidence_floor <= 1.0:
+            raise ValueError("brushnet_confidence_floor must be in [0, 1]")
+        if self.brushnet_input_source not in {
+            "residual",
+            "xt",
+            "observed_raw",
+            "observed_known",
+        }:
+            raise ValueError(
+                "brushnet_input_source must be one of: residual|xt|observed_raw|observed_known"
+            )
 
         texture_core_opt = texture_core_opt or {}
         main_guidance_opt = main_guidance_opt or {}
@@ -196,6 +214,16 @@ class ConditionalUNetWithBrushNet(nn.Module):
             self.brushnet = None
             print("[ConditionalUNetWithBrushNet] BrushNet disabled")
 
+    @torch.no_grad()
+    def bootstrap_brushnet_from_trunk(self, reset_zero_convs: bool = True) -> bool:
+        if not self.brushnet_enabled or self.brushnet is None:
+            return False
+        self.brushnet.bootstrap_from_main_unet(
+            self, reset_zero_convs=reset_zero_convs
+        )
+        self._brushnet_bootstrapped_from_trunk = True
+        return True
+
     def check_image_size(self, x: torch.Tensor, h: int, w: int) -> torch.Tensor:
         """Pad ``x`` so height/width are divisible by the UNet scale factor."""
         scale = int(math.pow(2, self.depth))
@@ -222,8 +250,13 @@ class ConditionalUNetWithBrushNet(nn.Module):
             return gated
 
         gate = mask
-        if confidence is not None:
-            gate = gate * confidence.clamp(0.0, 1.0)
+        if self.brushnet_use_confidence_gate and confidence is not None:
+            conf = confidence.clamp(0.0, 1.0)
+            if self.brushnet_confidence_floor > 0.0:
+                conf = self.brushnet_confidence_floor + (
+                    1.0 - self.brushnet_confidence_floor
+                ) * conf
+            gate = gate * conf
         if gate.shape[-2:] != feature.shape[-2:]:
             gate = F.interpolate(gate, size=feature.shape[-2:], mode="bilinear", align_corners=False)
         return gated * gate.clamp(0.0, 1.0)
@@ -306,7 +339,21 @@ class ConditionalUNetWithBrushNet(nn.Module):
                     confidence = confidence * keep_f
 
             if run_brushnet:
-                bn_output = self.brushnet(xt, mask_padded, color_prior, confidence, time)
+                if self.brushnet_input_source == "xt":
+                    brushnet_image = xt
+                elif self.brushnet_input_source == "observed_raw" and observed_padded is not None:
+                    brushnet_image = observed_padded
+                elif self.brushnet_input_source == "observed_known" and observed_padded is not None:
+                    if mask_padded is not None:
+                        brushnet_image = observed_padded * (1.0 - mask_padded)
+                    else:
+                        brushnet_image = observed_padded
+                else:
+                    brushnet_image = xt - cond
+
+                bn_output = self.brushnet(
+                    brushnet_image, mask_padded, color_prior, confidence, time
+                )
                 brushnet_features = bn_output["down_features"]
                 brushnet_mid = bn_output["mid_feature"]
 
@@ -425,6 +472,9 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         brushnet_prior_dropout_prob=brushnet_opt.get("prior_dropout_prob", 0.0),
         brushnet_feature_scale=brushnet_opt.get("feature_scale", 0.10),
         brushnet_use_spatial_gate=brushnet_opt.get("use_spatial_gate", True),
+        brushnet_use_confidence_gate=brushnet_opt.get("use_confidence_gate", False),
+        brushnet_confidence_floor=brushnet_opt.get("confidence_floor", 0.0),
+        brushnet_input_source=brushnet_opt.get("input_source", "residual"),
         texture_core_opt=texture_core_opt,
         main_guidance_opt=main_guidance_opt,
         restore_S_guidance=restore_S_guidance,
