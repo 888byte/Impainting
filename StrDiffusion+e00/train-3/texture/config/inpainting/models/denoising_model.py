@@ -112,6 +112,20 @@ class DenoisingModel(BaseModel):
             #self.rank = -1  # non dist training
         train_opt = opt["train"]
         self.train_opt = train_opt
+        self.loaded_model_param_names = set()
+        self.freeze_pretrained_until_iter = int(
+            train_opt.get("freeze_pretrained_until_iter", 0)
+        )
+        self.freeze_loaded_pretrained_only = bool(
+            train_opt.get("freeze_loaded_pretrained_only", True)
+        )
+        self.enable_pretrained_freeze = (
+            self.freeze_pretrained_until_iter > 0
+            and not bool(opt.get("path", {}).get("resume_state"))
+        )
+        self._frozen_pretrained_param_names = set()
+        self._pretrained_trunk_frozen = False
+        self._pretrained_trunk_unfrozen = False
         
 
         # define network and load pretrained models
@@ -140,11 +154,11 @@ class DenoisingModel(BaseModel):
         # LUT / target-domain configuration.
         self.gt_mode = train_dataset_opt.get('gt_mode', 'full')
         self.lut_strength = float(train_dataset_opt.get('lut_strength', 1.0))
-        self.lut_delta_gain = max(0.0, float(train_dataset_opt.get('lut_delta_gain', 1.0)))
+        self.lut_fade_boost = float(train_dataset_opt.get('lut_fade_boost', 3.0))
         self.lut_smooth_radius = int(train_dataset_opt.get('lut_smooth_radius', 0))
         logger.info(
             f"[Model] GT mode={self.gt_mode}, LUT strength={self.lut_strength}, "
-            f"LUT delta gain={self.lut_delta_gain}, smooth radius={self.lut_smooth_radius}"
+            f"LUT fade boost={self.lut_fade_boost}, smooth radius={self.lut_smooth_radius}"
         )
         logger.info(
             "[Model] train.sde_mu_hole_mode=%s infer_x0_loss_weight=%s infer_x0_grad=%s",
@@ -157,6 +171,9 @@ class DenoisingModel(BaseModel):
         mu_denoiser_opt = opt.get('mu_denoiser', {})
         self.mu_denoiser_opt = mu_denoiser_opt
         self.use_mu_denoiser = mu_denoiser_opt.get('enabled', False) and HAS_MU_DENOISER
+        self.use_mu_denoiser_for_condition_mu = bool(
+            mu_denoiser_opt.get("use_for_condition_mu", False)
+        )
         self.mu_denoiser_has_weights = False
         self.mu_denoiser_loaded_weights = False
         
@@ -288,7 +305,15 @@ class DenoisingModel(BaseModel):
             #   which defaults to 10x lr_G so randomly-initialised weights converge
             #   faster without destabilising the pretrained backbone.
             lr_new = float(train_opt.get("lr_new", train_opt["lr_G"] * 10))
-            new_module_prefixes = ("brushnet.", "mglc_mid.", "mglc_dec.")
+            fallback_new_module_prefixes = (
+                "brushnet.",
+                "mglc_mid.",
+                "mglc_dec.",
+                "main_guidance_proj.",
+            )
+            pretrained_param_names = self._resolve_pretrained_param_names(
+                fallback_new_module_prefixes
+            )
             pretrained_params = []
             new_params = []
             for k, v in self.model.named_parameters():
@@ -296,7 +321,7 @@ class DenoisingModel(BaseModel):
                     if self.rank <= 0:
                         logger.warning("Params [{:s}] will not optimize.".format(k))
                     continue
-                is_new = any(k.startswith(p) for p in new_module_prefixes)
+                is_new = k not in pretrained_param_names
                 if is_new:
                     new_params.append(v)
                 else:
@@ -372,6 +397,7 @@ class DenoisingModel(BaseModel):
             else:
                 raise NotImplementedError("MultiStepLR learning rate scheme is enough.")
 
+            self._apply_pretrained_trunk_freeze()
             self.ema = EMA(self.model, beta=0.995, update_every=10).to(self.device)
             self.log_dict = OrderedDict()
 
@@ -390,11 +416,66 @@ class DenoisingModel(BaseModel):
             )
         if train_opt["lr_scheme"] == "TrueCosineAnnealingLR":
             return torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer_mu,
-                T_max=train_opt["niter"],
-                eta_min=train_opt["eta_min"],
-            )
+            self.optimizer_mu,
+            T_max=train_opt["niter"],
+            eta_min=train_opt["eta_min"],
+        )
         raise NotImplementedError("Unsupported lr scheme for Mu-Denoiser.")
+
+    def _resolve_pretrained_param_names(self, fallback_new_module_prefixes):
+        loaded_names = set(getattr(self, "loaded_model_param_names", set()) or set())
+        if loaded_names and self.freeze_loaded_pretrained_only:
+            return {
+                name
+                for name, _ in self.model.named_parameters()
+                if name in loaded_names
+            }
+        return {
+            name
+            for name, _ in self.model.named_parameters()
+            if not any(name.startswith(prefix) for prefix in fallback_new_module_prefixes)
+        }
+
+    def _apply_pretrained_trunk_freeze(self):
+        if not self.enable_pretrained_freeze or self._pretrained_trunk_frozen:
+            return
+        if self.freeze_pretrained_until_iter <= 0:
+            return
+
+        frozen_names = self._resolve_pretrained_param_names(
+            ("brushnet.", "mglc_mid.", "mglc_dec.", "main_guidance_proj.")
+        )
+        for name, param in self.model.named_parameters():
+            if name in frozen_names:
+                param.requires_grad_(False)
+
+        self._frozen_pretrained_param_names = frozen_names
+        self._pretrained_trunk_frozen = True
+        self._pretrained_trunk_unfrozen = False
+        logger.info(
+            "[Freeze] frozen %d pretrained trunk params until iter %d",
+            len(frozen_names),
+            self.freeze_pretrained_until_iter,
+        )
+
+    def _maybe_unfreeze_pretrained_trunk(self, step):
+        if not self.enable_pretrained_freeze:
+            return
+        if not self._pretrained_trunk_frozen or self._pretrained_trunk_unfrozen:
+            return
+        if int(step) < self.freeze_pretrained_until_iter:
+            return
+
+        for name, param in self.model.named_parameters():
+            if name in self._frozen_pretrained_param_names:
+                param.requires_grad_(True)
+
+        self._pretrained_trunk_unfrozen = True
+        logger.info(
+            "[Freeze] unfroze pretrained trunk at iter %d (%d params)",
+            int(step),
+            len(self._frozen_pretrained_param_names),
+        )
 
     def _set_optimizer_mu_lr(self, lr_value):
         if self.optimizer_mu is None:
@@ -581,6 +662,7 @@ class DenoisingModel(BaseModel):
         from collections import OrderedDict
         import torch.nn as nn
         self.log_dict = OrderedDict()
+        self._maybe_unfreeze_pretrained_trunk(step)
 
         # train.py has already built the single mural target domain and passed it
         # through feed_data(GT=...).  Do not recompute denoised/LUT targets here.
@@ -1135,9 +1217,17 @@ class DenoisingModel(BaseModel):
         from torch.nn.parallel import DataParallel, DistributedDataParallel
         if isinstance(network, (DataParallel, DistributedDataParallel)):
             network = network.module
+        param_names = {name for name, _ in network.named_parameters()}
         incompatible = network.load_state_dict(state_dict, strict=strict)
         missing = list(getattr(incompatible, "missing_keys", []))
         unexpected = list(getattr(incompatible, "unexpected_keys", []))
+        missing_set = set(missing)
+        loaded_param_names = {
+            name for name in param_names if name in state_dict and name not in missing_set
+        }
+        model_ref = self.model.module if isinstance(self.model, (DataParallel, DistributedDataParallel)) else self.model
+        if network is model_ref:
+            self.loaded_model_param_names = loaded_param_names
         total = len(network.state_dict())
         loaded = max(0, total - len(missing))
         logger.info(

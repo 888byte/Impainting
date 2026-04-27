@@ -207,12 +207,12 @@ def _log_tb_training_images(tb_logger, debug_info, current_step):
 
 
 
-def _build_structure_from_target(training_target, device):
-    """Build S_GT(gray) and S_LQ(edge) from the target-domain training target."""
+def _build_structure_from_image(source_image, device):
+    """Build structure gray/edge tensors from an arbitrary RGB source image."""
     gray_list = []
     edge_list = []
-    for batch_idx in range(training_target.shape[0]):
-        rgb = training_target[batch_idx].detach().cpu().permute(1, 2, 0).numpy()
+    for batch_idx in range(source_image.shape[0]):
+        rgb = source_image[batch_idx].detach().cpu().permute(1, 2, 0).numpy()
         rgb_uint8 = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
         gray = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2GRAY)
         edge = cv2.Canny(gray, 50, 150)
@@ -221,6 +221,11 @@ def _build_structure_from_target(training_target, device):
     structure_gray = torch.stack(gray_list, dim=0).to(device)
     structure_edge = torch.stack(edge_list, dim=0).to(device)
     return structure_gray, structure_edge
+
+
+def _build_structure_from_target(training_target, device):
+    """Backward-compatible alias for target-domain structure construction."""
+    return _build_structure_from_image(training_target, device)
 
 def main():
     #### setup options of three networks
@@ -637,18 +642,26 @@ def main():
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    # SDE mu: original StrDiffusion semantics.
-                    # mu = training_target * mask (hole = 0).
-                    # This ensures training/inference consistency: inference also uses
-                    # condition_lut * mask as mu.
-                    condition_mu = training_target * mask_for_sde
+                    # Texture SDE mu must match inference condition semantics:
+                    # use inference-observable condition_lut by default, with an
+                    # optional Mu-Denoiser cleaned variant when explicitly enabled.
+                    condition_mu_source = (
+                        mu_clean_lut
+                        if getattr(model, "use_mu_denoiser_for_condition_mu", False)
+                        else condition_lut
+                    )
+                    condition_mu = condition_mu_source * mask_for_sde
 
                 timesteps, states = sde.generate_random_states(
                     x0=training_target, mu=condition_mu
                 )
 
-                X_GT_for_sde, X_LQ_for_sde = _build_structure_from_target(
-                    training_target, device
+                # Structure SDE mirrors texture semantics:
+                #   x0 target  <- target-domain training_target
+                #   mu/known   <- inference-observable condition source
+                X_GT_for_sde, _ = _build_structure_from_image(training_target, device)
+                _, X_LQ_for_sde = _build_structure_from_image(
+                    condition_mu_source, device
                 )
 
                 model.feed_data(

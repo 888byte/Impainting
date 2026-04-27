@@ -1,9 +1,9 @@
-# x9 clean baseline config. Revert to original StrDiffusion SDE semantics.
-# mu = training_target * mask (hole=0), single diffusion loss.
-# Adaptive fade-degree LUT color correction.
-# Usage: python train.py -opt options/train/ir-sde-brushnet-ft-x9-clean.yml
+# x10 consistent baseline config.
+# Main target keeps the adaptive LUT target-domain innovation, while
+# texture/structure conditions are aligned to the same inference-observable LUT route.
+# Usage: python train.py -opt options/train/ir-sde-brushnet-ft-x10-consistent.yml
 
-name: ir-sde-brushnet-ft-x9-clean
+name: ir-sde-brushnet-ft-x10-consistent
 use_tb_logger: true
 model: denoising
 distortion: inpainting
@@ -54,6 +54,7 @@ mu_denoiser:
   num_blocks: 2
   num_heads: 4
   predict_residual: true
+  use_for_condition_mu: false   # Stable default: keep main SDE mu on raw condition_lut
   blind_ratio: 0.1
   lambda_ss: 1.0
   lambda_tv: 0.01
@@ -118,6 +119,8 @@ train:
   lr_steps: [8000, 20000, 35000]
   lr_gamma: 0.5
   eta_min: !!float 1e-7
+  freeze_pretrained_until_iter: 10000
+  freeze_loaded_pretrained_only: true
   is_weighted: false
   loss_type: l1
   weight: 1.0

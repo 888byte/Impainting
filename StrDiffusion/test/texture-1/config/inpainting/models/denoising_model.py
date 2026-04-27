@@ -597,7 +597,7 @@ class DenoisingModel(BaseModel):
         else:
             mu_clean_lut = lut_transformed
 
-        known_source = mu_clean_lut
+        known_source = lut_transformed
         if self.condition_known_source in {"gt", "gt_if_available"}:
             if self.state_0 is not None:
                 known_source = self.state_0
@@ -606,11 +606,13 @@ class DenoisingModel(BaseModel):
         elif self.condition_known_source == "degraded":
             known_source = degraded
         elif self.condition_known_source in {"lut", "condition_lut", "target_lut"}:
+            known_source = lut_transformed
+        elif self.condition_known_source in {"mu_clean", "mu_clean_lut"}:
             known_source = mu_clean_lut
         else:
             raise ValueError(
                 f"Unsupported inference.condition_known_source={self.condition_known_source!r}; "
-                "expected lut|degraded|gt|gt_if_available"
+                "expected lut|mu_clean|degraded|gt|gt_if_available"
             )
 
         # SDE mu: match training semantics exactly.
