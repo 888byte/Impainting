@@ -1510,3 +1510,49 @@ Key stage-2 settings:
 - `lr_G: 1e-6`
 - `lr_new: 5e-6`
 - test-side `restore_S_guidance: false`
+
+### 2026-04-28 x12 stage-2 unfreeze verdict
+
+Evidence:
+- `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x12-stage2-unfreeze_260428-184414.log`
+- `C:/Users/admin/Desktop/test_ir-sde-brushnet-x12-stage2-current-domain_260428-201716.log`
+
+What stage-2 confirms:
+- the x12 training path is now genuinely active (`loss_color_aux` appears and `loss_total > loss_main`)
+- inference is genuinely running with `restore_S_guidance=False` and `structure_source=prefill`
+- the old pure white collapse is no longer the dominant failure mode (`final_white_ratio_hole` on hard samples dropped to very small values such as `0.0026` and `0.0064`)
+
+Representative hard-sample metrics:
+- center: `final_gt_l1=0.266677`, `prior_gt_l1=0.204685`, `final_lut_l1=0.132357`, `final_hole_mean=0.8605`
+- left:   `final_gt_l1=0.349788`, `prior_gt_l1=0.217610`, `final_lut_l1=0.204826`, `final_hole_mean=0.8682`
+
+Interpretation:
+- the main issue is no longer a YAML / route / compose bug
+- the remaining issue is an **over-bright / LUT-biased attractor**
+- hard samples are still being pulled too far toward the color path even after the trunk is lightly unfrozen
+- numerically the outputs are often closer to LUT-space than to the original prior / GT-space on difficult holes
+
+Conclusion:
+- do not keep chasing the old "all white due to broken route" hypothesis for stage-2
+- the remaining correction must weaken the color pull rather than add more structure or more modules
+
+### Next strategy: x12 stage-3 weak-color continuation
+
+Prepared configs:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x12-stage3-weakcolor.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x12-stage3-weakcolor-current-domain.yml`
+
+Stage-3 changes:
+- continue from `ir-sde-brushnet-ft-x12-stage2-unfreeze/models/best_G.pth`
+- reduce `brushnet.feature_scale: 0.03 -> 0.01`
+- increase `brushnet.prior_dropout_prob: 0.10 -> 0.20`
+- reduce `color_aux_loss_weight: 0.02 -> 0.005`
+- delay color auxiliary start to `color_aux_loss_start_iter: 800`
+- increase blur kernel for color auxiliary to `11` so the color hint stays lower-frequency
+- keep `restore_S_guidance: false`
+- keep `condition_known_source=degraded` and `structure_source=prefill`
+
+Goal:
+- preserve the innovation path
+- stop the model from being over-dominated by the LUT / color branch on hard samples
+- let the lightly unfrozen trunk settle back toward the stable raw-domain solution before the color hint is reintroduced
