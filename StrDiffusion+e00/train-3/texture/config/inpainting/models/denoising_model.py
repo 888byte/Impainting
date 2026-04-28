@@ -780,7 +780,31 @@ class DenoisingModel(BaseModel):
         loss_components = self.loss_fn.compute_components(
             yt_1_expection, yt_1_optimum, self.mask
         )
-        loss = loss_components["loss_total"]
+        loss_main = loss_components["loss_total"]
+        loss = loss_main
+
+        # ============ x12: weak hole-only LUT color auxiliary ============
+        color_aux_loss_val = 0.0
+        color_aux_loss_weighted_val = 0.0
+        if (
+            self.color_aux_loss_weight > 0
+            and step >= self.color_aux_loss_start_iter
+            and training_target_lut is not None
+        ):
+            hole_mask = (1 - self.mask).expand_as(training_target)
+            hole_denom = hole_mask.sum().clamp_min(1.0)
+            x0_hat = self._estimate_x0_from_noise(sde, self.state, noise, timesteps)
+            x0_hat_blur = self._blur_for_color_aux(x0_hat, self.color_aux_blur_kernel)
+            target_lut_blur = self._blur_for_color_aux(
+                training_target_lut, self.color_aux_blur_kernel
+            )
+            color_aux_loss = (
+                (x0_hat_blur - target_lut_blur).abs() * hole_mask
+            ).sum() / hole_denom
+            color_aux_loss_weighted = self.color_aux_loss_weight * color_aux_loss
+            loss = loss + color_aux_loss_weighted
+            color_aux_loss_val = float(color_aux_loss.item())
+            color_aux_loss_weighted_val = float(color_aux_loss_weighted.item())
 
         # ============ 可选 g_score 辅助损失 ============
         g_score_loss_val = 0.0
@@ -820,11 +844,13 @@ class DenoisingModel(BaseModel):
 
         # set log
         self.log_dict["loss"] = loss.item()
-        self.log_dict["loss_main"] = loss.item()
+        self.log_dict["loss_main"] = loss_main.item()
         self.log_dict["loss_total"] = total_loss.item()
         self.log_dict["loss_known"] = loss_components["loss_known"].item()
         self.log_dict["loss_hole"] = loss_components["loss_hole"].item()
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
+        self.log_dict["loss_color_aux"] = color_aux_loss_val
+        self.log_dict["loss_color_aux_weighted"] = color_aux_loss_weighted_val
         self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 
@@ -909,13 +935,15 @@ class DenoisingModel(BaseModel):
         hole_denom_for_stats = mask_hole_3c_for_stats.sum().clamp_min(1.0)
         condition_lut_delta_hole = ((condition_lut_for_mu - self.original_degraded).abs() * mask_hole_3c_for_stats).sum() / hole_denom_for_stats
         training_target_delta = (training_target - self.reference_degraded).abs().mean()
-        training_target_to_lut = (training_target - condition_lut_for_mu).abs().mean()
+        training_target_to_lut = (training_target_lut - condition_lut_for_mu).abs().mean()
+        training_target_main_to_lut = (training_target_lut - training_target).abs().mean()
         self.log_dict["stats_condition_lut_delta_known"] = float(condition_lut_delta_known.item())
         self.log_dict["stats_condition_lut_delta_hole"] = float(condition_lut_delta_hole.item())
         self.log_dict["stats_prefill_to_lut_known"] = float(condition_lut_delta_known.item())
         self.log_dict["stats_prefill_to_lut_hole"] = float(condition_lut_delta_hole.item())
         self.log_dict["stats_training_target_delta"] = float(training_target_delta.item())
         self.log_dict["stats_training_target_to_lut"] = float(training_target_to_lut.item())
+        self.log_dict["stats_training_target_main_to_lut"] = float(training_target_main_to_lut.item())
 
         self.log_dict.update(self._compute_condition_stats(
             color_prior=self.color_prior,

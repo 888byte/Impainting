@@ -1413,3 +1413,40 @@ Do not revisit these as primary hypotheses unless new evidence appears:
 
 6. **Main failure caused only by structure guidance**  
    Earlier no-extra/no-structure checks still failed, so structure guidance alone is not the root cause.
+
+### 2026-04-28 x12 first-run postmortem: two concrete implementation bugs
+
+Evidence:
+- `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x12-rawtarget-coloraux_260428-113026.log`
+- `C:/Users/admin/Desktop/test_ir-sde-brushnet-x12-rawtarget-coloraux-current-domain_260428-134655.log`
+
+Observed failure:
+- the run went back to an almost fully white hole result
+- example `000098_center`:
+  - `raw_hole(mean=0.9774, white=0.9660)`
+  - `final_hole(mean=0.9779, white=0.9696)`
+
+Root causes found:
+
+1. **The x12 color auxiliary loss was configured but not actually added into `optimize_parameters()`**
+   - symptom: training log showed `loss_total == loss_main`
+   - symptom: no `loss_color_aux` field appeared in the training log
+   - consequence: the tested x12 checkpoint was effectively a raw-target-only run, not the intended raw-target + weak color-aux run
+
+2. **`inference.structure_source=degraded` was wrong for mural inference**
+   - in test-time mural inference, `degraded` refers to the observed white-hole canvas, not the full degraded mural image used as the raw-domain anchor during x12 training
+   - consequence: structure guidance consumed a white-hole source image and pushed the reverse trajectory back toward the old white-mask failure
+
+Fixes applied after this finding:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+  - wired the x12 hole-only LUT color auxiliary loss into `optimize_parameters()`
+  - added `loss_color_aux`, `loss_color_aux_weighted`, and `stats_training_target_main_to_lut` logs
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - added `structure_source=prefill` support using `prepared["denoised_original"]`
+  - when `condition_known_source=degraded`, full-mode compose now prefers a prefilled source for feather blending instead of leaking the observed white-hole canvas
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x12-rawtarget-coloraux-current-domain.yml`
+  - changed `structure_source: degraded` -> `structure_source: prefill`
+
+Conclusion:
+- the first x12 test result must **not** be used to judge the corrected x12 idea
+- it was affected by two real implementation bugs and therefore was not a fair evaluation of the intended design

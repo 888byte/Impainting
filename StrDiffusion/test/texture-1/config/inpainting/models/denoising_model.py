@@ -748,6 +748,9 @@ class DenoisingModel(BaseModel):
                 elif self.structure_source == "degraded":
                     structure_input = self.original_degraded
                     resolved_structure_source = "degraded"
+                elif self.structure_source in {"prefill", "denoised", "denoised_original", "image_for_lut"}:
+                    structure_input = prepared["denoised_original"]
+                    resolved_structure_source = "prefill"
                 elif self.structure_source in {"condition_mu", "mu"}:
                     structure_input = self.condition
                     resolved_structure_source = "condition_mu"
@@ -757,7 +760,7 @@ class DenoisingModel(BaseModel):
                 else:
                     raise ValueError(
                         f"Unsupported inference.structure_source={self.structure_source!r}; "
-                        "expected lut|degraded|condition_mu|gt|gt_if_available"
+                        "expected lut|degraded|prefill|condition_mu|gt|gt_if_available"
                     )
                 logger.info(
                     "[StructureRoute] sample=%s structure_source=%s resolved=%s has_gt=%s",
@@ -831,6 +834,10 @@ class DenoisingModel(BaseModel):
                     # inference.condition_known_source, instead of forcing a
                     # legacy LUT-domain composite in full mode.
                     known_source = prepared.get("known_source", prepared["lut_transformed"])
+                    if self.condition_known_source == "degraded":
+                        # Avoid feather/white-guard leaking the observed white-hole
+                        # canvas into the hole boundary during full-mode compose.
+                        known_source = prepared.get("denoised_original", known_source)
                 compose_alpha = self._build_composite_alpha(
                     self.mask_hole,
                     source=self.original_degraded,

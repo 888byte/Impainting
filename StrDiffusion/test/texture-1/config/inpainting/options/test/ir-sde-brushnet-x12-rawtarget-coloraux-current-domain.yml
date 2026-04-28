@@ -107,7 +107,7 @@ inference:
   save_states: false
   deterministic_reverse: true
   condition_known_source: degraded
-  structure_source: degraded
+  structure_source: prefill
   known_area_projection: true
   compose_mask_dilate: 3
   compose_feather: 4
