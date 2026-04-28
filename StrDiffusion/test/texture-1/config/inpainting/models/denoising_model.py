@@ -826,9 +826,11 @@ class DenoisingModel(BaseModel):
                 if self.gt_mode == "partial":
                     known_source = self.original_degraded
                 else:
-                    # full mode still protects known pixels, but the protected
-                    # value is target-domain CondLUT, not raw degraded input.
-                    known_source = prepared["lut_transformed"]
+                    # x12 consistency fix:
+                    # protect known pixels using the same domain selected by
+                    # inference.condition_known_source, instead of forcing a
+                    # legacy LUT-domain composite in full mode.
+                    known_source = prepared.get("known_source", prepared["lut_transformed"])
                 compose_alpha = self._build_composite_alpha(
                     self.mask_hole,
                     source=self.original_degraded,

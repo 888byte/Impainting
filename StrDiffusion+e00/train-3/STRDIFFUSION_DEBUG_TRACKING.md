@@ -1377,6 +1377,13 @@ x12 test config uses:
 
 This keeps inference aligned with the raw-domain main SDE target while still allowing BrushNet to see color-prior inputs.
 
+Additional x12 inference code fix:
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+- full-mode final composite no longer hard-forces `lut_transformed` on known pixels
+- it now uses `prepared["known_source"]`, so the final protected known area follows `inference.condition_known_source`
+
+This removes one remaining train/infer inconsistency that would otherwise keep x12 partially tied to the old LUT-domain composite path even after switching the main SDE route back to the raw domain.
+
 ### x12 intended behavior
 
 Expected:
