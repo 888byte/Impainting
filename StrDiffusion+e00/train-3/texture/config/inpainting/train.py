@@ -599,23 +599,28 @@ def main():
 
             if is_mural_mode:
                 assert model.lut_processor is not None, "mural mode requires LUTProcessor for target-domain training_target/condition_lut"
-                # Mural target domain:
-                #   x0/GT/reverse target = LUT(denoised(degraded_full)).
-                # Condition/mu uses only inference-observable input:
-                #   condition_lut = LUT(mask-aware denoised(observed_degraded)).
+                # Mural task:
+                #   preferred main target = dataset GT (target-like restoration),
+                #   while condition/mu should stay in the inference-observable domain.
+                #   raw / lut main targets are kept only for explicit ablations.
                 with torch.no_grad():
                     main_target_domain = str(
-                        opt["datasets"]["train"].get("main_target_domain", "lut")
+                        opt["datasets"]["train"].get("main_target_domain", "gt")
+                    ).lower()
+                    condition_mu_domain = str(
+                        opt["datasets"]["train"].get("condition_mu_domain", "")
                     ).lower()
                     denoised_ref = model._denoise_image(Y_degraded_full, mask_known=None)
                     training_target_lut, _ = model._build_lut_transformed(denoised_ref)
                     if main_target_domain == "raw":
                         training_target = Y_degraded_full
+                    elif main_target_domain == "gt":
+                        training_target = Y_GT
                     elif main_target_domain == "lut":
                         training_target = training_target_lut
                     else:
                         raise ValueError(
-                            f"Unsupported datasets.train.main_target_domain={main_target_domain!r}; expected raw|lut"
+                            f"Unsupported datasets.train.main_target_domain={main_target_domain!r}; expected raw|gt|lut"
                         )
 
                     denoised_observed_mask_aware = model._denoise_image(
@@ -648,18 +653,27 @@ def main():
                         else:
                             confidence_for_sde = None
 
-                    # MuCleanr/Mu-Denoiser still operates on target-domain CondLUT,
-                    # but in x12 the main diffusion target may be raw-domain again.
+                    # MuCleanr/Mu-Denoiser still operates on target-domain CondLUT.
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    if main_target_domain == "raw":
+                    if not condition_mu_domain:
+                        condition_mu_domain = (
+                            "degraded" if main_target_domain in ("raw", "gt") else "lut"
+                        )
+
+                    if condition_mu_domain == "degraded":
                         condition_mu_source = Y_degraded_full
+                    elif condition_mu_domain == "gt":
+                        condition_mu_source = Y_GT
+                    elif condition_mu_domain == "lut":
+                        condition_mu_source = condition_lut
+                    elif condition_mu_domain == "mu_clean_lut":
+                        condition_mu_source = mu_clean_lut
                     else:
-                        condition_mu_source = (
-                            mu_clean_lut
-                            if getattr(model, "use_mu_denoiser_for_condition_mu", False)
-                            else condition_lut
+                        raise ValueError(
+                            f"Unsupported datasets.train.condition_mu_domain={condition_mu_domain!r}; "
+                            "expected degraded|gt|lut|mu_clean_lut"
                         )
                     condition_mu = condition_mu_source * mask_for_sde
 

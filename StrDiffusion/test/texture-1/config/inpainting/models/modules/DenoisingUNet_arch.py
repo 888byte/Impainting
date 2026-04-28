@@ -14,9 +14,6 @@ from .module_util import (
     ResBlock, Upsampler,
     LinearAttention, Attention,
     PreNorm, Residual)
-import matplotlib.pyplot as plt
-import os
-import os.path as osp
 
 from torch.nn import init
 class BaseNetwork(nn.Module):
@@ -139,6 +136,8 @@ class SPADEBlock(BaseNetwork):
         self.learned_shortcut = (fin != fout)
         fmiddle = min(fin, fout)
         hidden = fin
+#         self.up = nn.Conv2d(3, hidden, kernel_size=1)
+#         self.down = nn.Conv2d(hidden, 3, kernel_size=1)
         # create conv layers
         self.conv_0 = nn.Conv2d(hidden, hidden, kernel_size=3, padding=1)
         self.conv_1 = nn.Conv2d(hidden, hidden, kernel_size=3, padding=1)
@@ -163,9 +162,13 @@ class SPADEBlock(BaseNetwork):
     # note the resnet block with SPADE also takes in |seg|,
     # the semantic segmentation map as input
     def forward(self, x, seg):
+        #x_s = self.shortcut(x, seg)
+        #x = self.cup(x)
+        #x = self.up(x)
         dx = self.conv_0(self.actvn(self.norm_0(x, seg)))
         dx = self.conv_1(self.actvn(self.norm_1(dx, seg)))
 
+        #return  self.down(x+dx)
         return  x+dx
 
     def shortcut(self, x, seg):
@@ -230,7 +233,6 @@ class ConditionalUNet(nn.Module):
                 Upsample(dim_out, dim_in) if i!=0 else default_conv(dim_out, dim_in)
             ]))
             
-
         mid_dim = nf * int(math.pow(2, depth))
         self.mid_block1 = block_class(dim_in=mid_dim, dim_out=mid_dim, time_emb_dim=time_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
@@ -239,7 +241,6 @@ class ConditionalUNet(nn.Module):
         self.final_res_block = block_class(dim_in=nf * 2, dim_out=nf, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(nf, out_nc, 3, 1, 1)
 
-
     def check_image_size(self, x, h, w):
         s = int(math.pow(2, self.depth))
         mod_pad_h = (s - h % s) % s
@@ -247,8 +248,6 @@ class ConditionalUNet(nn.Module):
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
- 
-    
     def forward(self, xt, cond, time=-1, S = None):
         if isinstance(time, int) or isinstance(time, float):
             time = torch.tensor([time]).to(xt.device)
@@ -264,26 +263,25 @@ class ConditionalUNet(nn.Module):
         t = self.time_mlp(time)
 
         h = [] 
-        gh = []
+        #lstm_xt = []
 
-        for b1, b2, attn, downsample, guide in self.downs:
+        
+        for b1, b2, attn, downsample, guide in self.downs:#, guide
             x = b1(x, t)
             h.append(x)
-            gh.append(x)
 
             x = b2(x, t)
             x = attn(x)
             h.append(x)
-            gh.append(x)
 
             x = downsample(x)
             
             x = guide(x, S)
- 
+            
+        
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
-        
         
         for b1, b2, attn, upsample in self.ups:
             x = torch.cat([x, h.pop()], dim=1)
@@ -302,7 +300,13 @@ class ConditionalUNet(nn.Module):
 
         x = x[..., :H, :W]
         
-        return x
+        
+        
+        
+        return x, x
+
+
+
 
 
 class ConditionalUNets(nn.Module):
@@ -346,7 +350,7 @@ class ConditionalUNets(nn.Module):
                 block_class(dim_in=dim_in, dim_out=dim_in, time_emb_dim=time_dim),
                 block_class(dim_in=dim_in, dim_out=dim_in, time_emb_dim=time_dim),
                 Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Downsample(dim_in, dim_out) if i != (depth-1) else default_conv(dim_in, dim_out),
+                Downsample(dim_in, dim_out) if i != (depth-1) else default_conv(dim_in, dim_out)
             ]))
 
             self.ups.insert(0, nn.ModuleList([
@@ -371,7 +375,7 @@ class ConditionalUNets(nn.Module):
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
-    def forward(self, xt, cond, time):#
+    def forward(self, xt, cond, time):
 
         if isinstance(time, int) or isinstance(time, float):
             time = torch.tensor([time]).to(xt.device)
@@ -389,7 +393,7 @@ class ConditionalUNets(nn.Module):
 
         h = []
 
-        for b1, b2, attn, downsample  in self.downs:
+        for b1, b2, attn, downsample in self.downs:
             x = b1(x, t)
             h.append(x)
 
@@ -398,7 +402,6 @@ class ConditionalUNets(nn.Module):
             h.append(x)
 
             x = downsample(x)
-            
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)

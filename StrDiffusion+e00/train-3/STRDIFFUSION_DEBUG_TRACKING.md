@@ -1556,3 +1556,76 @@ Goal:
 - preserve the innovation path
 - stop the model from being over-dominated by the LUT / color branch on hard samples
 - let the lightly unfrozen trunk settle back toward the stable raw-domain solution before the color hint is reintroduced
+
+### 2026-04-29 decisive structural findings (evidence-backed, not a parameter guess)
+
+After re-checking the original StrDiffusion code paths, two deeper structural issues were confirmed.
+
+#### Finding A: the original "baseline works" result is not solving the same inference task
+
+Evidence from the original repository:
+- Training: `D:/code/ky/bihua/Impainting/StrDiffusion/train/texture/config/inpainting/train.py:243-244`
+  - `timesteps, states = sde.generate_random_states(x0=Y_GT, mu=Y_GT*mask)`
+  - `model.feed_data(states, Y_GT*mask, Y_GT, ...)`
+- Testing: `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture/config/inpainting/test.py:170-172`
+  - `noisy_state = sde.noise_state(Y_GT * mask)`
+  - `model.feed_data(noisy_state, Y_GT * mask, Y_GT, ...)`
+
+This means the original baseline is trained **and evaluated** with a target-domain known-region condition (`Y_GT * mask`).
+It is **not** evaluated with the current-domain degraded known-region condition (`degraded * mask_known`).
+
+Therefore, the historical statement "the original baseline already works" cannot be used as proof that the current degraded-known inference route is already solved by the baseline task.
+It only proves that the original target-domain-known task is solvable.
+
+#### Finding B: the current train/test generator definitions were not identical
+
+Evidence from stage-3 inference log:
+- `C:/Users/admin/Desktop/test_ir-sde-brushnet-x12-stage3-weakcolor-current-domain_260428-234259.log`
+- generator load line showed: `loaded 246/246 tensors ... unexpected=80`
+
+This is a real structural mismatch: inference was discarding 80 generator tensors from the training checkpoint.
+A direct file comparison confirmed that the following train/test module files differed:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/modules/DenoisingUNet_arch.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/modules/DenoisingUNet_arch.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/modules/__init__.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/modules/__init__.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/modules/loss.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/modules/loss.py`
+
+Action taken:
+- synced the three module files from the training tree to the `texture-1` inference tree so inference uses the same UNet module definitions as training.
+
+Implication:
+- any inference conclusion obtained before this sync is not fully trustworthy, because the trained generator was not being reconstructed exactly at test time.
+
+#### Current highest-confidence diagnosis
+
+The remaining issue is no longer best explained by a small hyperparameter mistake.
+The strongest evidence now points to a **task-definition mismatch**:
+1. the original baseline solved a target-domain-known task (`Y_GT * mask`), not the current degraded-known task;
+2. the x12/stage2/stage3 line changed the main diffusion target to `Y_degraded_full`, which teaches a faded/raw mural target rather than the desired restoration target;
+3. until the train/test generator definitions were synced, inference was also structurally inconsistent.
+
+What is ruled out now:
+- simple YAML typo / route typo as the primary cause
+- old pure white collapse caused only by compose/structure leakage
+- BrushNet feature scale alone being the primary cause
+- color auxiliary weight alone being the primary cause
+
+### 2026-04-29 cleanup / restore policy for the next line
+
+To avoid inheriting ineffective changes:
+
+- do **not** continue from `x12-stage2` / `x12-stage3` checkpoints
+- do **not** use `main_target_domain: raw` for the next clean line
+- do **not** rely on color-aux as a required mechanism for the next clean line
+
+Active clean direction:
+- main diffusion target should return to dataset `Y_GT`
+- condition/mu should stay in the degraded/current-domain branch
+- BrushNet stays enabled as a weak auxiliary branch
+- `restore_S_guidance` stays off during the first clean verification
+
+Prepared clean config pair:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x13-gtcurrent-weakbrush.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x13-gtcurrent-weakbrush-current-domain.yml`
