@@ -1450,3 +1450,63 @@ Fixes applied after this finding:
 Conclusion:
 - the first x12 test result must **not** be used to judge the corrected x12 idea
 - it was affected by two real implementation bugs and therefore was not a fair evaluation of the intended design
+
+### 2026-04-28 x12 corrected run verdict
+
+Evidence:
+- `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x12-rawtarget-coloraux_260428-152422.log`
+- `C:/Users/admin/Desktop/test_ir-sde-brushnet-x12-rawtarget-coloraux-current-domain_260428-181409.log`
+
+What is now confirmed to be correct:
+- `loss_color_aux` is active in training
+- `loss_total > loss_main`
+- `stats_training_target_main_to_lut` is logged at about `0.03`
+- inference uses `structure_source=prefill`
+- inference no longer shows the old `0.97~0.99` white ratio collapse on the hard center sample
+
+Representative improvement:
+- earlier broken x12 center run: `final_white_ratio_hole ≈ 0.79`
+- corrected x12 center run: `final_white_ratio_hole ≈ 0.22`
+
+So the pipeline is no longer suffering from the same pure implementation bug as before.
+
+### Remaining problem after corrected x12
+
+Hard samples are still too bright and still worse than `prior_gt_l1`:
+- center: `final_gt_l1=0.266505`, `prior_gt_l1=0.204685`
+- left:   `final_gt_l1=0.386703`, `prior_gt_l1=0.217610`
+
+Updated interpretation:
+- the remaining issue is **not** YAML misconfiguration
+- the remaining issue is the **training strategy mismatch**
+
+Reason:
+- x12 changed the main target domain to the raw mural domain
+- but the pretrained baseline trunk was still kept frozen for the whole run
+- that trunk was originally trained with a different target-domain prior
+- BrushNet + weak color-aux can reduce the collapse, but cannot fully retarget the frozen score field on hard samples
+
+### Next strategy: x12 stage-2 unfreeze
+
+Do not restart from scratch again.
+
+Instead:
+1. continue from the corrected x12 checkpoint (`6000_G.pth`)
+2. unfreeze the pretrained trunk with a **very small** main LR
+3. keep the current x12 semantics:
+   - raw main target
+   - weak hole-only LUT color auxiliary
+   - `condition_known_source=degraded`
+   - `structure_source=prefill`
+4. disable `restore_S_guidance` during the first stage-2 evaluation to avoid extra confounding while checking whether the trunk brightness prior is being corrected
+
+Prepared configs:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x12-stage2-unfreeze.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x12-stage2-current-domain.yml`
+
+Key stage-2 settings:
+- `pretrain_model_G: .../ir-sde-brushnet-ft-x12-rawtarget-coloraux/models/6000_G.pth`
+- `freeze_pretrained_until_iter: 0`
+- `lr_G: 1e-6`
+- `lr_new: 5e-6`
+- test-side `restore_S_guidance: false`
