@@ -295,6 +295,23 @@ class DenoisingModel(BaseModel):
                     f"microbatch={self.infer_x0_microbatch}"
                 )
 
+            # x12: keep the main diffusion target on the stable raw domain,
+            # and use the LUT domain only as a weak hole-only color auxiliary.
+            self.color_aux_loss_weight = float(train_opt.get("color_aux_loss_weight", 0.0))
+            self.color_aux_loss_start_iter = int(train_opt.get("color_aux_loss_start_iter", 0))
+            self.color_aux_blur_kernel = int(train_opt.get("color_aux_blur_kernel", 7))
+            self.color_aux_clamp_b_min = float(train_opt.get("color_aux_clamp_b_min", 1e-3))
+            if self.color_aux_blur_kernel > 1 and self.color_aux_blur_kernel % 2 == 0:
+                self.color_aux_blur_kernel += 1
+            if self.color_aux_loss_weight > 0:
+                logger.info(
+                    "[Model] color auxiliary loss enabled: "
+                    f"weight={self.color_aux_loss_weight}, "
+                    f"start_iter={self.color_aux_loss_start_iter}, "
+                    f"blur_kernel={self.color_aux_blur_kernel}, "
+                    f"clamp_b_min={self.color_aux_clamp_b_min}"
+                )
+
             # optimizers
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
             
@@ -561,6 +578,7 @@ class DenoisingModel(BaseModel):
                   color_prior=None, confidence=None, conf_lut=None,
                   original_degraded=None, reference_degraded=None,
                   condition_lut=None, mu_clean_lut=None,
+                  training_target_lut=None,
                   denoised_observed_mask_aware=None):
         """
         加载训练数据
@@ -623,12 +641,31 @@ class DenoisingModel(BaseModel):
         self.mu_clean_lut = (
             mu_clean_lut.to(self.device) if mu_clean_lut is not None else self.condition_lut
         )
+        self.training_target_lut = (
+            training_target_lut.to(self.device) if training_target_lut is not None else self.state_0
+        )
         self.denoised_observed_mask_aware = (
             denoised_observed_mask_aware.to(self.device)
             if denoised_observed_mask_aware is not None
             else None
         )
 
+
+    def _blur_for_color_aux(self, tensor, kernel_size):
+        if tensor is None or kernel_size <= 1:
+            return tensor
+        pad = kernel_size // 2
+        padded = F.pad(tensor, (pad, pad, pad, pad), mode="reflect")
+        return F.avg_pool2d(padded, kernel_size=kernel_size, stride=1)
+
+    def _estimate_x0_from_noise(self, sde, xt, noise, timesteps):
+        batch = xt.shape[0]
+        t = timesteps.reshape(batch, 1, 1, 1).long().to(xt.device)
+        sigma = sde.sigma_bar(t).to(dtype=xt.dtype, device=xt.device)
+        b = torch.exp(-sde.thetas_cumsum[t] * sde.dt).to(dtype=xt.dtype, device=xt.device)
+        mu = self.condition.to(dtype=xt.dtype, device=xt.device)
+        x0_hat = mu + (xt - mu - sigma * noise) / b.clamp_min(self.color_aux_clamp_b_min)
+        return x0_hat.clamp(0.0, 1.0)
 
     def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
         """
@@ -667,6 +704,7 @@ class DenoisingModel(BaseModel):
         # train.py has already built the single mural target domain and passed it
         # through feed_data(GT=...).  Do not recompute denoised/LUT targets here.
         training_target = self.state_0
+        training_target_lut = getattr(self, "training_target_lut", training_target)
         condition_lut_for_mu = getattr(self, "condition_lut", self.condition)
         mu_clean_lut = getattr(self, "mu_clean_lut", condition_lut_for_mu)
         mu_losses = {}
@@ -896,6 +934,7 @@ class DenoisingModel(BaseModel):
             'condition_mu': self.condition.detach(),
             'mu_clean_lut': mu_clean_lut.detach(),
             'training_target': training_target.detach(),
+            'training_target_lut': training_target_lut.detach(),
             'color_prior': self.color_prior.detach() if self.color_prior is not None else None,
             'confidence': self.confidence.detach() if self.confidence is not None else None,
             'mask_known': self.mask.detach(),

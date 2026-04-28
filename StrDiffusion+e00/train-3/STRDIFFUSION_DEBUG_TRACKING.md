@@ -1247,3 +1247,162 @@ Deleted unused local reference files:
 - New comments added in this round are kept in UTF-8-friendly English to avoid more mojibake.
 - Some historical comments in old files are still garbled, but this does **not** affect runtime logic.
 - If needed later, do a separate comment-only cleanup pass instead of mixing it into model logic changes.
+
+
+## 2026-04-28 x11-officialinit verdict: official BrushNet-style injection alone did not fix the failure
+
+### Evidence from logs
+
+Training log:
+- `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x11-officialinit_260428-002114.log`
+- `[BrushNetInit] initialized BrushNet encoder from pretrained trunk`
+- `[Freeze] frozen 215 pretrained trunk params until iter 999999`
+- `loaded 231/326 tensors ... missing=95`
+- `stats_sde_mu_hole_mean` stayed `0.0`
+- `loss_main` decreased to about `2.0e-03`
+
+Inference log:
+- `C:/Users/admin/Desktop/test_ir-sde-brushnet-x11-officialinit-current-domain_260428-094728.log`
+- Loaded checkpoint: `11000_G.pth`
+- `brushnet.enabled(config/runtime)=True/True`
+- `brushnet.input_source: observed_known`
+- `texture_core=False`, `mu_denoiser=False`
+
+Hard sample results still failed:
+- `000098_center: final_gt_l1=0.258537, prior_gt_l1=0.204685`
+- `000098_left:   final_gt_l1=0.351338, prior_gt_l1=0.217610`
+- `[WhiteMask Alert]` still triggered with `final_hole_mean?0.90`
+
+### What x11 already ruled out
+
+1. Not a random-init BrushNet problem.
+2. Not a wrong BrushNet input-source problem (`observed_known` was active).
+3. Not an MGLC problem (`texture_core=False`).
+4. Not a MuCleaner problem (`mu_denoiser=False`).
+5. Not a trunk-drift problem in this specific line (trunk stayed frozen).
+
+### Updated root-cause judgement
+
+The remaining unstable part is the **main diffusion supervision target itself**.
+
+Current mural training still does this in:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+
+Current logic:
+- `x0/GT/reverse target = LUT(denoised(degraded_full))`
+
+This means even with official-style BrushNet conditioning, the diffusion objective is still being asked to model the LUT-shifted target domain directly. x11 shows that this is the wrong place to force the color-domain innovation.
+
+### Recommended next direction (x12)
+
+Do **not** abandon the innovation branch. Instead, separate the roles:
+
+1. Main diffusion target returns to the **stable raw mural domain**.
+2. BrushNet still uses:
+   - `observed_known`
+   - `color_prior`
+   - `confidence`
+3. LUT target is kept only as a **small hole-only color auxiliary objective**, not the main diffusion target.
+4. MGLC stays off first.
+5. MuCleaner stays off first.
+
+Important dataset note:
+- In this mural dataset, `Y_GT` is already a generated target-like image, not the raw degraded mural.
+- Therefore x12 must not simply switch `training_target = Y_GT`.
+- The correct stable raw-domain anchor is `Y_degraded_full`.
+
+This keeps the innovation inside training/inference, but stops the score field from collapsing toward the bright LUT domain.
+
+
+## 2026-04-28 x12-rawtarget-coloraux: move the innovation away from the main score target
+
+### Why x12 is different from x11
+
+x11 proved that:
+- official BrushNet-style initialization was working,
+- trunk freeze was working,
+- MGLC and MuCleaner were not the direct cause,
+- but the model still failed on hard samples.
+
+The remaining problem was the place where the LUT-domain innovation was applied:
+- x11 still made the **main diffusion target** live in the LUT-shifted domain.
+
+x12 changes only that role assignment:
+- the **main diffusion target** goes back to the stable raw mural domain (`Y_degraded_full`);
+- the LUT target stays in training as a **small hole-only color auxiliary loss**;
+- BrushNet remains the innovation carrier inside the network.
+
+### x12 code changes
+
+Files:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x12-rawtarget-coloraux.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x12-rawtarget-coloraux-current-domain.yml`
+
+#### Train-side role split
+
+In mural mode:
+- `training_target_lut = LUT(denoised(Y_degraded_full))`
+- if `datasets.train.main_target_domain == raw`:
+  - `training_target = Y_degraded_full`
+  - `condition_mu_source = Y_degraded_full`
+- else:
+  - keep the older LUT-domain path
+
+This means the main SDE now learns the stable raw mural domain again, while the LUT branch is preserved separately.
+
+#### Auxiliary color loss
+
+Added in `models/denoising_model.py`:
+- `color_aux_loss_weight`
+- `color_aux_loss_start_iter`
+- `color_aux_blur_kernel`
+- `color_aux_clamp_b_min`
+
+Mechanism:
+- estimate `x0_hat` from the current noisy state and predicted noise;
+- blur both `x0_hat` and `training_target_lut`;
+- apply a **hole-only L1 loss** with a small weight.
+
+Purpose:
+- let the model learn the main repair in the stable raw domain;
+- let the LUT-domain innovation act only as a weak color preference.
+
+#### Inference-side alignment
+
+x12 test config uses:
+- `condition_known_source: degraded`
+- `structure_source: degraded`
+
+This keeps inference aligned with the raw-domain main SDE target while still allowing BrushNet to see color-prior inputs.
+
+### x12 intended behavior
+
+Expected:
+1. no more pressure for the main score field to collapse toward a bright LUT-domain average;
+2. BrushNet remains active as an internal innovation branch;
+3. LUT-domain supervision still exists, but only as a weak hole-only color guidance term;
+4. the baseline trunk stays protected because x12 still uses the x11-style frozen-trunk BrushNet training setup.
+
+### Errors already ruled out before x12
+
+Do not revisit these as primary hypotheses unless new evidence appears:
+
+1. **Random BrushNet initialization**  
+   Ruled out by x11 official trunk bootstrap logs.
+
+2. **Wrong BrushNet image input source**  
+   Ruled out by x11 `observed_known` route verification.
+
+3. **MGLC as main cause**  
+   Ruled out because x11/x12 first-stage runs keep `texture_core=False`.
+
+4. **MuCleaner / MuDenoiser as main cause**  
+   Ruled out because x11/x12 first-stage runs keep `mu_denoiser=False`.
+
+5. **Trunk drift caused by long fine-tuning**  
+   Ruled out for x11/x12 style runs because the pretrained trunk is frozen.
+
+6. **Main failure caused only by structure guidance**  
+   Earlier no-extra/no-structure checks still failed, so structure guidance alone is not the root cause.

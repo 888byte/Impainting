@@ -192,6 +192,7 @@ def _log_tb_training_images(tb_logger, debug_info, current_step):
         "train_vis/condition_mu": "condition_mu",
         "train_vis/mu_clean_lut": "mu_clean_lut",
         "train_vis/training_target": "training_target",
+        "train_vis/training_target_lut": "training_target_lut",
         "train_vis/color_prior": "color_prior",
         "train_vis/confidence": "confidence",
         "train_vis/mask_known": "mask_known",
@@ -603,8 +604,19 @@ def main():
                 # Condition/mu uses only inference-observable input:
                 #   condition_lut = LUT(mask-aware denoised(observed_degraded)).
                 with torch.no_grad():
+                    main_target_domain = str(
+                        opt["datasets"]["train"].get("main_target_domain", "lut")
+                    ).lower()
                     denoised_ref = model._denoise_image(Y_degraded_full, mask_known=None)
-                    training_target, _ = model._build_lut_transformed(denoised_ref)
+                    training_target_lut, _ = model._build_lut_transformed(denoised_ref)
+                    if main_target_domain == "raw":
+                        training_target = Y_degraded_full
+                    elif main_target_domain == "lut":
+                        training_target = training_target_lut
+                    else:
+                        raise ValueError(
+                            f"Unsupported datasets.train.main_target_domain={main_target_domain!r}; expected raw|lut"
+                        )
 
                     denoised_observed_mask_aware = model._denoise_image(
                         Y_degraded, mask_known=mask_for_sde
@@ -636,20 +648,19 @@ def main():
                         else:
                             confidence_for_sde = None
 
-                    # MuCleanr/Mu-Denoiser now cleans target-domain condition_lut.
-                    # If disabled or no usable weights are loaded/trained yet, the
-                    # helper falls back to condition_lut; the final SDE mu is masked.
+                    # MuCleanr/Mu-Denoiser still operates on target-domain CondLUT,
+                    # but in x12 the main diffusion target may be raw-domain again.
                     mu_clean_lut = model.compute_mu_clean_no_grad(
                         condition_lut, mask_for_sde, confidence_for_sde, step=current_step
                     )
-                    # Texture SDE mu must match inference condition semantics:
-                    # use inference-observable condition_lut by default, with an
-                    # optional Mu-Denoiser cleaned variant when explicitly enabled.
-                    condition_mu_source = (
-                        mu_clean_lut
-                        if getattr(model, "use_mu_denoiser_for_condition_mu", False)
-                        else condition_lut
-                    )
+                    if main_target_domain == "raw":
+                        condition_mu_source = Y_degraded_full
+                    else:
+                        condition_mu_source = (
+                            mu_clean_lut
+                            if getattr(model, "use_mu_denoiser_for_condition_mu", False)
+                            else condition_lut
+                        )
                     condition_mu = condition_mu_source * mask_for_sde
 
                 timesteps, states = sde.generate_random_states(
@@ -674,6 +685,7 @@ def main():
                     reference_degraded=Y_degraded_full,
                     condition_lut=condition_lut,
                     mu_clean_lut=mu_clean_lut,
+                    training_target_lut=training_target_lut,
                     denoised_observed_mask_aware=denoised_observed_mask_aware,
                 )
             else:
@@ -716,7 +728,7 @@ def main():
                     # Input -> Denoised -> ColorChanged -> Prior -> Original+Mask -> Mask
                     original = debug_info.get('original_degraded', Y_degraded)
                     denoised = debug_info.get('denoised_observed_mask_aware', None)
-                    color_changed = debug_info.get('training_target', training_target)
+                    color_changed = debug_info.get('training_target_lut', debug_info.get('training_target', training_target))
                     prior = debug_info.get('color_prior', color_prior_for_sde)
                     orig_with_mask = debug_info.get('condition_mu', condition_mu)
                     mask_img = debug_info.get('mask_known', mask_for_sde)
