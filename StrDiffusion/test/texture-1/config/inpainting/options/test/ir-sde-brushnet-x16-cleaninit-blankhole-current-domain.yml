@@ -1,7 +1,7 @@
-# x15 inference: same x14 current-domain route, but evaluate the
-# checkpoint trained with inference-like blank-hole x0 supervision.
+# x16 inference: evaluate the clean-init x15-style checkpoint
+# without inheriting the x14/x15 bright basin.
 
-name: ir-sde-brushnet-x15-partial-blankhole-current-domain
+name: ir-sde-brushnet-x16-cleaninit-blankhole-current-domain
 suffix: null
 model: denoising
 distortion: inpainting
@@ -96,7 +96,7 @@ mu_denoiser:
   blind_ratio: 0.1
 
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x15-partial-blankhole/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x16-cleaninit-blankhole/models/best_G.pth
   pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
   pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
   strict_load: false

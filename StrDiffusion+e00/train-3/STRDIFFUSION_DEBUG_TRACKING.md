@@ -1720,7 +1720,37 @@ Action taken:
 - added new config pair that keeps the x14 task definition but enables the missing blank-hole supervision:
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x15-partial-blankhole.yml`
   - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x15-partial-blankhole-current-domain.yml`
+- explicitly pinned the route on both sides to avoid hidden defaults:
+  - train: `train.sde_mu_hole_mode: known_only`
+  - test: `inference.sde_mu_hole_mode: known_only`
+  - test: `inference.expected_train_sde_mu_hole_mode: known_only`
 
 Clean-up / restore note:
 - x15 does **not** continue the x12 raw-target line.
 - x15 keeps the x14 structural fixes (`gt_mode=partial`, current-domain known input, prefill structure prep, no Mu/MGLC) and adds only the missing blank-hole supervision branch.
+- 2026-04-29 / x15 result conclusion:
+  - `x15` already proved the missing blank-hole branch was real and is now active:
+    - train log has non-zero `loss_infer_x0` / `loss_infer_x0_weighted`
+    - test route is clean: `condition_known_source=degraded`, `structure_source=prefill`, `restore_S_guidance=false`, `unexpected=0`
+  - Yet `x15` still loads from `ir-sde-brushnet-ft-x14-gtcurrent-partialbrush/models/best_G.pth`, i.e. from the already-bright basin.
+  - Therefore `x15` does **not** isolate the task-definition fix from the bad initialization path.
+  - Next clean ablation must keep x15 settings unchanged and only switch initialization back to the original baseline trunk.
+
+- 2026-04-30 / x16 clean-init blank-hole line:
+  - New train config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x16-cleaninit-blankhole.yml`
+  - New test config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x16-cleaninit-blankhole-current-domain.yml`
+  - This line changes **only one variable** relative to x15:
+    - `pretrain_model_G` is reset from the original baseline trunk
+    - no longer inherits `x14` / `x15` bright basin
+  - Everything else intentionally stays the same as x15:
+    - `gt_mode=partial`
+    - `main_target_domain=gt`
+    - `condition_mu_domain=degraded`
+    - `sde_mu_hole_mode=known_only`
+    - blank-hole `infer_x0` supervision enabled
+    - weak BrushNet enabled
+    - `restore_S_guidance=false`
+    - `structure_source=prefill`
+  - This is the current active clean line. Older x12/x13/x14/x15 checkpoints should not be used as warm starts for it.

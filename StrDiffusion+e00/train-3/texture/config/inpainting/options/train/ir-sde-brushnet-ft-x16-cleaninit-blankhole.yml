@@ -1,8 +1,7 @@
-# x15: keep the x14 partial-GT/current-domain task definition,
-# but add the missing inference-like blank-hole x0 supervision
-# that known_only current-domain training explicitly warns about.
+# x16: keep the x15 task/route definition exactly the same,
+# but restart from the original baseline trunk instead of the already-bright x14/x15 basin.
 
-name: ir-sde-brushnet-ft-x15-partial-blankhole
+name: ir-sde-brushnet-ft-x16-cleaninit-blankhole
 use_tb_logger: true
 model: denoising
 distortion: inpainting
@@ -108,7 +107,7 @@ network_G:
     depth: 4
 
 path:
-  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x14-gtcurrent-partialbrush/models/best_G.pth
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
   strict_load: false
   resume_state: null
 
