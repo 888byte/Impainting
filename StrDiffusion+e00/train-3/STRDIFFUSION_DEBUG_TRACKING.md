@@ -1689,3 +1689,38 @@ New clean direction prepared:
 Prepared config pair:
 - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x14-gtcurrent-partialbrush.yml`
 - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x14-gtcurrent-partialbrush-current-domain.yml`
+
+### 2026-04-29 x14 / stage3 follow-up: the remaining failure is not a route typo; it is the missing inference-like blank-hole supervision
+
+Hard evidence:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+  logs this warning whenever `known_only` is active and no infer-like blank-hole branch is enabled:
+  - `[X8Guard] known_only removes target/color content from hole during inference; training must enable a real inference-like blank-hole loss.`
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+  still samples training states with:
+  - `timesteps, states = sde.generate_random_states(x0=training_target, mu=condition_mu)`
+  which means the hole pixels of training `x_t` still contain forward-process target content.
+- inference logs for x14 show the actual reverse chain starts from:
+  - `x_init_hole(mean=0.0000...)`
+  - `cond_hole(mean=0.0000...)`
+  i.e. a true blank-hole / known-only start.
+
+Implication:
+- even after `gt_mode=partial`, `condition_known_source=degraded`, `structure_source=prefill`, and `restore_S_guidance=false` were aligned,
+  the model is still being trained mostly on target-content hole states but is evaluated from blank-hole states.
+- this is a structural train/inference mismatch in the optimization target, not a simple remaining weight tweak.
+
+Additional confirmation:
+- x14 training logs show `loss_color_aux = 0`, so the remaining bright attractor is not caused by color auxiliary loss.
+- x14 test logs still show `final_hole_mean ≈ 0.97` and large `final_gt_l1 > prior_gt_l1`, even though white-ratio collapse is much lower than the earlier pure-white failures.
+
+Action taken:
+- reintroduced a **small, explicit inference-like blank-hole x0 supervision** branch in:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/denoising_model.py`
+- added new config pair that keeps the x14 task definition but enables the missing blank-hole supervision:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x15-partial-blankhole.yml`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x15-partial-blankhole-current-domain.yml`
+
+Clean-up / restore note:
+- x15 does **not** continue the x12 raw-target line.
+- x15 keeps the x14 structural fixes (`gt_mode=partial`, current-domain known input, prefill structure prep, no Mu/MGLC) and adds only the missing blank-hole supervision branch.

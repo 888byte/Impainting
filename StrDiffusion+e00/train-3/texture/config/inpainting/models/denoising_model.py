@@ -658,12 +658,15 @@ class DenoisingModel(BaseModel):
         padded = F.pad(tensor, (pad, pad, pad, pad), mode="reflect")
         return F.avg_pool2d(padded, kernel_size=kernel_size, stride=1)
 
-    def _estimate_x0_from_noise(self, sde, xt, noise, timesteps):
+    def _estimate_x0_from_noise(self, sde, xt, noise, timesteps, mu_tensor=None):
         batch = xt.shape[0]
         t = timesteps.reshape(batch, 1, 1, 1).long().to(xt.device)
         sigma = sde.sigma_bar(t).to(dtype=xt.dtype, device=xt.device)
         b = torch.exp(-sde.thetas_cumsum[t] * sde.dt).to(dtype=xt.dtype, device=xt.device)
-        mu = self.condition.to(dtype=xt.dtype, device=xt.device)
+        if mu_tensor is None:
+            mu = self.condition.to(dtype=xt.dtype, device=xt.device)
+        else:
+            mu = mu_tensor.to(dtype=xt.dtype, device=xt.device)
         x0_hat = mu + (xt - mu - sigma * noise) / b.clamp_min(self.color_aux_clamp_b_min)
         return x0_hat.clamp(0.0, 1.0)
 
@@ -806,6 +809,67 @@ class DenoisingModel(BaseModel):
             color_aux_loss_val = float(color_aux_loss.item())
             color_aux_loss_weighted_val = float(color_aux_loss_weighted.item())
 
+        # ============ x15: inference-like blank-hole x0 supervision ============
+        infer_x0_loss_val = 0.0
+        infer_x0_loss_weighted_val = 0.0
+        if (
+            self.infer_x0_loss_weight > 0
+            and self.infer_x0_grad
+            and step >= self.infer_x0_loss_start_iter
+            and (step % self.infer_x0_loss_interval) == 0
+        ):
+            batch_size = training_target.shape[0]
+            microbatch = self.infer_x0_microbatch if self.infer_x0_microbatch > 0 else batch_size
+            microbatch = max(1, min(batch_size, microbatch))
+            chosen = torch.randperm(batch_size, device=training_target.device)[:microbatch]
+
+            total_T = int(getattr(sde, "T", 400))
+            t_lo = max(2, min(total_T, int(round(total_T * self.infer_x0_t_min_ratio))))
+            t_hi = max(t_lo, min(total_T, int(round(total_T * self.infer_x0_t_max_ratio))))
+            infer_t = torch.randint(
+                low=t_lo,
+                high=t_hi + 1,
+                size=(microbatch, 1, 1, 1),
+                device=training_target.device,
+            ).long()
+
+            infer_mu = self.condition[chosen]
+            infer_sigma = sde.sigma_bar(infer_t).to(dtype=infer_mu.dtype, device=infer_mu.device)
+            infer_state = infer_mu + torch.randn_like(infer_mu) * infer_sigma
+
+            infer_brushnet_kwargs = {}
+            for key, value in brushnet_kwargs.items():
+                if torch.is_tensor(value) and value.shape[0] == batch_size:
+                    infer_brushnet_kwargs[key] = value[chosen]
+                else:
+                    infer_brushnet_kwargs[key] = value
+
+            sde.set_mu(infer_mu)
+            infer_model_output = sde.noise_fn(
+                infer_state,
+                infer_t.squeeze(),
+                None,
+                **infer_brushnet_kwargs,
+            )
+            if isinstance(infer_model_output, (tuple, list)):
+                infer_noise = infer_model_output[0]
+            else:
+                infer_noise = infer_model_output
+            x0_hat_infer = self._estimate_x0_from_noise(
+                sde, infer_state, infer_noise, infer_t, mu_tensor=infer_mu
+            )
+            sde.set_mu(self.condition)
+
+            infer_hole_mask = (1 - self.mask[chosen]).expand_as(x0_hat_infer)
+            infer_hole_denom = infer_hole_mask.sum().clamp_min(1.0)
+            infer_x0_loss = (
+                (x0_hat_infer - training_target[chosen]).abs() * infer_hole_mask
+            ).sum() / infer_hole_denom
+            infer_x0_loss_weighted = self.infer_x0_loss_weight * infer_x0_loss
+            loss = loss + infer_x0_loss_weighted
+            infer_x0_loss_val = float(infer_x0_loss.item())
+            infer_x0_loss_weighted_val = float(infer_x0_loss_weighted.item())
+
         # ============ 可选 g_score 辅助损失 ============
         g_score_loss_val = 0.0
         if g_score is not None:
@@ -851,6 +915,8 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_hole_weighted"] = loss_components["loss_hole_weighted"].item()
         self.log_dict["loss_color_aux"] = color_aux_loss_val
         self.log_dict["loss_color_aux_weighted"] = color_aux_loss_weighted_val
+        self.log_dict["loss_infer_x0"] = infer_x0_loss_val
+        self.log_dict["loss_infer_x0_weighted"] = infer_x0_loss_weighted_val
         self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 
