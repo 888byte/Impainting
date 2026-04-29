@@ -1,4 +1,4 @@
-from .DenoisingUNet_arch import ConditionalUNet
+from .DenoisingUNet_arch import ConditionalUNet, ConditionalUNets
 
 # BrushNet集成模型（新增，不影响原有代码）
 try:

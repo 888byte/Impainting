@@ -1629,3 +1629,23 @@ Active clean direction:
 Prepared clean config pair:
 - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x13-gtcurrent-weakbrush.yml`
 - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x13-gtcurrent-weakbrush-current-domain.yml`
+
+### 2026-04-29 follow-up fix: texture-1 inference module export mismatch
+
+Issue:
+- x13 test startup failed with:
+  - `AttributeError: module 'models.modules' has no attribute 'ConditionalUNets'`
+
+Root cause:
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/modules/__init__.py`
+  exported only `ConditionalUNet`
+- but `texture-1` inference `models/networks.py` expects both:
+  - `ConditionalUNetWithBrushNet`
+  - `ConditionalUNets` (for `network_Gs`)
+
+Fix:
+- export `ConditionalUNets` again in both:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/modules/__init__.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/modules/__init__.py`
+
+This is a startup / module-export bug, not a model-quality diagnosis.
