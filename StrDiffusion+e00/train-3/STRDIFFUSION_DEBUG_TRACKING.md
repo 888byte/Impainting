@@ -1649,3 +1649,43 @@ Fix:
   - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/modules/__init__.py`
 
 This is a startup / module-export bug, not a model-quality diagnosis.
+
+### 2026-04-29 decisive finding: x13 still trains a full-image LUT target because `gt_mode=full`
+
+Hard evidence from code:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/mural_inpainting_dataset.py`
+  - `_generate_gt(...)` returns `self.color_prior_gen.build_target(degraded_img, mask, mode=mode, feather_radius=7)`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/color_prior_generator.py`
+  - `build_target(..., mode="full")` returns `lut_only`
+  - `build_target(..., mode="partial")` returns a feathered blend that keeps known pixels in the original image domain
+
+Implication:
+- in the mural dataset, `Y_GT` is not an external clean reference image;
+- when `gt_mode=full`, `Y_GT` means the entire image is mapped into the LUT target domain;
+- therefore x13 (`main_target_domain: gt` + `gt_mode: full`) still trains the main diffusion objective toward a full-image LUT style target.
+
+Why this matters structurally:
+- inference uses `condition_known_source: degraded` and `known_area_projection=True`, so known pixels are preserved in the degraded/current domain;
+- training with `gt_mode=full` tells the model that known pixels should move toward the LUT domain;
+- this is a direct task-definition mismatch, not a small hyperparameter error.
+
+Observed symptom explained by this mismatch:
+- persistent bright / pale hole fillings even after white-collapse bugs were mitigated;
+- low `white_ratio` but high `final_hole_mean` (~0.96 in x13 test);
+- outputs remain closer to the LUT-style bright basin than to the degraded-known continuity the user expects.
+
+Ruled out by this finding:
+- x13 failure is not best explained by BrushNet scale alone;
+- x13 failure is not best explained by color-aux weight (it is 0 in x13);
+- x13 failure is not best explained by a remaining route typo.
+
+New clean direction prepared:
+- switch mural `gt_mode` from `full` to `partial` while keeping:
+  - `main_target_domain: gt`
+  - `condition_mu_domain: degraded`
+  - weak BrushNet guidance
+  - `restore_S_guidance: false`
+
+Prepared config pair:
+- `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x14-gtcurrent-partialbrush.yml`
+- `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x14-gtcurrent-partialbrush-current-domain.yml`

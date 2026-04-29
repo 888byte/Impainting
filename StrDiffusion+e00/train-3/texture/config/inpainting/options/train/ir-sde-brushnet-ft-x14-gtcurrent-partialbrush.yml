@@ -1,0 +1,147 @@
+﻿# x13: keep the repaired current-domain input route,
+# but restore the main diffusion supervision to dataset GT.
+
+name: ir-sde-brushnet-ft-x14-gtcurrent-partialbrush
+use_tb_logger: true
+model: denoising
+distortion: inpainting
+gpu_ids: [0]
+
+sde:
+  max_sigma: 30
+  T: 400
+  schedule: cosine
+  eps: 0.005
+
+degradation:
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+
+brushnet:
+  enabled: true
+  in_nc: 8
+  nf: 64
+  depth: 4
+  prior_dropout_prob: 0.20
+  feature_scale: 0.01
+  use_spatial_gate: true
+  use_confidence_gate: false
+  confidence_floor: 0.0
+  input_source: observed_known
+  bootstrap_from_pretrained_trunk: true
+  bootstrap_reset_zero_convs: true
+
+main_guidance:
+  enabled: false
+  use_observed_input: true
+  use_mask: true
+  zero_init: true
+
+texture_core:
+  enabled: false
+  name: MGLCBlock
+  insert_mid: true
+  insert_dec: true
+  backend: sem_lite
+  branch_mode: both
+  use_mask_gate: true
+  gate_hidden: 16
+  boundary_width: 3
+  zero_init_last: true
+
+restore_S_guidance: false
+
+mu_denoiser:
+  enabled: false
+  in_nc: 5
+  dim: 32
+  num_blocks: 2
+  num_heads: 4
+  predict_residual: true
+  use_for_condition_mu: false
+  blind_ratio: 0.1
+  lambda_ss: 1.0
+  lambda_tv: 0.01
+  lr: !!float 5e-5
+  sde_warmup_iter: 1000
+
+datasets:
+  train:
+    name: MuralInpainting_Dataset
+    mode: mural_inpainting
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
+    gt_mode: partial
+    main_target_domain: gt
+    condition_mu_domain: degraded
+    lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
+    lut_alpha: 0.85
+    lut_beta: 0.15
+    lut_inpaint_method: telea
+    lut_strength: 1.0
+    lut_fade_boost: 3.0
+    lut_smooth_radius: 1
+    prior_hole_max_weight: 0.5
+    prior_lut_gap_scale: 0.15
+    prior_inpaint_mask_dilate: 3
+    prior_method: quality
+    debug_mode: false
+    observed_hole_fill: white
+    observed_hole_fill_value: 255
+    use_shuffle: true
+    n_workers: 32
+    batch_size: 16
+    GT_size: 256
+    min_hole_ratio: 0.005
+    max_hole_ratio: 0.80
+    max_crop_retry: 20
+    use_flip: true
+    use_rot: true
+    color: RGB
+
+network_G:
+  which_model_G: ConditionalUNetWithBrushNet
+  setting:
+    in_nc: 3
+    out_nc: 3
+    nf: 64
+    depth: 4
+
+path:
+  pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth
+  strict_load: false
+  resume_state: ~
+
+train:
+  optimizer: Adam
+  lr_G: !!float 1e-6
+  lr_new: !!float 2e-6
+  lr_scheme: MultiStepLR
+  beta1: 0.9
+  beta2: 0.999
+  niter: 20000
+  warmup_iter: 400
+  lr_steps: [10000, 16000]
+  lr_gamma: 0.5
+  eta_min: !!float 1e-7
+  freeze_pretrained_until_iter: 0
+  freeze_loaded_pretrained_only: true
+  is_weighted: false
+  loss_type: l1
+  weight: 1.0
+  color_aux_loss_weight: 0.0
+  color_aux_loss_start_iter: 0
+  color_aux_blur_kernel: 11
+  color_aux_clamp_b_min: !!float 1e-3
+  manual_seed: 0
+
+debug:
+  enabled: false
+  log_dir: debug_logs/
+  save_freq: 10
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: 1000
+  best_save_start_iter: 1000
+  use_tb_logger: true
+
