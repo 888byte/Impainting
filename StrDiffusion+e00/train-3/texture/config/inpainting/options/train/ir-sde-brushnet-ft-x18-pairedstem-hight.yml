@@ -11,7 +11,7 @@ sde:
   eps: 0.005
 
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/?????/train/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
 
 brushnet:
   enabled: true
@@ -65,9 +65,9 @@ datasets:
   train:
     name: MuralPairedInpainting_Dataset
     mode: mural_paired_inpainting
-    dataroot_GT: /home/610-wws/Impainting/dataset/?????/train/cropped_images
-    dataroot_degraded: /home/610-wws/Impainting/dataset/?????/train/mask_merge
-    dataroot_mask: /home/610-wws/Impainting/dataset/?????/train/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/train/cropped_images
+    dataroot_degraded: /home/610-wws/Impainting/dataset/裁剪的图片/train/mask_merge
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/train/output_masks
     gt_mode: paired_true
     main_target_domain: gt
     condition_mu_domain: degraded
