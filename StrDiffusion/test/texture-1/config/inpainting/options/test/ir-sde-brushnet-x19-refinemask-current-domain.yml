@@ -98,7 +98,7 @@ mu_denoiser:
 
 path:
   pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x19-refinemask/models/best_G.pth
-  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
+  pretrain_model_Gs: /home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth
   pretrain_model_D: /home/610-wws/Impainting/StrDiffusion/test/discriminator.pth
   strict_load: false
   resume_state: null

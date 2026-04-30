@@ -1865,3 +1865,10 @@ Clean-up / restore note:
     - `mask_white_refine_dilate: 6`
     - `mask_white_refine_expand: 0`
   - x19 warm-starts from x18 best on purpose because x18 already established the correct paired supervision and coarse-color recovery.
+- Reminder from user confirmed and active test configs corrected: structure checkpoint path must remain
+  `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  (with the trailing `s` in `StrDiffusion+e00s`).
+  Fixed in active test configs:
+  - `ir-sde-brushnet-x18-pairedstem-hight-current-domain.yml`
+  - `ir-sde-brushnet-x19-refinemask-current-domain.yml`
+  - `ir-sde-brushnet-x20-strongmask-cleancompose-current-domain.yml`

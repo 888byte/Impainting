@@ -1,4 +1,4 @@
-name: ir-sde-brushnet-x18-pairedstem-hight-current-domain
+name: ir-sde-brushnet-x20-strongmask-cleancompose-current-domain
 suffix: null
 model: denoising
 distortion: inpainting
@@ -23,6 +23,10 @@ datasets:
     dataroot_color_prior: null
     dataroot_confidence: null
     gt_mode: partial
+    refine_mask_from_observed_white: true
+    mask_white_refine_threshold: 0.93
+    mask_white_refine_dilate: 10
+    mask_white_refine_expand: 1
     lut_path: /home/610-wws/Impainting/SSD-TS/pigment_lut49_xhq.npz
     lut_alpha: 0.85
     lut_beta: 0.15
@@ -109,10 +113,10 @@ inference:
   condition_known_source: degraded
   structure_source: prefill
   known_area_projection: true
-  compose_mask_dilate: 3
-  compose_feather: 4
+  compose_mask_dilate: 0
+  compose_feather: 0
   compose_white_guard: true
-  compose_white_guard_dilate: 4
+  compose_white_guard_dilate: 8
   compose_white_threshold: 0.95
   save_intermediates: false
   discriminator_guidance:
