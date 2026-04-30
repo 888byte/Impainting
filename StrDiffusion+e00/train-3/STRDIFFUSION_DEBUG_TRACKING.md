@@ -1810,3 +1810,33 @@ Clean-up / restore note:
       - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x17-hight-only-current-domain.yml`
     - corrected path segment:
       - `/home/610-wws/Impainting/dataset/裁剪的图片/...`
+
+- 2026-04-30 / x17 result conclusion:
+  - x17 confirmed that the previous diagnosis about the main state distribution was real:
+    - training uses `train.main_t_range=[0.65, 1.0]`
+    - `stats_timestep_high_ratio=1.0000`
+    - `stats_train_state_hole_mean` drops to roughly `0.02 ~ 0.03`, much closer to inference blank-hole states
+    - the failure mode changes from near-white collapse (`final_hole_mean ~ 0.97`) to a flatter pale fill (`final_hole_mean ~ 0.87`)
+  - However, hard samples still remain clearly worse than `prior_gt_l1`.
+  - This means the remaining dominant problem is not route mismatch, warm-start contamination, BrushNet on/off, or color-aux weight.
+
+- Structural finding after x17:
+  - The mural training dataset still does not provide a real paired GT target to the diffusion main loss.
+  - In `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\data\mural_inpainting_dataset.py`:
+    - line ~534 loads a single image:
+      - `degraded_img = self._load_image(img_path)`
+    - line ~557 builds the observed input from that same image:
+      - `observed_degraded = self._build_observed_input(degraded_img, mask)`
+    - line ~591 builds `gt` from that same image:
+      - `gt = self._generate_gt(degraded_img, mask, current_mode)`
+    - line ~484 shows `_generate_gt(...)` is only:
+      - `self.color_prior_gen.build_target(degraded_img, mask, mode=mode, feather_radius=7)`
+  - Therefore the training main target is still a synthetic target-like image generated from the same source image, not a true paired restoration GT.
+  - In contrast, the inference dataset does load a separate evaluation GT from `dataroot_GT`.
+  - This is now the primary structural explanation for why x13/x14/x15/x16/x17 can improve the failure mode but still cannot match the real GT on hard holes.
+
+- Actionable consequence:
+  - Do not continue stacking more route or loss tweaks on top of `mural_inpainting_dataset.py`.
+  - The next meaningful line must first decide whether a real paired training GT exists:
+    - if yes: rewrite the mural training dataset to load `degraded_full/current-domain` and `GT_true` separately, and use `GT_true` as the diffusion main target
+    - if no: accept that the current synthetic-target training setup cannot supervise the model toward the real test GT, so current expectations must be reduced or the supervision source must be redesigned

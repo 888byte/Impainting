@@ -59,6 +59,32 @@ def create_dataset(dataset_opt):
     # ============================================================
     # 壁画修复数据集（新增，不影响原有代码）
     # ============================================================
+    elif mode == 'mural_paired_inpainting':
+        from data.mural_paired_inpainting_dataset import MuralPairedInpaintingDataset as D
+        lut_path = dataset_opt.get('lut_path')
+        if not lut_path:
+            raise ValueError(
+                "mural_paired_inpainting requires datasets.*.lut_path to be set explicitly."
+            )
+        gt_mode = dataset_opt.get('gt_mode', 'paired_true')
+        prior_method = dataset_opt.get('prior_method', 'fast')
+        debug_mode = dataset_opt.get('debug_mode', False)
+        lut_alpha = dataset_opt.get('lut_alpha', 0.7)
+        lut_beta = dataset_opt.get('lut_beta', 0.3)
+        lut_inpaint_method = dataset_opt.get('lut_inpaint_method', 'telea')
+        lut_delta_gain = dataset_opt.get('lut_delta_gain', 1.0)
+
+        dataset = D(
+            opt=dataset_opt,
+            lut_path=lut_path,
+            gt_mode=gt_mode,
+            prior_method=prior_method,
+            debug_mode=debug_mode,
+            lut_alpha=lut_alpha,
+            lut_beta=lut_beta,
+            lut_inpaint_method=lut_inpaint_method,
+            lut_delta_gain=lut_delta_gain,
+        )
     elif mode == 'mural_inpainting':
         from data.mural_inpainting_dataset import MuralInpaintingDataset as D
         # 从 dataset_opt 中读取配置（配置现在在 datasets.train 下）
