@@ -1803,3 +1803,10 @@ Clean-up / restore note:
   - x17 keeps the x16 route exactly the same and changes only this structural variable:
     - the dominant main-loss states are now restricted to `t in [0.65T, 1.0T]`
     - this removes low / mid-t target leakage from the main loss instead of only adding a small auxiliary correction.
+  - Follow-up fix:
+    - the first x17 YAML draft accidentally contained garbled Chinese dataset path literals.
+    - fixed active files:
+      - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x17-hight-only.yml`
+      - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x17-hight-only-current-domain.yml`
+    - corrected path segment:
+      - `/home/610-wws/Impainting/dataset/裁剪的图片/...`
