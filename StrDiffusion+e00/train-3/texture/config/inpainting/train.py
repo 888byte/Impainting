@@ -677,9 +677,26 @@ def main():
                         )
                     condition_mu = condition_mu_source * mask_for_sde
 
-                timesteps, states = sde.generate_random_states(
-                    x0=training_target, mu=condition_mu
-                )
+                main_t_min_ratio = opt.get("train", {}).get("main_t_min_ratio", None)
+                main_t_max_ratio = opt.get("train", {}).get("main_t_max_ratio", None)
+                if main_t_min_ratio is not None or main_t_max_ratio is not None:
+                    total_T = int(opt.get("sde", {}).get("T", 400))
+                    t_lo_ratio = 0.0 if main_t_min_ratio is None else float(main_t_min_ratio)
+                    t_hi_ratio = 1.0 if main_t_max_ratio is None else float(main_t_max_ratio)
+                    t_lo = max(1, min(total_T, int(round(total_T * t_lo_ratio))))
+                    t_hi = max(t_lo, min(total_T, int(round(total_T * t_hi_ratio))))
+                    sampled_timesteps = torch.randint(
+                        low=t_lo,
+                        high=t_hi + 1,
+                        size=(training_target.shape[0], 1, 1, 1),
+                    ).long()
+                    timesteps, states = sde.generate_random_states_texture(
+                        x0=training_target, mu=condition_mu, timesteps=sampled_timesteps
+                    )
+                else:
+                    timesteps, states = sde.generate_random_states(
+                        x0=training_target, mu=condition_mu
+                    )
 
                 # Structure SDE mirrors texture semantics:
                 #   x0 target  <- target-domain training_target

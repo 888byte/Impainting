@@ -1754,3 +1754,52 @@ Clean-up / restore note:
     - `restore_S_guidance=false`
     - `structure_source=prefill`
   - This is the current active clean line. Older x12/x13/x14/x15 checkpoints should not be used as warm starts for it.
+
+- 2026-04-30 / x16 result conclusion:
+  - x16 clean-init **falsified** the remaining “bad warm start” hypothesis.
+  - Evidence:
+    - train log loads the original baseline trunk:
+      - `pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+    - x15 blank-hole auxiliary is active from the start:
+      - non-zero `loss_infer_x0`
+      - non-zero `loss_infer_x0_weighted`
+    - test route is clean:
+      - `unexpected=0`
+      - `condition_known_source=degraded`
+      - `structure_source=prefill`
+      - `restore_S_guidance=false`
+  - Yet x16 still converges to the same bright solution:
+    - `final_hole_mean ≈ 0.97`
+    - hard samples remain much worse than `prior_gt_l1`
+  - Therefore the remaining failure is **not** best explained by:
+    - a route typo,
+    - a leftover x14/x15 bright checkpoint,
+    - BrushNet being on/off,
+    - color auxiliary weight.
+
+- Structural finding after x16:
+  - The dominant mismatch is still in the **main training state distribution**.
+  - `train.py` still forms the main texture loss on:
+    - `timesteps, states = sde.generate_random_states(x0=training_target, mu=condition_mu)`
+  - `str_utils/sde_utils.py` shows this means:
+    - `state_mean = mu_bar(x0, timesteps)`
+    - where `mu_bar(x0, t) = mu + (x0 - mu) * exp(-...)`
+  - So for low / mid timesteps, hole states still contain strong target leakage.
+  - The x15/x16 blank-hole branch is only a small auxiliary correction on top of this:
+    - `loss_infer_x0_weighted` is typically `1e-4 ~ 6e-4`
+    - while `loss_main` remains `~2e-3 ~ 4e-3`
+  - This explains why x15/x16 still collapse into the bright basin even after route cleanup.
+
+- New active clean line after x16: x17 high-t-only main loss
+  - New train config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x17-hight-only.yml`
+  - New test config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x17-hight-only-current-domain.yml`
+  - Code change:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py`
+      now supports `train.main_t_min_ratio` / `train.main_t_max_ratio`.
+      When set, the **main** texture SDE states are sampled with explicit high timesteps via
+      `generate_random_states_texture(...)` instead of the unrestricted `generate_random_states(...)`.
+  - x17 keeps the x16 route exactly the same and changes only this structural variable:
+    - the dominant main-loss states are now restricted to `t in [0.65T, 1.0T]`
+    - this removes low / mid-t target leakage from the main loss instead of only adding a small auxiliary correction.

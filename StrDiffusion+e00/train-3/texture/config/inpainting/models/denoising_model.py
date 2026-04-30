@@ -166,6 +166,11 @@ class DenoisingModel(BaseModel):
             opt.get('train', {}).get('infer_x0_loss_weight', 0.0),
             opt.get('train', {}).get('infer_x0_grad', False),
         )
+        logger.info(
+            "[Model] train.main_t_range=[%s, %s]",
+            opt.get('train', {}).get('main_t_min_ratio', None),
+            opt.get('train', {}).get('main_t_max_ratio', None),
+        )
         
         # ============ 初始化 Self-Supervised Mu-Denoiser ============
         mu_denoiser_opt = opt.get('mu_denoiser', {})
