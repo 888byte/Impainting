@@ -116,6 +116,11 @@ class MuralInferenceDataset(data.Dataset):
         self.gt_mode = opt.get('gt_mode', 'partial')
         self.degraded_root = opt.get('dataroot_degraded')
         self.mask_root = opt.get('dataroot_mask')
+        self.refine_mask_from_observed_white = bool(opt.get('refine_mask_from_observed_white', False))
+        self.mask_white_refine_threshold = float(opt.get('mask_white_refine_threshold', 0.95))
+        self.mask_white_refine_dilate = int(opt.get('mask_white_refine_dilate', 6))
+        self.mask_white_refine_expand = int(opt.get('mask_white_refine_expand', 0))
+        self._mask_refine_log_count = 0
 
         self.degraded_paths = _list_image_paths(self.degraded_root)
         if not self.degraded_paths:
@@ -128,6 +133,48 @@ class MuralInferenceDataset(data.Dataset):
         self.gt_map = _build_stem_map(_list_image_paths(opt.get('dataroot_GT')))
         self.color_prior_map = _build_stem_map(_list_image_paths(opt.get('dataroot_color_prior')))
         self.confidence_map = _build_stem_map(_list_image_paths(opt.get('dataroot_confidence')))
+
+    def _refine_mask_from_observed(self, degraded: np.ndarray, mask_hole: np.ndarray, stem: str) -> np.ndarray:
+        if not self.refine_mask_from_observed_white:
+            return mask_hole
+
+        mask_bin = (mask_hole > 0.5).astype(np.uint8)
+        if mask_bin.max() == 0:
+            return mask_hole
+
+        threshold = float(np.clip(self.mask_white_refine_threshold, 0.0, 1.0))
+        white_like = (
+            (degraded[:, :, 0] >= threshold)
+            & (degraded[:, :, 1] >= threshold)
+            & (degraded[:, :, 2] >= threshold)
+        ).astype(np.uint8)
+
+        if self.mask_white_refine_dilate > 0:
+            k = 2 * self.mask_white_refine_dilate + 1
+            kernel = np.ones((k, k), dtype=np.uint8)
+            near_hole = cv2.dilate(mask_bin, kernel, iterations=1)
+        else:
+            near_hole = mask_bin
+
+        refined = np.maximum(mask_bin, white_like * near_hole)
+        if self.mask_white_refine_expand > 0:
+            k = 2 * self.mask_white_refine_expand + 1
+            kernel = np.ones((k, k), dtype=np.uint8)
+            refined = cv2.dilate(refined, kernel, iterations=1)
+
+        if self._mask_refine_log_count < 5:
+            original_ratio = float(mask_bin.mean())
+            refined_ratio = float(refined.mean())
+            if refined_ratio > original_ratio + 1e-4:
+                print(
+                    '[MuralInferenceDataset] refined mask from observed white boundary: '
+                    f'stem={stem} ratio {original_ratio:.4f}->{refined_ratio:.4f} '
+                    f'threshold={self.mask_white_refine_threshold:.3f} '
+                    f'dilate={self.mask_white_refine_dilate} expand={self.mask_white_refine_expand}'
+                )
+                self._mask_refine_log_count += 1
+
+        return refined.astype(np.float32)
 
     def __len__(self) -> int:
         return len(self.degraded_paths)
@@ -154,6 +201,7 @@ class MuralInferenceDataset(data.Dataset):
 
         mask_path = self._resolve_mask_path(stem)
         mask_hole = _load_mask(mask_path, (height, width))
+        mask_hole = self._refine_mask_from_observed(degraded, mask_hole, stem)
         mask_known = 1.0 - mask_hole
 
         sample = {

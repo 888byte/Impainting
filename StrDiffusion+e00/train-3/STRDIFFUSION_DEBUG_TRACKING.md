@@ -1840,3 +1840,28 @@ Clean-up / restore note:
   - The next meaningful line must first decide whether a real paired training GT exists:
     - if yes: rewrite the mural training dataset to load `degraded_full/current-domain` and `GT_true` separately, and use `GT_true` as the diffusion main target
     - if no: accept that the current synthetic-target training setup cannot supervise the model toward the real test GT, so current expectations must be reduced or the supervision source must be redesigned
+
+## 2026-04-30 x18 diagnosis -> x19 refine-mask line
+
+- x18 is the first line that clearly improves coarse color on hard samples under true paired supervision:
+  - `000098_center final_gt_l1=0.101340` vs `prior_gt_l1=0.204685`
+  - `000098_left final_gt_l1=0.135976` vs `prior_gt_l1=0.217610`
+- Remaining visible failure shifts from global white collapse to:
+  1. white halo / border around the hole;
+  2. weak texture.
+- Direct log evidence for the halo root cause:
+  - `cond_known(...white=0.0207)` on center and `0.0280` on left in x18 test logs.
+  - This means the current-domain `mask_merge` image still contains near-white pixels inside the region treated as known.
+  - `raw_gt_l1` is slightly lower than `final_gt_l1`, so final compose / known-area preservation is introducing some of the visible border.
+- Conclusion:
+  - The next structural fix should refine the binary hole mask using observed white boundary pixels, consistently in both train and test.
+  - This is not another generic parameter tweak; it addresses a concrete train/test data mismatch at the hole boundary.
+- New active line: `x19-refinemask`
+  - train dataset: `mural_paired_inpainting_dataset.py` now supports `refine_mask_from_observed_white`.
+  - test dataset: `mural_inference_dataset.py` now supports the same refinement.
+  - x19 configs enable:
+    - `refine_mask_from_observed_white: true`
+    - `mask_white_refine_threshold: 0.95`
+    - `mask_white_refine_dilate: 6`
+    - `mask_white_refine_expand: 0`
+  - x19 warm-starts from x18 best on purpose because x18 already established the correct paired supervision and coarse-color recovery.

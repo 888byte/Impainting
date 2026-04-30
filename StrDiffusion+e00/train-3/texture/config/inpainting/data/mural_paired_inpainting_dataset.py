@@ -84,6 +84,11 @@ class MuralPairedInpaintingDataset(Dataset):
         self.min_hole_ratio = float(opt.get('min_hole_ratio', 0.005))
         self.max_hole_ratio = float(opt.get('max_hole_ratio', 0.80))
         self._crop_retry_fail_count = 0
+        self.refine_mask_from_observed_white = bool(opt.get('refine_mask_from_observed_white', False))
+        self.mask_white_refine_threshold = float(opt.get('mask_white_refine_threshold', 0.95))
+        self.mask_white_refine_dilate = int(opt.get('mask_white_refine_dilate', 6))
+        self.mask_white_refine_expand = int(opt.get('mask_white_refine_expand', 0))
+        self._mask_refine_log_count = 0
 
         self.color_prior_gen = ColorPriorGenerator(
             lut_path=lut_path,
@@ -125,6 +130,12 @@ class MuralPairedInpaintingDataset(Dataset):
         print(f'  - degraded root: {self.degraded_root}')
         print(f'  - mask root: {self.mask_root}')
         print(f'  - gt_mode: {self.gt_mode}')
+        print(
+            '  - refine_mask_from_observed_white: '
+            f'{self.refine_mask_from_observed_white} '
+            f'(threshold={self.mask_white_refine_threshold:.3f}, '
+            f'dilate={self.mask_white_refine_dilate}, expand={self.mask_white_refine_expand})'
+        )
 
     def _resolve_mask_path(self, stem: str) -> Optional[str]:
         for base in _stem_candidates(stem):
@@ -176,6 +187,47 @@ class MuralPairedInpaintingDataset(Dataset):
         if mask.shape[:2] != target_hw:
             mask = cv2.resize(mask, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST)
         return ((mask > 127).astype(np.uint8) * 255)
+
+    def _refine_mask_from_observed(self, degraded: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if not self.refine_mask_from_observed_white:
+            return mask
+
+        mask_bin = (mask > 127).astype(np.uint8)
+        if mask_bin.max() == 0:
+            return mask
+
+        threshold_uint8 = int(np.clip(round(self.mask_white_refine_threshold * 255.0), 0, 255))
+        white_like = (degraded[:, :, 0] >= threshold_uint8) & (
+            degraded[:, :, 1] >= threshold_uint8
+        ) & (degraded[:, :, 2] >= threshold_uint8)
+        white_like = white_like.astype(np.uint8)
+
+        if self.mask_white_refine_dilate > 0:
+            k = 2 * self.mask_white_refine_dilate + 1
+            kernel = np.ones((k, k), dtype=np.uint8)
+            near_hole = cv2.dilate(mask_bin, kernel, iterations=1)
+        else:
+            near_hole = mask_bin
+
+        refined = np.maximum(mask_bin, white_like * near_hole)
+        if self.mask_white_refine_expand > 0:
+            k = 2 * self.mask_white_refine_expand + 1
+            kernel = np.ones((k, k), dtype=np.uint8)
+            refined = cv2.dilate(refined, kernel, iterations=1)
+
+        if self._mask_refine_log_count < 5:
+            original_ratio = float(mask_bin.mean())
+            refined_ratio = float(refined.mean())
+            if refined_ratio > original_ratio + 1e-4:
+                print(
+                    '[MuralPairedInpaintingDataset] refined mask from observed white boundary: '
+                    f'ratio {original_ratio:.4f} -> {refined_ratio:.4f}, '
+                    f'threshold={self.mask_white_refine_threshold:.3f}, '
+                    f'dilate={self.mask_white_refine_dilate}, expand={self.mask_white_refine_expand}'
+                )
+                self._mask_refine_log_count += 1
+
+        return (refined * 255).astype(np.uint8)
 
     def _resize_triplet_if_needed(self, gt: np.ndarray, degraded: np.ndarray, mask: np.ndarray):
         h, w = gt.shape[:2]
@@ -283,6 +335,7 @@ class MuralPairedInpaintingDataset(Dataset):
         if degraded.shape[:2] != gt.shape[:2]:
             degraded = cv2.resize(degraded, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_LINEAR)
         mask = self._load_mask(sample['mask_path'], gt.shape[:2])
+        mask = self._refine_mask_from_observed(degraded, mask)
 
         gt, degraded, mask = self._random_crop_triplet(gt, degraded, mask)
 
