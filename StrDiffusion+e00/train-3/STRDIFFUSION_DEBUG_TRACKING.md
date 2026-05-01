@@ -1913,3 +1913,47 @@ Clean-up / restore note:
 - The intent of x21 is not to re-solve color or boundary issues. It is specifically to test whether a weak, zero-init residual texture refinement path can add detail on top of the now-stable x20 base.
 
 - 2026-05-01 x21 follow-up fix: the first x21 test YAML accidentally kept the old x18 checkpoint path. Active test config now points to `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x21-weaktexture/models/best_G.pth`.
+
+## 2026-05-01 x21 result -> x22 explicit high-frequency texture supervision
+
+- x21 is structurally healthy but not sufficient to recover texture.
+- Evidence from `train_ir-sde-brushnet-ft-x21-weaktexture_260501-132307.log`:
+  - `loaded 246/272 ... missing=26, unexpected=0`; the only new parameters are the `mglc_mid` texture weights.
+  - `freeze_pretrained_until_iter=800` behaved as expected.
+  - the training stays numerically stable, but no new instability or strong texture-learning signal appears beyond the existing blank-hole loss.
+- Evidence from `test_ir-sde-brushnet-x21-weaktexture-current-domain_260501-224041.log`:
+  - `texture_core.enabled(config/runtime)=True/True`
+  - `restore_S_guidance=False`
+  - `final_white_ratio_hole=0.000000`
+  - tracked-sample metrics stay almost identical to x20:
+    - bottom `0.065632` vs x20 `0.066680`
+    - center `0.092090` vs x20 `0.092132`
+    - left `0.089848` vs x20 `0.090027`
+    - right `0.088087` vs x20 `0.086613`
+    - top `0.108010` vs x20 `0.107236`
+- Conclusion:
+  - x21 proves that simply enabling a weak zero-init texture branch is not enough to create meaningful hole texture on top of x20.
+  - This is no longer a route bug or a mask/compose bug; it is a missing supervision signal for texture detail.
+- New active line: `x22-hftexture`
+  - Keep x20/x21's already validated route:
+    - paired current-domain supervision
+    - refined mask
+    - clean compose
+    - `known_only`
+    - high-t main loss
+    - blank-hole `infer_x0`
+  - Add explicit hole-only high-frequency supervision on the inference-like blank-hole prediction:
+    - compute a luminance high-pass of `x0_hat_infer`
+    - compute a luminance high-pass of `training_target`
+    - apply hole-only L1 with a small weight
+  - Active train config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x22-hftexture.yml`
+  - Active test config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x22-hftexture-current-domain.yml`
+  - Initial settings:
+    - warm start from x21 best
+    - `texture_hf_loss_weight: 0.02`
+    - `texture_hf_loss_start_iter: 0`
+    - `texture_hf_blur_kernel: 11`
+- YAML path fix recorded:
+  - the first x22 YAML drafts contained garbled Chinese dataset roots; active x22 train/test YAMLs now use the correct `/home/610-wws/Impainting/dataset/裁剪的图片/...` paths.

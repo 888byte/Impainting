@@ -317,6 +317,25 @@ class DenoisingModel(BaseModel):
                     f"clamp_b_min={self.color_aux_clamp_b_min}"
                 )
 
+            # x22: explicit hole-only high-frequency texture supervision.
+            # x21 proved that adding a weak texture branch alone does not
+            # materially improve texture.  This auxiliary term supervises the
+            # luminance high-pass response of the inference-like blank-hole x0
+            # prediction so the texture branch has a concrete signal beyond the
+            # coarse reconstruction loss.
+            self.texture_hf_loss_weight = float(train_opt.get("texture_hf_loss_weight", 0.0))
+            self.texture_hf_loss_start_iter = int(train_opt.get("texture_hf_loss_start_iter", 0))
+            self.texture_hf_blur_kernel = int(train_opt.get("texture_hf_blur_kernel", 11))
+            if self.texture_hf_blur_kernel > 1 and self.texture_hf_blur_kernel % 2 == 0:
+                self.texture_hf_blur_kernel += 1
+            if self.texture_hf_loss_weight > 0:
+                logger.info(
+                    "[Model] high-frequency texture loss enabled: "
+                    f"weight={self.texture_hf_loss_weight}, "
+                    f"start_iter={self.texture_hf_loss_start_iter}, "
+                    f"blur_kernel={self.texture_hf_blur_kernel}"
+                )
+
             # optimizers
             self.optimizer_d = torch.optim.Adam(self.dis.parameters(), lr = 1e-4, betas = (0.5, 0.99))#1e-4
             
@@ -663,6 +682,24 @@ class DenoisingModel(BaseModel):
         padded = F.pad(tensor, (pad, pad, pad, pad), mode="reflect")
         return F.avg_pool2d(padded, kernel_size=kernel_size, stride=1)
 
+    def _rgb_to_luma(self, tensor):
+        if tensor is None:
+            return None
+        if tensor.shape[1] == 1:
+            return tensor
+        return (
+            0.299 * tensor[:, 0:1]
+            + 0.587 * tensor[:, 1:2]
+            + 0.114 * tensor[:, 2:3]
+        )
+
+    def _highpass_luma(self, tensor, kernel_size):
+        luma = self._rgb_to_luma(tensor)
+        if luma is None:
+            return None
+        blurred = self._blur_for_color_aux(luma, kernel_size)
+        return luma - blurred
+
     def _estimate_x0_from_noise(self, sde, xt, noise, timesteps, mu_tensor=None):
         batch = xt.shape[0]
         t = timesteps.reshape(batch, 1, 1, 1).long().to(xt.device)
@@ -794,6 +831,8 @@ class DenoisingModel(BaseModel):
         # ============ x12: weak hole-only LUT color auxiliary ============
         color_aux_loss_val = 0.0
         color_aux_loss_weighted_val = 0.0
+        texture_hf_loss_val = 0.0
+        texture_hf_loss_weighted_val = 0.0
         if (
             self.color_aux_loss_weight > 0
             and step >= self.color_aux_loss_start_iter
@@ -817,6 +856,10 @@ class DenoisingModel(BaseModel):
         # ============ x15: inference-like blank-hole x0 supervision ============
         infer_x0_loss_val = 0.0
         infer_x0_loss_weighted_val = 0.0
+        x0_hat_infer_for_texture = None
+        infer_hole_mask_for_texture = None
+        infer_hole_denom_for_texture = None
+        chosen_for_texture = None
         if (
             self.infer_x0_loss_weight > 0
             and self.infer_x0_grad
@@ -874,6 +917,32 @@ class DenoisingModel(BaseModel):
             loss = loss + infer_x0_loss_weighted
             infer_x0_loss_val = float(infer_x0_loss.item())
             infer_x0_loss_weighted_val = float(infer_x0_loss_weighted.item())
+            x0_hat_infer_for_texture = x0_hat_infer
+            infer_hole_mask_for_texture = infer_hole_mask
+            infer_hole_denom_for_texture = infer_hole_denom
+            chosen_for_texture = chosen
+
+        # ============ x22: hole-only high-frequency texture supervision ============
+        if (
+            self.texture_hf_loss_weight > 0
+            and step >= self.texture_hf_loss_start_iter
+            and x0_hat_infer_for_texture is not None
+            and chosen_for_texture is not None
+        ):
+            pred_hp = self._highpass_luma(
+                x0_hat_infer_for_texture, self.texture_hf_blur_kernel
+            )
+            target_hp = self._highpass_luma(
+                training_target[chosen_for_texture], self.texture_hf_blur_kernel
+            )
+            infer_hole_mask_gray = infer_hole_mask_for_texture[:, :1]
+            texture_hf_loss = (
+                (pred_hp - target_hp).abs() * infer_hole_mask_gray
+            ).sum() / infer_hole_denom_for_texture.clamp_min(1.0)
+            texture_hf_loss_weighted = self.texture_hf_loss_weight * texture_hf_loss
+            loss = loss + texture_hf_loss_weighted
+            texture_hf_loss_val = float(texture_hf_loss.item())
+            texture_hf_loss_weighted_val = float(texture_hf_loss_weighted.item())
 
         # ============ 可选 g_score 辅助损失 ============
         g_score_loss_val = 0.0
@@ -922,6 +991,8 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_color_aux_weighted"] = color_aux_loss_weighted_val
         self.log_dict["loss_infer_x0"] = infer_x0_loss_val
         self.log_dict["loss_infer_x0_weighted"] = infer_x0_loss_weighted_val
+        self.log_dict["loss_texture_hf"] = texture_hf_loss_val
+        self.log_dict["loss_texture_hf_weighted"] = texture_hf_loss_weighted_val
         self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 
