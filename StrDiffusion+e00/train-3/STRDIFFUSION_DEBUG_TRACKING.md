@@ -1872,3 +1872,44 @@ Clean-up / restore note:
   - `ir-sde-brushnet-x18-pairedstem-hight-current-domain.yml`
   - `ir-sde-brushnet-x19-refinemask-current-domain.yml`
   - `ir-sde-brushnet-x20-strongmask-cleancompose-current-domain.yml`
+
+
+## 2026-05-01 x20 stable baseline -> x21 weak texture line
+
+- x20 trained with paired supervision + blank-hole + refined mask + clean compose is now the first stable coarse-color baseline.
+- Evidence from `test_ir-sde-brushnet-x20-strongmask-cleancompose-current-domain_260501-111501.log`:
+  - white-border failure is effectively solved (`final_white_ratio_hole=0` on the tracked samples);
+  - final compose no longer degrades the raw prediction (`raw_gt_l1 == final_gt_l1` on tracked samples);
+  - coarse color / region reconstruction is much better than prior:
+    - center `0.092132` vs prior `0.196733`
+    - left `0.090027` vs prior `0.203064`
+    - top `0.107236` vs prior `0.206919`
+- Remaining issue after x20 is no longer route or boundary correctness. It is mostly:
+  1. texture is still flat / washed;
+  2. fine details are missing even when coarse colors are acceptable.
+- Current interpretation:
+  - x20 is a valid base model for the current-domain task;
+  - the next step should preserve x20's paired supervision, blank-hole semantics, refined mask, and clean compose;
+  - only a weak texture refinement branch should be added.
+- New active line: `x21-weaktexture`
+  - train config:
+    - `D:\code\kyihua\Impainting\StrDiffusion+e00	rain-3	exture\config\inpainting\options	rain\ir-sde-brushnet-ft-x21-weaktexture.yml`
+  - test config:
+    - `D:\code\kyihua\Impainting\StrDiffusion	est	exture-1\config\inpainting\options	est\ir-sde-brushnet-x21-weaktexture-current-domain.yml`
+- x21 keeps the x20 route unchanged and only adds a conservative texture core:
+  - warm start from x20 best
+  - `texture_core.enabled: true`
+  - `insert_mid: true`
+  - `insert_dec: false`
+  - `backend: sem_lite`
+  - `use_mask_gate: true`
+  - `gate_hidden: 8`
+  - `boundary_width: 2`
+  - `zero_init_last: true`
+  - short pretrained freeze (`freeze_pretrained_until_iter: 800`) so the new zero-init texture branch learns first without disturbing x20 coarse colors
+  - smaller trunk lr and larger new-module lr:
+    - `lr_G=2e-7`
+    - `lr_new=3e-6`
+- The intent of x21 is not to re-solve color or boundary issues. It is specifically to test whether a weak, zero-init residual texture refinement path can add detail on top of the now-stable x20 base.
+
+- 2026-05-01 x21 follow-up fix: the first x21 test YAML accidentally kept the old x18 checkpoint path. Active test config now points to `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x21-weaktexture/models/best_G.pth`.
