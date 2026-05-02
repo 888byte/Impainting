@@ -120,6 +120,8 @@ def _build_tb_scalar_map(logs):
     add("stats/pred_opt_diff_hole", "stats_pred_opt_diff_hole")
     add("stats/pred_opt_diff_known", "stats_pred_opt_diff_known")
     add("stats/timestep_mean", "stats_timestep_mean")
+    add("stats/main_mid_blank_ratio", "stats_main_mid_blank_ratio")
+    add("stats/main_mid_blank_t_mean", "stats_main_mid_blank_t_mean")
     # Color prior stats
     add("stats/color_prior_hole_mean", "stats_color_prior_hole_mean")
     add("stats/color_prior_hole_white_ratio", "stats_color_prior_hole_white_ratio")
@@ -232,6 +234,96 @@ def _build_structure_from_image(source_image, device):
 def _build_structure_from_target(training_target, device):
     """Backward-compatible alias for target-domain structure construction."""
     return _build_structure_from_image(training_target, device)
+
+
+def _sample_timestep_range(total_T, batch_size, t_min_ratio, t_max_ratio, device):
+    t_lo_ratio = 0.0 if t_min_ratio is None else float(t_min_ratio)
+    t_hi_ratio = 1.0 if t_max_ratio is None else float(t_max_ratio)
+    t_lo = max(1, min(total_T, int(round(total_T * t_lo_ratio))))
+    t_hi = max(t_lo, min(total_T, int(round(total_T * t_hi_ratio))))
+    return torch.randint(
+        low=t_lo,
+        high=t_hi + 1,
+        size=(batch_size, 1, 1, 1),
+        device=device,
+    ).long()
+
+
+def _build_main_states_hybrid_mid_blank_hole(
+    sde,
+    training_target,
+    condition_mu,
+    mask_known,
+    high_t_min_ratio,
+    high_t_max_ratio,
+    mid_blank_ratio,
+    mid_t_min_ratio,
+    mid_t_max_ratio,
+):
+    """
+    Build x25 main-branch training states.
+
+    Base route stays on the stable x17/x20 high-t forward states.
+    A configurable subset of the batch is then replaced with mid-t hybrid
+    states whose known area still follows the normal forward process, while
+    the hole area is switched to inference-like blank-hole states
+    (condition_mu + sigma * noise).  This changes the *main* optimization
+    distribution instead of adding another auxiliary branch.
+    """
+    batch = training_target.shape[0]
+    device = training_target.device
+    total_T = int(getattr(sde, "T", 400))
+
+    high_timesteps = _sample_timestep_range(
+        total_T, batch, high_t_min_ratio, high_t_max_ratio, device
+    )
+    timesteps, states = sde.generate_random_states_texture(
+        x0=training_target, mu=condition_mu, timesteps=high_timesteps
+    )
+
+    if mask_known.shape[1] != training_target.shape[1]:
+        mask_known_3c = mask_known.expand_as(training_target)
+    else:
+        mask_known_3c = mask_known
+    mask_known_3c = mask_known_3c.to(dtype=training_target.dtype, device=device)
+
+    mid_count = int(round(float(mid_blank_ratio) * float(batch)))
+    mid_count = max(0, min(batch, mid_count))
+    debug = {
+        "stats_main_state_mode_hybrid_mid_blank": 1.0,
+        "stats_main_mid_blank_ratio": float(mid_count / float(batch)) if batch > 0 else 0.0,
+        "stats_main_mid_blank_count": float(mid_count),
+        "stats_main_mid_blank_t_mean": 0.0,
+        "stats_main_high_forward_ratio": float((batch - mid_count) / float(batch)) if batch > 0 else 0.0,
+        "stats_main_high_forward_count": float(batch - mid_count),
+    }
+
+    if mid_count > 0:
+        chosen = torch.randperm(batch, device=device)[:mid_count]
+        mid_timesteps = _sample_timestep_range(
+            total_T, mid_count, mid_t_min_ratio, mid_t_max_ratio, device
+        )
+        sigma_mid = sde.sigma_bar(mid_timesteps).to(
+            dtype=training_target.dtype, device=device
+        )
+        shared_noise_mid = torch.randn_like(training_target[chosen])
+        sde.set_mu(condition_mu[chosen])
+        forward_mid_mean = sde.mu_bar(training_target[chosen], mid_timesteps)
+        forward_mid_state = forward_mid_mean + shared_noise_mid * sigma_mid
+        blank_mid_state = condition_mu[chosen] + shared_noise_mid * sigma_mid
+        hybrid_mid_state = (
+            forward_mid_state * mask_known_3c[chosen]
+            + blank_mid_state * (1 - mask_known_3c[chosen])
+        )
+        states = states.clone()
+        timesteps = timesteps.clone()
+        states[chosen] = hybrid_mid_state.to(dtype=states.dtype, device=states.device)
+        timesteps[chosen] = mid_timesteps
+        debug["stats_main_mid_blank_t_mean"] = float(mid_timesteps.float().mean().item())
+
+    sde.set_mu(condition_mu)
+    return timesteps, states, debug
+
 
 def main():
     #### setup options of three networks
@@ -682,26 +774,52 @@ def main():
                         )
                     condition_mu = condition_mu_source * mask_for_sde
 
-                main_t_min_ratio = opt.get("train", {}).get("main_t_min_ratio", None)
-                main_t_max_ratio = opt.get("train", {}).get("main_t_max_ratio", None)
-                if main_t_min_ratio is not None or main_t_max_ratio is not None:
-                    total_T = int(opt.get("sde", {}).get("T", 400))
-                    t_lo_ratio = 0.0 if main_t_min_ratio is None else float(main_t_min_ratio)
-                    t_hi_ratio = 1.0 if main_t_max_ratio is None else float(main_t_max_ratio)
-                    t_lo = max(1, min(total_T, int(round(total_T * t_lo_ratio))))
-                    t_hi = max(t_lo, min(total_T, int(round(total_T * t_hi_ratio))))
-                    sampled_timesteps = torch.randint(
-                        low=t_lo,
-                        high=t_hi + 1,
-                        size=(training_target.shape[0], 1, 1, 1),
-                    ).long()
-                    timesteps, states = sde.generate_random_states_texture(
-                        x0=training_target, mu=condition_mu, timesteps=sampled_timesteps
+                train_cfg = opt.get("train", {})
+                main_state_mode = str(train_cfg.get("main_state_mode", "forward")).lower()
+                main_t_min_ratio = train_cfg.get("main_t_min_ratio", None)
+                main_t_max_ratio = train_cfg.get("main_t_max_ratio", None)
+                main_state_debug = {
+                    "stats_main_state_mode_hybrid_mid_blank": 0.0,
+                    "stats_main_mid_blank_ratio": 0.0,
+                    "stats_main_mid_blank_count": 0.0,
+                    "stats_main_mid_blank_t_mean": 0.0,
+                    "stats_main_high_forward_ratio": 1.0,
+                    "stats_main_high_forward_count": float(training_target.shape[0]),
+                }
+                if main_state_mode in ("hybrid_mid_blank_hole", "mixed_mid_blank_hole"):
+                    timesteps, states, main_state_debug = _build_main_states_hybrid_mid_blank_hole(
+                        sde=sde,
+                        training_target=training_target,
+                        condition_mu=condition_mu,
+                        mask_known=mask_for_sde,
+                        high_t_min_ratio=main_t_min_ratio,
+                        high_t_max_ratio=main_t_max_ratio,
+                        mid_blank_ratio=train_cfg.get("main_mid_blank_ratio", 0.0),
+                        mid_t_min_ratio=train_cfg.get("main_mid_t_min_ratio", 0.20),
+                        mid_t_max_ratio=train_cfg.get("main_mid_t_max_ratio", 0.55),
                     )
+                elif main_state_mode in ("forward", ""):
+                    if main_t_min_ratio is not None or main_t_max_ratio is not None:
+                        sampled_timesteps = _sample_timestep_range(
+                            int(opt.get("sde", {}).get("T", 400)),
+                            training_target.shape[0],
+                            main_t_min_ratio,
+                            main_t_max_ratio,
+                            training_target.device,
+                        )
+                        timesteps, states = sde.generate_random_states_texture(
+                            x0=training_target, mu=condition_mu, timesteps=sampled_timesteps
+                        )
+                    else:
+                        timesteps, states = sde.generate_random_states(
+                            x0=training_target, mu=condition_mu
+                        )
                 else:
-                    timesteps, states = sde.generate_random_states(
-                        x0=training_target, mu=condition_mu
+                    raise ValueError(
+                        f"Unsupported train.main_state_mode={main_state_mode!r}; "
+                        "expected forward|hybrid_mid_blank_hole"
                     )
+                model.main_state_debug = main_state_debug
 
                 # Structure SDE mirrors texture semantics:
                 #   x0 target  <- target-domain training_target

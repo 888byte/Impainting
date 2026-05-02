@@ -2012,3 +2012,209 @@ Clean-up / restore note:
 - Conclusion: the remaining bottleneck is structural. High-t-only main supervision preserves coarse color/shape but suppresses the original trunk's mid/low-t texture-learning regime.
 - x24 fix: keep the stable high-t main loss and high-t blank-hole branch, but add a second inference-like blank-hole branch at mid-t (`infer_x0_mid_*`) plus an optional mid-t HF loss (`texture_hf_mid_*`) so the trunk can relearn local continuity and texture.
 - Warm start for x24 should come from x20 stable base, not x23, because x23 did not provide stable texture gains.
+
+
+## 2026-05-02 x24 code/config sync check + first log result
+
+- Sync check for the active x24 line is complete:
+  - train code: `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+    - added config parsing + logging for `infer_x0_mid_*`
+    - added actual mid-t blank-hole branch execution through `_run_blankhole_x0_branch(...)`
+    - added actual mid-t HF trunk loss on `x0_hat_mid_for_texture`
+    - added `loss_infer_x0_mid`, `loss_infer_x0_mid_weighted`, `loss_texture_hf_mid`, `loss_texture_hf_mid_weighted` to `log_dict`
+  - train loop / TB sync: `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py`
+    - still keeps `main_t_range=[0.65, 1.0]` on the dominant main branch
+    - tensorboard scalar map now includes `train/loss_infer_x0_mid` and `train/loss_texture_hf_mid`
+  - active train YAML:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x24-mixedt-trunktexture.yml`
+  - active test YAML:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x24-mixedt-trunktexture-current-domain.yml`
+  - route-critical items are aligned on both sides:
+    - paired current-domain supervision
+    - refined mask
+    - clean compose
+    - `sde_mu_hole_mode=known_only`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=false`
+    - structure checkpoint path remains `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- Evidence from training log `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x24-mixedt-trunktexture_260502-183242.log`:
+  - warm start is correct: x24 loads x20 best with `loaded 246/246`, `missing=0`, `unexpected=0`
+  - new x24 losses are really active from the start:
+    - iter 20: `loss_infer_x0_mid=4.5537e-01`, `loss_infer_x0_mid_weighted=6.8306e-04`
+    - iter 20: `loss_texture_hf_mid=4.4365e-02`, `loss_texture_hf_mid_weighted=2.2182e-04`
+    - later they stay non-zero (e.g. iter 2660 still has `loss_infer_x0_mid=7.7031e-02`, `loss_texture_hf_mid=1.5153e-02`)
+  - however, the dominant main branch distribution is unchanged:
+    - `train.main_t_range=[0.65, 1.0]`
+    - training log keeps reporting `stats_timestep_high_ratio=1.0000`
+  - this means x24 adds a real mid-t auxiliary branch, but it does **not** change the main diffusion branch away from the x17~x23 high-t-only regime.
+
+- Evidence from test log `C:\Users\admin\Desktop\test_ir-sde-brushnet-x24-mixedt-trunktexture-current-domain_260502-205825.log`:
+  - load/route are clean:
+    - `loaded 246/246` for G, `151/151` for structure Gs, `38/38` for D
+    - `brushnet.enabled(config/runtime)=True/True`
+    - `texture_core.enabled(config/runtime)=False/False`
+    - `restore_S_guidance=False`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `deterministic_reverse=True`, `discriminator_guidance=False`
+    - blank-hole start is still correct: `x_init_hole(mean=0.0000 ... white=0.0000)`
+  - but the first x24 inference run is **not** a stable improvement over x20. The old white failure reappears on hard samples even though the route is correct.
+  - direct hard-sample evidence:
+    - `000098_bottom`: `final_gt_l1=0.156462` vs `prior_gt_l1=0.077797`, `final_white_ratio_hole=0.661004`
+    - `000098_right`: `final_gt_l1=0.211414` vs `prior_gt_l1=0.096517`, `final_white_ratio_hole=0.676488`
+    - `000098_center`: still better than prior in L1 (`0.133461` vs `0.196733`) but already shows large white ratio `0.352206`
+  - some easier / moderate samples still improve:
+    - `000098_left`: `0.082424` vs `0.203064`
+    - `000098_top`: `0.095890` vs `0.206919`
+    - `000180_left`: `0.069776` vs `0.095763`
+  - but this is not enough to call x24 stable, because the failure mode on the harder holes is qualitatively the old one again.
+  - additional confidence-slice evidence on failed samples shows the whitening is strongest in the low-confidence hole subset, while `prior_hole` / `lut_hole` themselves are not white. So the regression happens during the reverse trajectory, not from a white input prior.
+
+- Important note about the available x24 test log:
+  - this log is partial; it stops during `000180_right`, so it is not a full 250-image sweep.
+  - still, the route checks are decisive and the early hard-sample failures are strong enough to reject x24 as a new stable base.
+
+- Current x24 conclusion:
+  - x24 code/config sync is correct.
+  - x24 did activate the intended mid-t auxiliary supervision.
+  - but x24 did **not** solve the dominant structural issue, because the main branch still trains entirely on high-t states.
+  - first inference evidence shows regression back toward the old white-mask failure on hard samples.
+  - Therefore x24 should be treated as a failed auxiliary-only fix, not as the next stable line after x20.
+
+
+## 2026-05-02 x24 white failure: not best explained by "just train longer"
+
+- User question addressed against:
+  - train log `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x24-mixedt-trunktexture_260502-183242.log`
+  - test log `C:\Users\admin\Desktop\test_ir-sde-brushnet-x24-mixedt-trunktexture-current-domain_260502-205825.log`
+- Important nuance:
+  - x24 is **not fully finished training yet** in the available log; it reaches only about `iter 2720 / 6000`, so we cannot call it fully converged in the optimization sense.
+  - But the visible white failure on hard samples is **not best explained** as a simple remaining-convergence issue.
+
+- Reasons this is not just "undertrained":
+  1. route / input side is already correct:
+     - blank-hole init is correct: `x_init_hole(mean=0.0000 ... white=0.0000)`
+     - `condition_known_source=degraded`, `structure_source=prefill`, `restore_S_guidance=false`
+     - `deterministic_reverse=true`, `discriminator_guidance=false`
+  2. whiteness is generated by the model trajectory itself, not by final compose:
+     - failed samples have `raw_hole == final_hole`
+     - failed samples have `raw_gt_l1 == final_gt_l1`
+     - so compose is not introducing the white region
+  3. the prior inputs are not white on the failed samples:
+     - e.g. `000098_bottom/right` both have non-white `prior_hole` / `lut_hole`
+     - yet `raw_hole/final_hole` become heavily white
+     - therefore whitening happens during reverse prediction, not because the input prior is already white
+  4. the failure is selective and confidence-structured, not a global "model still blurry everywhere" symptom:
+     - some samples improve strongly
+     - some hard samples regress catastrophically to white
+     - confidence-slice logs show low-confidence hole subsets whiten more severely
+  5. the core structural issue remains in training:
+     - `stats_timestep_high_ratio=1.0000` throughout x24 training
+     - so the **main branch** still only trains on high-t states
+     - x24 mid-t branch is real, but still auxiliary; it does not replace the dominant main-branch state distribution
+
+- Additional practical note:
+  - test YAML loads `best_G.pth`, i.e. the train-side `best-texture` checkpoint.
+  - In current training code, `best_G` is selected by EMA-smoothed `loss_main`, **not** by white-ratio, hard-sample GT quality, or inference-time tracked metrics.
+  - So even if later checkpoints look better visually on hard holes, the current best-checkpoint rule does not specifically optimize for that failure mode.
+
+- Current interpretation:
+  - continuing x24 training may still move metrics somewhat, because the run is only at `2720/6000`.
+  - however, it is **not justified** to expect that simply training longer on the same x24 objective will reliably remove the hard-sample white failure.
+  - the white issue is better explained by the remaining structural mismatch: mid-t supervision is still auxiliary while the dominant trunk remains high-t-only.
+
+
+## 2026-05-02 x25 main-distribution fix line (no network-structure change)
+
+- User constraint reinforced:
+  - time is limited; prefer the shortest path toward the final structural fix
+  - avoid any train/inference network mismatch
+  - every change must be tracked here
+  - original StrDiffusion reference tree consulted:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\train\texture\config\inpainting`
+
+- x25 design decision:
+  - Do **not** change the network structure.
+  - Do **not** add another auxiliary branch.
+  - Change the **main branch training-state distribution** directly.
+- Reason:
+  - x24 already proved that mid-t auxiliary supervision can be wired correctly, but hard-sample whitening still reappears because the dominant main branch remains `high-t-only`.
+  - Since time is limited, the lowest-risk high-value move is to keep train/test architecture identical and only change what the main loss actually sees.
+
+- Core x25 idea:
+  - keep most of the main batch on the stable x17/x20 high-t forward states
+  - replace a controlled subset of the main batch with **mid-t hybrid blank-hole states**:
+    - known area: still normal forward state from `(training_target, condition_mu, t_mid)`
+    - hole area: switched to inference-like blank-hole state `condition_mu + sigma(t_mid) * noise`
+  - this makes the **main loss itself** see more inference-like hole states, instead of relying on a weak side branch
+
+- Why this is safer than changing the model structure:
+  - the same `ConditionalUNetWithBrushNet` is used for both train and test
+  - no checkpoint-key or runtime-graph divergence is introduced
+  - test config only needs a new checkpoint path; inference route semantics remain unchanged
+
+- Code changes:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py`
+    - added `_sample_timestep_range(...)`
+    - added `_build_main_states_hybrid_mid_blank_hole(...)`
+    - added `train.main_state_mode`
+    - when `main_state_mode=hybrid_mid_blank_hole`, the main batch is built as:
+      - base high-t forward states for the whole batch
+      - then overwrite a subset with x25 hybrid mid-t blank-hole states
+    - added per-step debug stats passed to the model:
+      - `stats_main_state_mode_hybrid_mid_blank`
+      - `stats_main_mid_blank_ratio`
+      - `stats_main_mid_blank_count`
+      - `stats_main_mid_blank_t_mean`
+      - `stats_main_high_forward_ratio`
+      - `stats_main_high_forward_count`
+    - TB scalar map now includes:
+      - `stats/main_mid_blank_ratio`
+      - `stats/main_mid_blank_t_mean`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+    - `optimize_parameters(...)` now logs the x25 `main_state_debug` diagnostics when present
+
+- New active x25 configs:
+  - train:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x25-mainmixed-blankhole.yml`
+  - test:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x25-mainmixed-blankhole-current-domain.yml`
+
+- x25 config policy:
+  - warm start still from x20 stable base
+  - inference route unchanged from the stable current-domain line:
+    - paired current-domain supervision
+    - refined mask
+    - clean compose
+    - `known_only`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=false`
+    - structure checkpoint path remains `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - x24 auxiliary mid-t branches are intentionally turned off in x25:
+    - `infer_x0_mid_loss_weight: 0.0`
+    - `texture_hf_mid_loss_weight: 0.0`
+  - x25 changes only the dominant main branch distribution, not the model graph
+
+- Initial x25 training settings:
+  - `main_state_mode: hybrid_mid_blank_hole`
+  - `main_t_min_ratio: 0.65`
+  - `main_t_max_ratio: 1.0`
+  - `main_mid_blank_ratio: 0.25`
+  - `main_mid_t_min_ratio: 0.20`
+  - `main_mid_t_max_ratio: 0.55`
+  - keep high-t inference-like blank-hole branch from the stable line:
+    - `infer_x0_loss_weight: 0.002`
+
+- Expected diagnostic signature once x25 starts training:
+  - `stats_timestep_high_ratio` should drop below `1.0000`
+  - `stats_main_mid_blank_ratio` should be around `0.25`
+  - `stats_main_mid_blank_t_mean` should land near the configured mid-t band
+  - if the hypothesis is right, hard-sample whitening should reduce **without** needing a network-route change
+
+- Static validation completed after the code edit:
+  - `train.py` passes `py_compile`
+  - `models/denoising_model.py` passes `py_compile`
+  - x25 train/test YAMLs point to the intended experiment names and checkpoint paths

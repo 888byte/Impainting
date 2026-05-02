@@ -1232,6 +1232,13 @@ class DenoisingModel(BaseModel):
         self.log_dict["stats_timestep_mean"] = float(timesteps_float.mean().item())
         high_t_min_ratio = float(getattr(sde, "high_t_min_ratio", 0.65))
         self.log_dict["stats_timestep_high_ratio"] = float((timesteps_float >= (high_t_min_ratio * float(getattr(sde, "T", 400)))).float().mean().item())
+        main_state_debug = getattr(self, "main_state_debug", None)
+        if isinstance(main_state_debug, dict):
+            for key, value in main_state_debug.items():
+                try:
+                    self.log_dict[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
 
         texture_condition_gap = ((self.condition - self.original_degraded) * self.mask).abs().sum() / self.mask.expand_as(self.condition).sum().clamp_min(1.0)
         self.log_dict["texture_condition_gap"] = float(texture_condition_gap.item())
