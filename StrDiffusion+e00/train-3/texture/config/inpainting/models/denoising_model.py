@@ -300,6 +300,30 @@ class DenoisingModel(BaseModel):
                     f"microbatch={self.infer_x0_microbatch}"
                 )
 
+            # x24: add a second lower/mid-t inference-like blank-hole branch so
+            # the main trunk can relearn local color continuity and texture.
+            # x17-x23 kept the main loss almost exclusively in high-t states,
+            # which stabilised current-domain training but also removed the
+            # natural mid/low-t detail-learning regime that the original trunk
+            # used to recover texture.
+            self.infer_x0_mid_loss_weight = float(train_opt.get("infer_x0_mid_loss_weight", 0.0))
+            self.infer_x0_mid_loss_start_iter = int(train_opt.get("infer_x0_mid_loss_start_iter", 0))
+            self.infer_x0_mid_t_min_ratio = float(train_opt.get("infer_x0_mid_t_min_ratio", 0.20))
+            self.infer_x0_mid_t_max_ratio = float(train_opt.get("infer_x0_mid_t_max_ratio", 0.60))
+            self.infer_x0_mid_grad = bool(train_opt.get("infer_x0_mid_grad", False))
+            self.infer_x0_mid_loss_interval = max(1, int(train_opt.get("infer_x0_mid_loss_interval", 1)))
+            self.infer_x0_mid_microbatch = max(0, int(train_opt.get("infer_x0_mid_microbatch", 0)))
+            if self.infer_x0_mid_loss_weight > 0:
+                logger.info(
+                    "[Model] inference-like mid-t blank-hole x0 loss enabled: "
+                    f"weight={self.infer_x0_mid_loss_weight}, "
+                    f"start_iter={self.infer_x0_mid_loss_start_iter}, "
+                    f"t_range=[{self.infer_x0_mid_t_min_ratio}, {self.infer_x0_mid_t_max_ratio}], "
+                    f"grad={self.infer_x0_mid_grad}, "
+                    f"interval={self.infer_x0_mid_loss_interval}, "
+                    f"microbatch={self.infer_x0_mid_microbatch}"
+                )
+
             # x12: keep the main diffusion target on the stable raw domain,
             # and use the LUT domain only as a weak hole-only color auxiliary.
             self.color_aux_loss_weight = float(train_opt.get("color_aux_loss_weight", 0.0))
@@ -342,6 +366,24 @@ class DenoisingModel(BaseModel):
                     f"start_iter={self.texture_hf_loss_start_iter}, "
                     f"blur_kernel={self.texture_hf_blur_kernel}, "
                     f"source={self.texture_hf_source}"
+                )
+
+            # x24: optional extra HF supervision on the new mid-t
+            # inference-like trunk branch.  This remains trunk-supervision
+            # rather than an auxiliary module path.
+            self.texture_hf_mid_loss_weight = float(train_opt.get("texture_hf_mid_loss_weight", 0.0))
+            self.texture_hf_mid_loss_start_iter = int(train_opt.get("texture_hf_mid_loss_start_iter", 0))
+            self.texture_hf_mid_blur_kernel = int(
+                train_opt.get("texture_hf_mid_blur_kernel", self.texture_hf_blur_kernel)
+            )
+            if self.texture_hf_mid_blur_kernel > 1 and self.texture_hf_mid_blur_kernel % 2 == 0:
+                self.texture_hf_mid_blur_kernel += 1
+            if self.texture_hf_mid_loss_weight > 0:
+                logger.info(
+                    "[Model] mid-t high-frequency trunk loss enabled: "
+                    f"weight={self.texture_hf_mid_loss_weight}, "
+                    f"start_iter={self.texture_hf_mid_loss_start_iter}, "
+                    f"blur_kernel={self.texture_hf_mid_blur_kernel}"
                 )
 
             # optimizers
@@ -720,6 +762,97 @@ class DenoisingModel(BaseModel):
         x0_hat = mu + (xt - mu - sigma * noise) / b.clamp_min(self.color_aux_clamp_b_min)
         return x0_hat.clamp(0.0, 1.0)
 
+    def _run_blankhole_x0_branch(
+        self,
+        sde,
+        training_target,
+        brushnet_kwargs,
+        t_min_ratio,
+        t_max_ratio,
+        microbatch,
+        grad_enabled=True,
+        structure_optimum=None,
+    ):
+        batch_size = training_target.shape[0]
+        microbatch = max(1, min(batch_size, microbatch if microbatch > 0 else batch_size))
+        chosen = torch.randperm(batch_size, device=training_target.device)[:microbatch]
+
+        total_T = int(getattr(sde, "T", 400))
+        t_lo = max(2, min(total_T, int(round(total_T * float(t_min_ratio)))))
+        t_hi = max(t_lo, min(total_T, int(round(total_T * float(t_max_ratio)))))
+        infer_t = torch.randint(
+            low=t_lo,
+            high=t_hi + 1,
+            size=(microbatch, 1, 1, 1),
+            device=training_target.device,
+        ).long()
+
+        infer_mu = self.condition[chosen]
+        infer_sigma = sde.sigma_bar(infer_t).to(dtype=infer_mu.dtype, device=infer_mu.device)
+        infer_state = infer_mu + torch.randn_like(infer_mu) * infer_sigma
+
+        infer_brushnet_kwargs = {}
+        for key, value in brushnet_kwargs.items():
+            if torch.is_tensor(value) and value.shape[0] == batch_size:
+                infer_brushnet_kwargs[key] = value[chosen]
+            else:
+                infer_brushnet_kwargs[key] = value
+
+        infer_structure_optimum = None
+        if torch.is_tensor(structure_optimum) and structure_optimum.shape[0] == batch_size:
+            infer_structure_optimum = structure_optimum[chosen]
+
+        sde.set_mu(infer_mu)
+        try:
+            if grad_enabled:
+                infer_model_output = sde.noise_fn(
+                    infer_state,
+                    infer_t.squeeze(),
+                    infer_structure_optimum,
+                    **infer_brushnet_kwargs,
+                )
+            else:
+                with torch.no_grad():
+                    infer_model_output = sde.noise_fn(
+                        infer_state,
+                        infer_t.squeeze(),
+                        infer_structure_optimum,
+                        **infer_brushnet_kwargs,
+                    )
+            if isinstance(infer_model_output, (tuple, list)):
+                infer_noise = infer_model_output[0]
+            else:
+                infer_noise = infer_model_output
+            if grad_enabled:
+                x0_hat_infer = self._estimate_x0_from_noise(
+                    sde, infer_state, infer_noise, infer_t, mu_tensor=infer_mu
+                )
+            else:
+                with torch.no_grad():
+                    x0_hat_infer = self._estimate_x0_from_noise(
+                        sde, infer_state, infer_noise, infer_t, mu_tensor=infer_mu
+                    )
+        finally:
+            sde.set_mu(self.condition)
+
+        infer_hole_mask = (1 - self.mask[chosen]).expand_as(x0_hat_infer)
+        infer_hole_denom = infer_hole_mask.sum().clamp_min(1.0)
+        infer_x0_loss = (
+            (x0_hat_infer - training_target[chosen]).abs() * infer_hole_mask
+        ).sum() / infer_hole_denom
+
+        return {
+            "chosen": chosen,
+            "timesteps": infer_t,
+            "state": infer_state,
+            "mu": infer_mu,
+            "noise": infer_noise,
+            "x0_hat": x0_hat_infer,
+            "hole_mask": infer_hole_mask,
+            "hole_denom": infer_hole_denom,
+            "x0_loss": infer_x0_loss,
+        }
+
     def compute_mu_clean_no_grad(self, condition_lut, mask_known, confidence=None, step=None):
         """
         Return target-domain MuCleanr output for the current condition_lut.
@@ -885,71 +1018,41 @@ class DenoisingModel(BaseModel):
         # ============ x15: inference-like blank-hole x0 supervision ============
         infer_x0_loss_val = 0.0
         infer_x0_loss_weighted_val = 0.0
+        infer_x0_mid_loss_val = 0.0
+        infer_x0_mid_loss_weighted_val = 0.0
         x0_hat_infer_for_texture = None
         infer_hole_mask_for_texture = None
         infer_hole_denom_for_texture = None
         chosen_for_texture = None
+        x0_hat_mid_for_texture = None
+        infer_hole_mask_mid_for_texture = None
+        infer_hole_denom_mid_for_texture = None
+        chosen_mid_for_texture = None
         if (
             self.infer_x0_loss_weight > 0
             and self.infer_x0_grad
             and step >= self.infer_x0_loss_start_iter
             and (step % self.infer_x0_loss_interval) == 0
         ):
-            batch_size = training_target.shape[0]
-            microbatch = self.infer_x0_microbatch if self.infer_x0_microbatch > 0 else batch_size
-            microbatch = max(1, min(batch_size, microbatch))
-            chosen = torch.randperm(batch_size, device=training_target.device)[:microbatch]
-
-            total_T = int(getattr(sde, "T", 400))
-            t_lo = max(2, min(total_T, int(round(total_T * self.infer_x0_t_min_ratio))))
-            t_hi = max(t_lo, min(total_T, int(round(total_T * self.infer_x0_t_max_ratio))))
-            infer_t = torch.randint(
-                low=t_lo,
-                high=t_hi + 1,
-                size=(microbatch, 1, 1, 1),
-                device=training_target.device,
-            ).long()
-
-            infer_mu = self.condition[chosen]
-            infer_sigma = sde.sigma_bar(infer_t).to(dtype=infer_mu.dtype, device=infer_mu.device)
-            infer_state = infer_mu + torch.randn_like(infer_mu) * infer_sigma
-
-            infer_brushnet_kwargs = {}
-            for key, value in brushnet_kwargs.items():
-                if torch.is_tensor(value) and value.shape[0] == batch_size:
-                    infer_brushnet_kwargs[key] = value[chosen]
-                else:
-                    infer_brushnet_kwargs[key] = value
-
-            sde.set_mu(infer_mu)
-            infer_model_output = sde.noise_fn(
-                infer_state,
-                infer_t.squeeze(),
-                None,
-                **infer_brushnet_kwargs,
+            infer_branch = self._run_blankhole_x0_branch(
+                sde=sde,
+                training_target=training_target,
+                brushnet_kwargs=brushnet_kwargs,
+                t_min_ratio=self.infer_x0_t_min_ratio,
+                t_max_ratio=self.infer_x0_t_max_ratio,
+                microbatch=self.infer_x0_microbatch,
+                grad_enabled=self.infer_x0_grad,
+                structure_optimum=None,
             )
-            if isinstance(infer_model_output, (tuple, list)):
-                infer_noise = infer_model_output[0]
-            else:
-                infer_noise = infer_model_output
-            x0_hat_infer = self._estimate_x0_from_noise(
-                sde, infer_state, infer_noise, infer_t, mu_tensor=infer_mu
-            )
-            sde.set_mu(self.condition)
-
-            infer_hole_mask = (1 - self.mask[chosen]).expand_as(x0_hat_infer)
-            infer_hole_denom = infer_hole_mask.sum().clamp_min(1.0)
-            infer_x0_loss = (
-                (x0_hat_infer - training_target[chosen]).abs() * infer_hole_mask
-            ).sum() / infer_hole_denom
+            infer_x0_loss = infer_branch["x0_loss"]
             infer_x0_loss_weighted = self.infer_x0_loss_weight * infer_x0_loss
             loss = loss + infer_x0_loss_weighted
             infer_x0_loss_val = float(infer_x0_loss.item())
             infer_x0_loss_weighted_val = float(infer_x0_loss_weighted.item())
-            x0_hat_infer_for_texture = x0_hat_infer
-            infer_hole_mask_for_texture = infer_hole_mask
-            infer_hole_denom_for_texture = infer_hole_denom
-            chosen_for_texture = chosen
+            x0_hat_infer_for_texture = infer_branch["x0_hat"]
+            infer_hole_mask_for_texture = infer_branch["hole_mask"]
+            infer_hole_denom_for_texture = infer_branch["hole_denom"]
+            chosen_for_texture = infer_branch["chosen"]
 
         # ============ x22: hole-only high-frequency texture supervision ============
         if (
@@ -973,6 +1076,57 @@ class DenoisingModel(BaseModel):
             loss = loss + texture_hf_loss_weighted
             texture_hf_loss_val = float(texture_hf_loss.item())
             texture_hf_loss_weighted_val = float(texture_hf_loss_weighted.item())
+
+        # ============ x24: inference-like mid-t blank-hole x0 supervision ============
+        texture_hf_mid_loss_val = 0.0
+        texture_hf_mid_loss_weighted_val = 0.0
+        if (
+            self.infer_x0_mid_loss_weight > 0
+            and self.infer_x0_mid_grad
+            and step >= self.infer_x0_mid_loss_start_iter
+            and (step % self.infer_x0_mid_loss_interval) == 0
+        ):
+            infer_mid_branch = self._run_blankhole_x0_branch(
+                sde=sde,
+                training_target=training_target,
+                brushnet_kwargs=brushnet_kwargs,
+                t_min_ratio=self.infer_x0_mid_t_min_ratio,
+                t_max_ratio=self.infer_x0_mid_t_max_ratio,
+                microbatch=self.infer_x0_mid_microbatch,
+                grad_enabled=self.infer_x0_mid_grad,
+                structure_optimum=None,
+            )
+            infer_x0_mid_loss = infer_mid_branch["x0_loss"]
+            infer_x0_mid_loss_weighted = self.infer_x0_mid_loss_weight * infer_x0_mid_loss
+            loss = loss + infer_x0_mid_loss_weighted
+            infer_x0_mid_loss_val = float(infer_x0_mid_loss.item())
+            infer_x0_mid_loss_weighted_val = float(infer_x0_mid_loss_weighted.item())
+            x0_hat_mid_for_texture = infer_mid_branch["x0_hat"]
+            infer_hole_mask_mid_for_texture = infer_mid_branch["hole_mask"]
+            infer_hole_denom_mid_for_texture = infer_mid_branch["hole_denom"]
+            chosen_mid_for_texture = infer_mid_branch["chosen"]
+
+        # ============ x24: mid-t trunk high-frequency supervision ============
+        if (
+            self.texture_hf_mid_loss_weight > 0
+            and step >= self.texture_hf_mid_loss_start_iter
+            and x0_hat_mid_for_texture is not None
+            and chosen_mid_for_texture is not None
+        ):
+            pred_hp_mid = self._highpass_luma(
+                x0_hat_mid_for_texture, self.texture_hf_mid_blur_kernel
+            )
+            target_hp_mid = self._highpass_luma(
+                training_target[chosen_mid_for_texture], self.texture_hf_mid_blur_kernel
+            )
+            infer_hole_mask_mid_gray = infer_hole_mask_mid_for_texture[:, :1]
+            texture_hf_mid_loss = (
+                (pred_hp_mid - target_hp_mid).abs() * infer_hole_mask_mid_gray
+            ).sum() / infer_hole_denom_mid_for_texture.clamp_min(1.0)
+            texture_hf_mid_loss_weighted = self.texture_hf_mid_loss_weight * texture_hf_mid_loss
+            loss = loss + texture_hf_mid_loss_weighted
+            texture_hf_mid_loss_val = float(texture_hf_mid_loss.item())
+            texture_hf_mid_loss_weighted_val = float(texture_hf_mid_loss_weighted.item())
 
         # ============ 可选 g_score 辅助损失 ============
         g_score_loss_val = 0.0
@@ -1021,10 +1175,14 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_color_aux_weighted"] = color_aux_loss_weighted_val
         self.log_dict["loss_infer_x0"] = infer_x0_loss_val
         self.log_dict["loss_infer_x0_weighted"] = infer_x0_loss_weighted_val
+        self.log_dict["loss_infer_x0_mid"] = infer_x0_mid_loss_val
+        self.log_dict["loss_infer_x0_mid_weighted"] = infer_x0_mid_loss_weighted_val
         self.log_dict["loss_texture_hf"] = texture_hf_loss_val
         self.log_dict["loss_texture_hf_weighted"] = texture_hf_loss_weighted_val
         self.log_dict["loss_texture_hf_main"] = texture_hf_main_loss_val
         self.log_dict["loss_texture_hf_main_weighted"] = texture_hf_main_loss_weighted_val
+        self.log_dict["loss_texture_hf_mid"] = texture_hf_mid_loss_val
+        self.log_dict["loss_texture_hf_mid_weighted"] = texture_hf_mid_loss_weighted_val
         self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 

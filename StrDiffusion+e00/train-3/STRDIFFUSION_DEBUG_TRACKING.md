@@ -2004,3 +2004,11 @@ Clean-up / restore note:
   - the first x23 YAML drafts inherited garbled Chinese dataset roots; active x23 train/test YAMLs have been corrected to `/home/610-wws/Impainting/dataset/裁剪的图片/...`
   - active x23 test YAML keeps the correct structure checkpoint path:
     - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+
+## 2026-05-02 x24 mixed-t trunk texture line
+- Observation from x20/x21/x22/x23: route is stable and white-border issue is largely solved, but texture remains flat.
+- Evidence: x23 enabled direct trunk HF supervision, yet `stats_timestep_high_ratio` stayed at `1.0000`, meaning the main trunk still only saw high-t states.
+- Conclusion: the remaining bottleneck is structural. High-t-only main supervision preserves coarse color/shape but suppresses the original trunk's mid/low-t texture-learning regime.
+- x24 fix: keep the stable high-t main loss and high-t blank-hole branch, but add a second inference-like blank-hole branch at mid-t (`infer_x0_mid_*`) plus an optional mid-t HF loss (`texture_hf_mid_*`) so the trunk can relearn local continuity and texture.
+- Warm start for x24 should come from x20 stable base, not x23, because x23 did not provide stable texture gains.
