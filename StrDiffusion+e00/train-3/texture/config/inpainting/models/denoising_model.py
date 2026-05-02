@@ -326,6 +326,13 @@ class DenoisingModel(BaseModel):
             self.texture_hf_loss_weight = float(train_opt.get("texture_hf_loss_weight", 0.0))
             self.texture_hf_loss_start_iter = int(train_opt.get("texture_hf_loss_start_iter", 0))
             self.texture_hf_blur_kernel = int(train_opt.get("texture_hf_blur_kernel", 11))
+            self.texture_hf_source = str(train_opt.get("texture_hf_source", "infer")).lower()
+            if self.texture_hf_source not in {"infer", "main", "both"}:
+                logger.warning(
+                    "[Model] unsupported texture_hf_source=%s, fallback to infer",
+                    self.texture_hf_source,
+                )
+                self.texture_hf_source = "infer"
             if self.texture_hf_blur_kernel > 1 and self.texture_hf_blur_kernel % 2 == 0:
                 self.texture_hf_blur_kernel += 1
             if self.texture_hf_loss_weight > 0:
@@ -333,7 +340,8 @@ class DenoisingModel(BaseModel):
                     "[Model] high-frequency texture loss enabled: "
                     f"weight={self.texture_hf_loss_weight}, "
                     f"start_iter={self.texture_hf_loss_start_iter}, "
-                    f"blur_kernel={self.texture_hf_blur_kernel}"
+                    f"blur_kernel={self.texture_hf_blur_kernel}, "
+                    f"source={self.texture_hf_source}"
                 )
 
             # optimizers
@@ -833,6 +841,8 @@ class DenoisingModel(BaseModel):
         color_aux_loss_weighted_val = 0.0
         texture_hf_loss_val = 0.0
         texture_hf_loss_weighted_val = 0.0
+        texture_hf_main_loss_val = 0.0
+        texture_hf_main_loss_weighted_val = 0.0
         if (
             self.color_aux_loss_weight > 0
             and step >= self.color_aux_loss_start_iter
@@ -852,6 +862,25 @@ class DenoisingModel(BaseModel):
             loss = loss + color_aux_loss_weighted
             color_aux_loss_val = float(color_aux_loss.item())
             color_aux_loss_weighted_val = float(color_aux_loss_weighted.item())
+
+        # ============ x23: direct main-branch high-frequency supervision ============
+        if (
+            self.texture_hf_loss_weight > 0
+            and step >= self.texture_hf_loss_start_iter
+            and self.texture_hf_source in {"main", "both"}
+        ):
+            x0_hat_main = self._estimate_x0_from_noise(sde, self.state, noise, timesteps)
+            main_hole_mask = 1 - self.mask
+            main_hole_denom = main_hole_mask.sum().clamp_min(1.0)
+            pred_hp_main = self._highpass_luma(x0_hat_main, self.texture_hf_blur_kernel)
+            target_hp_main = self._highpass_luma(training_target, self.texture_hf_blur_kernel)
+            texture_hf_main_loss = (
+                (pred_hp_main - target_hp_main).abs() * main_hole_mask
+            ).sum() / main_hole_denom
+            texture_hf_main_loss_weighted = self.texture_hf_loss_weight * texture_hf_main_loss
+            loss = loss + texture_hf_main_loss_weighted
+            texture_hf_main_loss_val = float(texture_hf_main_loss.item())
+            texture_hf_main_loss_weighted_val = float(texture_hf_main_loss_weighted.item())
 
         # ============ x15: inference-like blank-hole x0 supervision ============
         infer_x0_loss_val = 0.0
@@ -928,6 +957,7 @@ class DenoisingModel(BaseModel):
             and step >= self.texture_hf_loss_start_iter
             and x0_hat_infer_for_texture is not None
             and chosen_for_texture is not None
+            and self.texture_hf_source in {"infer", "both"}
         ):
             pred_hp = self._highpass_luma(
                 x0_hat_infer_for_texture, self.texture_hf_blur_kernel
@@ -993,6 +1023,8 @@ class DenoisingModel(BaseModel):
         self.log_dict["loss_infer_x0_weighted"] = infer_x0_loss_weighted_val
         self.log_dict["loss_texture_hf"] = texture_hf_loss_val
         self.log_dict["loss_texture_hf_weighted"] = texture_hf_loss_weighted_val
+        self.log_dict["loss_texture_hf_main"] = texture_hf_main_loss_val
+        self.log_dict["loss_texture_hf_main_weighted"] = texture_hf_main_loss_weighted_val
         self.log_dict["loss_g_score"] = g_score_loss_val
         self.log_dict["stats_g_score_aux_enabled"] = 1.0 if g_score is not None else 0.0
 

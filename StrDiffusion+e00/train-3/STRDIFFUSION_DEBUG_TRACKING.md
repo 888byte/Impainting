@@ -1957,3 +1957,50 @@ Clean-up / restore note:
     - `texture_hf_blur_kernel: 11`
 - YAML path fix recorded:
   - the first x22 YAML drafts contained garbled Chinese dataset roots; active x22 train/test YAMLs now use the correct `/home/610-wws/Impainting/dataset/裁剪的图片/...` paths.
+
+## 2026-05-02 x22 result -> x23 direct trunk high-frequency supervision
+
+- x22 confirms a key distinction:
+  - the current route is stable;
+  - white-border / compose failures are no longer the main issue;
+  - but explicit infer-branch HF loss plus weak texture_core still does not create convincing texture.
+- Evidence from `train_ir-sde-brushnet-ft-x22-hftexture_260502-005345.log`:
+  - `loss_texture_hf` / `loss_texture_hf_weighted` are active and non-zero;
+  - blank-hole `loss_infer_x0` remains active;
+  - training is numerically stable.
+- Evidence from `test_ir-sde-brushnet-x22-hftexture-current-domain_260502-103757.log`:
+  - `texture_core.enabled(config/runtime)=True/True`
+  - `restore_S_guidance=False`
+  - `final_white_ratio_hole=0.000000`
+  - metrics remain very close to x21/x20 on the tracked samples; improvements are too small and inconsistent to count as real texture recovery.
+- Interpretation:
+  - original StrDiffusion texture came primarily from the **main diffusion trunk**;
+  - in x20/x21/x22, we deliberately protected the trunk to stabilize current-domain supervision and pushed most “texture pressure” onto auxiliary paths (`texture_core`, infer-branch HF loss);
+  - this keeps coarse color stable, but it also explains why visible texture does not come back.
+- New active line: `x23-trunkhftexture`
+  - Keep x20’s validated current-domain route:
+    - paired supervision
+    - refined mask
+    - clean compose
+    - `known_only`
+    - high-t main loss
+    - blank-hole `infer_x0`
+  - Turn **off** `texture_core` again.
+  - Add **direct hole-only HF supervision on the main branch prediction** (`x0_hat_main`) so the base diffusion trunk itself relearns texture under the stable route.
+  - Active train config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x23-trunkhftexture.yml`
+  - Active test config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x23-trunkhftexture-current-domain.yml`
+  - Initial settings:
+    - warm start from x20 best
+    - `texture_core.enabled: false`
+    - `texture_hf_source: main`
+    - `texture_hf_loss_weight: 0.01`
+    - `texture_hf_blur_kernel: 11`
+    - `lr_G: 1e-6`
+    - `lr_new: 1e-6`
+    - `freeze_pretrained_until_iter: 0`
+- x23-specific fixes recorded:
+  - the first x23 YAML drafts inherited garbled Chinese dataset roots; active x23 train/test YAMLs have been corrected to `/home/610-wws/Impainting/dataset/裁剪的图片/...`
+  - active x23 test YAML keeps the correct structure checkpoint path:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
