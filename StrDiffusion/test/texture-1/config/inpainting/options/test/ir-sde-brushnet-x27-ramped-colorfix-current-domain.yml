@@ -11,15 +11,15 @@ sde:
   eps: 0.005
 
 degradation:
-  mask_root: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?test/output_masks
+  mask_root: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
 
 datasets:
   test:
     name: Mural_Inference_Dataset
     mode: mural_inference
-    dataroot_degraded: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?test/mask_merge
-    dataroot_mask: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?test/output_masks
-    dataroot_GT: /home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?test/cropped_images
+    dataroot_degraded: /home/610-wws/Impainting/dataset/裁剪的图片/test/mask_merge
+    dataroot_mask: /home/610-wws/Impainting/dataset/裁剪的图片/test/output_masks
+    dataroot_GT: /home/610-wws/Impainting/dataset/裁剪的图片/test/cropped_images
     dataroot_color_prior: null
     dataroot_confidence: null
     gt_mode: partial
