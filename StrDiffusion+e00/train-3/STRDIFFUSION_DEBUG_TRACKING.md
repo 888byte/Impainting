@@ -2555,3 +2555,111 @@ Clean-up / restore note:
   - the late `6000_G` checkpoint is not a better final model; it re-whitens hard samples and even reintroduces white on easier ones
   - therefore, do **not** spend more time expecting a later x26 checkpoint to rescue the remaining white/pink issues
   - if time is limited, the correct next move is to leave x26 checkpoint selection as solved and move to the next minimal-change branch (`x27`) rather than continue probing more x26 snapshots
+
+
+## 2026-05-03 x27 regression verdict: the GT color-aux branch makes the white failure worse; kill x27 and return to x26 as the final white-stable base
+
+- Compared logs:
+  - train:
+    - `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x27-ramped-colorfix_260503-150518.log`
+  - test:
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x27-ramped-colorfix-current-domain_260503-190251.log` (`best_G`)
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x27-ramped-colorfix-current-domain_260503-190559.log` (`best_total_G`)
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x27-ramped-colorfix-current-domain_260503-190848.log` (`latest_G`)
+
+- x27 runtime hygiene is correct:
+  - warm start is exactly from x20 stable base:
+    - `pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x20-strongmask-cleancompose/models/best_G.pth`
+  - test route is still the stable one:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=False`
+  - structure checkpoint path remains `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - therefore x27's regression is **not** a route mismatch, **not** a wrong structure checkpoint, and **not** a wrong warm start
+
+- x27 code/config difference vs x26 is minimal but decisive:
+  - x26:
+    - `color_aux_loss_weight: 0.0`
+  - x27:
+    - `color_aux_loss_weight: 0.01`
+    - `color_aux_target_domain: gt`
+    - `best_save_start_iter: 1500`
+  - since x27 `latest_G` is also worse than x26, this is **not** just a best-checkpoint selection problem
+  - the only new training signal with explanatory power is the x27 GT low-frequency color auxiliary
+
+- Direct hard-sample comparison, x26 `best_G` vs x27 `best_G`:
+  - `000098_bottom`
+    - x26: `final_gt_l1=0.096073`, `final_white_ratio_hole=0.438620`
+    - x27: `final_gt_l1=0.135102`, `final_white_ratio_hole=0.609356`
+  - `000098_center`
+    - x26: `final_gt_l1=0.105230`, `final_white_ratio_hole=0.231778`
+    - x27: `final_gt_l1=0.122997`, `final_white_ratio_hole=0.375447`
+  - `000098_left`
+    - x26: `final_gt_l1=0.082415`, `final_white_ratio_hole=0.000000`
+    - x27: `final_gt_l1=0.079915`, `final_white_ratio_hole=0.042519`
+  - `000098_right`
+    - x26: `final_gt_l1=0.166833`, `final_white_ratio_hole=0.575777`
+    - x27: `final_gt_l1=0.178829`, `final_white_ratio_hole=0.656248`
+  - `000098_top`
+    - x26: `final_gt_l1=0.095655`, `final_white_ratio_hole=0.000000`
+    - x27: `final_gt_l1=0.095174`, `final_white_ratio_hole=0.061422`
+
+- x27 checkpoint comparison shows the whole line is unstable, not just one checkpoint:
+  - `best_G` and `best_total_G` are almost the same bad line:
+    - `000098_bottom`: `0.609356` vs `0.610808`
+    - `000098_center`: `0.375447` vs `0.361924`
+    - `000098_right`: `0.656248` vs `0.673848`
+  - `latest_G` is even worse:
+    - `000098_bottom`: `final_white_ratio_hole=0.757555`
+    - `000098_center`: `final_white_ratio_hole=0.402042`
+    - `000098_right`: `final_white_ratio_hole=0.795515`
+  - conclusion: x27 is a dead branch for anti-white purposes; do not continue it
+
+- Interpretation:
+  - x26 had already shown that the remaining white problem lives in the low-confidence hole subset during the late reverse trajectory
+  - x27's GT low-frequency color auxiliary pushes the trunk toward a brighter coarse hole solution and re-strengthens the old white attractor
+  - because the regression appears in `best_G`, `best_total_G`, and `latest_G`, x27 should be treated as a full objective-level regression, not a checkpoint-picking accident
+
+
+## 2026-05-03 x28 final white-fix base: resume from x26 `best_G`, remove x27 regression term, keep the x26 anti-white objective unchanged
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x28-x26resume-whitefixfinal.yml`
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x28-x26resume-whitefixfinal-current-domain.yml`
+
+- x28 policy:
+  - treat x26 `best_G` as the current best anti-white base and continue from it directly
+  - warm start path is hard-guarded to:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x26-ramped-smallmainmix/models/best_G.pth`
+  - keep the x26 anti-white objective intact:
+    - `color_aux_loss_weight: 0.0`
+    - `sde_mu_hole_mode: known_only`
+    - `main_state_mode: hybrid_mid_blank_hole`
+    - `main_mid_blank_ratio: 0.10`
+    - `infer_x0_mid_loss_weight: 0.0015`
+    - `texture_hf_mid_loss_weight: 0.005`
+  - remove x27's GT color-anchor regression signal entirely
+
+- Why x28 resumes from x26 instead of restarting from x20:
+  - x26 is the best white-stable checkpoint line currently observed
+  - x27 proved that restarting from x20 and injecting extra objectives can easily drag the trunk back into the white basin
+  - with time limited, the least-risk final move is to continue from the known-good x26 anti-white base rather than relearn it
+
+- Why x28 also changes the fine-tuning schedule:
+  - x26 `6000_G` was worse than x26 `best_G`, so long continuation at the old schedule can drift back toward the bad basin
+  - x28 therefore uses a conservative refinement schedule:
+    - lower LR: `lr_G=2e-7`
+    - shorter run: `niter=2500`
+    - faster checkpoint cadence: `save_checkpoint_freq=500`
+    - early best selection: `best_save_start_iter=200`
+  - x28 also removes the old ramp on resume:
+    - `main_mid_blank_ratio_start=0.10`
+    - `main_mid_blank_ratio_warmup_iter=0`
+  - this keeps the resumed x26 objective in its intended steady regime from iter 0, instead of replaying the cold-start ramp designed for x20
+
+- Expected x28 diagnostic signature:
+  1. train log must show x26 `best_G.pth` as the actual warm start
+  2. `stats_main_mid_blank_ratio_requested` should stay at `0.10` from the start
+  3. first probe should compare against x26 `best_G` immediately after the first saved checkpoint (500 or early `best_G`)
+  4. success criterion is simple: the `000098_bottom/center/right` white ratios must not exceed the x26 `best_G` baseline again
