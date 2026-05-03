@@ -120,6 +120,7 @@ def _build_tb_scalar_map(logs):
     add("stats/pred_opt_diff_hole", "stats_pred_opt_diff_hole")
     add("stats/pred_opt_diff_known", "stats_pred_opt_diff_known")
     add("stats/timestep_mean", "stats_timestep_mean")
+    add("stats/main_mid_blank_ratio_requested", "stats_main_mid_blank_ratio_requested")
     add("stats/main_mid_blank_ratio", "stats_main_mid_blank_ratio")
     add("stats/main_mid_blank_t_mean", "stats_main_mid_blank_t_mean")
     # Color prior stats
@@ -249,6 +250,42 @@ def _sample_timestep_range(total_T, batch_size, t_min_ratio, t_max_ratio, device
     ).long()
 
 
+def _resolve_scheduled_ratio(train_cfg, base_key, current_step):
+    target_ratio = float(train_cfg.get(base_key, 0.0) or 0.0)
+    start_ratio = float(train_cfg.get(f"{base_key}_start", target_ratio) or 0.0)
+    warmup_iter = int(train_cfg.get(f"{base_key}_warmup_iter", 0) or 0)
+
+    if warmup_iter <= 0:
+        return target_ratio
+
+    progress = min(max(float(current_step) / float(warmup_iter), 0.0), 1.0)
+    return start_ratio + (target_ratio - start_ratio) * progress
+
+
+def _normalize_compare_path(path_value):
+    if not path_value:
+        return None
+    normalized = str(path_value).replace("\\", "/").rstrip("/")
+    return normalized.lower()
+
+
+def _assert_expected_path(opt, actual_key, expected_key):
+    path_opt = opt.get("path", {})
+    expected_path = path_opt.get(expected_key, None)
+    if not expected_path:
+        return
+
+    actual_path = path_opt.get(actual_key, None)
+    actual_norm = _normalize_compare_path(actual_path)
+    expected_norm = _normalize_compare_path(expected_path)
+    if actual_norm != expected_norm:
+        raise RuntimeError(
+            f"[ConfigGuard] path.{actual_key} mismatch: actual={actual_path!r} "
+            f"expected={expected_path!r}. Stop now instead of silently training "
+            "from the wrong warm start."
+        )
+
+
 def _build_main_states_hybrid_mid_blank_hole(
     sde,
     training_target,
@@ -291,6 +328,7 @@ def _build_main_states_hybrid_mid_blank_hole(
     mid_count = max(0, min(batch, mid_count))
     debug = {
         "stats_main_state_mode_hybrid_mid_blank": 1.0,
+        "stats_main_mid_blank_ratio_requested": float(mid_blank_ratio),
         "stats_main_mid_blank_ratio": float(mid_count / float(batch)) if batch > 0 else 0.0,
         "stats_main_mid_blank_count": float(mid_count),
         "stats_main_mid_blank_t_mean": 0.0,
@@ -335,6 +373,7 @@ def main():
     parser.add_argument("--local_rank", type=int, default=0)
     args = parser.parse_args()
     opt = option.parse(args.opt, is_train=True)
+    _assert_expected_path(opt, "pretrain_model_G", "expected_pretrain_model_G")
 
     # convert to NoneDict, which returns None for missing keys
     opt = option.dict_to_nonedict(opt)
@@ -780,6 +819,7 @@ def main():
                 main_t_max_ratio = train_cfg.get("main_t_max_ratio", None)
                 main_state_debug = {
                     "stats_main_state_mode_hybrid_mid_blank": 0.0,
+                    "stats_main_mid_blank_ratio_requested": 0.0,
                     "stats_main_mid_blank_ratio": 0.0,
                     "stats_main_mid_blank_count": 0.0,
                     "stats_main_mid_blank_t_mean": 0.0,
@@ -787,6 +827,9 @@ def main():
                     "stats_main_high_forward_count": float(training_target.shape[0]),
                 }
                 if main_state_mode in ("hybrid_mid_blank_hole", "mixed_mid_blank_hole"):
+                    effective_main_mid_blank_ratio = _resolve_scheduled_ratio(
+                        train_cfg, "main_mid_blank_ratio", current_step
+                    )
                     timesteps, states, main_state_debug = _build_main_states_hybrid_mid_blank_hole(
                         sde=sde,
                         training_target=training_target,
@@ -794,7 +837,7 @@ def main():
                         mask_known=mask_for_sde,
                         high_t_min_ratio=main_t_min_ratio,
                         high_t_max_ratio=main_t_max_ratio,
-                        mid_blank_ratio=train_cfg.get("main_mid_blank_ratio", 0.0),
+                        mid_blank_ratio=effective_main_mid_blank_ratio,
                         mid_t_min_ratio=train_cfg.get("main_mid_t_min_ratio", 0.20),
                         mid_t_max_ratio=train_cfg.get("main_mid_t_max_ratio", 0.55),
                     )

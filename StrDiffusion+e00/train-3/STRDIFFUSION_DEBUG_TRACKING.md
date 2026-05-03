@@ -2218,3 +2218,139 @@ Clean-up / restore note:
   - `train.py` passes `py_compile`
   - `models/denoising_model.py` passes `py_compile`
   - x25 train/test YAMLs point to the intended experiment names and checkpoint paths
+
+## 2026-05-03 x25 first result: actual runtime mismatch + stronger white collapse
+
+- User-provided evidence checked against:
+  - train log: `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x25-mainmixed-blankhole_260502-221736.log`
+  - test log: `C:\Users\admin\Desktop\test_ir-sde-brushnet-x25-mainmixed-blankhole-current-domain_260503-101230.log`
+- High-confidence conclusion: the tested x25 run is **worse than x24/x20 on the hard white-failure samples**.
+
+- First critical finding: the **actual executed x25 training run was not the intended warm start**.
+  - Current local x25 YAML in workspace points to x20 stable base:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x25-mainmixed-blankhole.yml`
+    - `path.pretrain_model_G = /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x20-strongmask-cleancompose/models/best_G.pth`
+  - But the actual x25 train log says the run loaded:
+    - `pretrain_model_G: /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x24-mixedt-trunktexture/models/best_total_G.pth`
+    - `[LoadCheck] loaded 246/246 tensors ... missing=0 unexpected=0`
+  - Therefore the tested x25 result is **not a clean x25-from-x20 experiment**. It is effectively an **x25-from-x24-best_total** run.
+  - This matters because x24 already had the hard-sample white-attractor issue. x25 then changed the dominant main-branch state distribution on top of that unstable base.
+
+- Second critical finding: x25 main-distribution change was real and strong, not a fake/no-op change.
+  - Train log keeps showing:
+    - `stats_timestep_high_ratio=0.7500`
+    - `stats_main_mid_blank_ratio=0.2500`
+    - `stats_main_state_mode_hybrid_mid_blank=1.0000`
+  - So this x25 run truly replaced 25% of the main batch with the hybrid mid-t blank-hole states.
+  - That means x25 is **not** failing because the code path was disconnected; it is failing because this specific main-distribution move is too aggressive / destabilizing in the actually executed setup.
+
+- Test-route check remains clean in x25 inference:
+  - `brushnet.enabled(config/runtime)=True/True`
+  - `texture_core.enabled(config/runtime)=False/False`
+  - `restore_S_guidance=False`
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `sde_mu_hole_mode=known_only`
+  - `deterministic_reverse=True`
+  - structure checkpoint still correctly uses:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+- So the regression is again **not** from route mismatch or compose mismatch; it is generated during the reverse trajectory.
+
+- Hard-sample regression vs prior is severe in x25:
+  - `000098_bottom`:
+    - `final_gt_l1=0.342377` vs `prior_gt_l1=0.077797`
+    - `final_white_ratio_hole=0.934181`
+  - `000098_right`:
+    - `final_gt_l1=0.417303` vs `prior_gt_l1=0.096517`
+    - `final_white_ratio_hole=0.931165`
+  - `000098_center`:
+    - `final_gt_l1=0.208188` vs `prior_gt_l1=0.196733`
+    - `final_white_ratio_hole=0.451539`
+  - Even the easier improving samples got worse than x24:
+    - `000098_left`: `final_gt_l1=0.103389` (x24 had `0.082424`)
+    - `000098_top`: `final_gt_l1=0.125634` (x24 had `0.095890`)
+- Direct visual/log interpretation:
+  - x25 re-enters the old white attractor **earlier and harder**.
+  - Example `000098_bottom` trajectory:
+    - `t=100` hole mean `0.7965`, white `0.0000`
+    - `t=40` hole mean `1.0992`, white `0.8258`
+    - `t=20` hole mean `1.1615`, white `0.8942`
+    - `t=4` hole mean `1.1861`, white `0.9209`
+  - Example `000098_right` trajectory:
+    - `t=100` hole mean `0.8062`, white `0.0000`
+    - `t=40` hole mean `1.1343`, white `0.8714`
+    - `t=20` hole mean `1.2059`, white `0.9131`
+    - `t=4` hole mean `1.2304`, white `0.9250`
+  - As in x24, `raw_hole == final_hole` on failed cases, so compose is not the source of the whitening.
+
+- Current interpretation of x25:
+  - The first x25 result should be marked as a **failed run**.
+  - But the failure has two layers:
+    1. experiment hygiene failure: the actual runtime warm start drifted to x24 `best_total_G` instead of the intended x20 `best_G`
+    2. optimization failure: even in that actual run, the 25% always-on main-batch swap is too strong and worsens the late reverse collapse on hard samples
+  - Therefore we should **not** keep the x25 setting unchanged.
+
+
+## 2026-05-03 x26 direction: guarded x20 warm start + small ramped main mix + keep x24 mid auxiliaries
+
+- Design goal after x25:
+  - keep the final-direction idea (main trunk must eventually see some mid-t / inference-like hole states)
+  - but remove the two concrete x25 problems:
+    1. no more silent warm-start drift
+    2. no more 25% always-on hard swap of the main batch from iter 0
+
+- Code-level safety improvement added in:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py`
+- New safeguards / scheduler:
+  1. `path.expected_pretrain_model_G`
+     - if set, training now hard-checks that runtime `path.pretrain_model_G` exactly matches it
+     - if not, training raises `[ConfigGuard]` immediately instead of silently starting from the wrong checkpoint
+  2. `train.main_mid_blank_ratio_start`
+  3. `train.main_mid_blank_ratio_warmup_iter`
+     - main hybrid ratio can now ramp from a safe starting value to the target ratio over time
+     - this lets x20 stability dominate the early phase instead of shocking the trunk from iter 0
+  4. extra logging:
+     - `stats_main_mid_blank_ratio_requested`
+     - existing `stats_main_mid_blank_ratio` remains the actual per-batch realized ratio after rounding by batch size
+
+- Added new train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x26-ramped-smallmainmix.yml`
+- Added new test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x26-ramped-smallmainmix-current-domain.yml`
+
+- x26 policy:
+  - warm start is forced back to x20 stable base
+  - x24 mid auxiliary branch is kept (because x25 main-only replacement was worse):
+    - `infer_x0_mid_loss_weight: 0.0015`
+    - `texture_hf_mid_loss_weight: 0.005`
+  - x25-style main-distribution shift is retained only in a **small / ramped** form:
+    - `main_state_mode: hybrid_mid_blank_hole`
+    - `main_mid_blank_ratio_start: 0.0`
+    - `main_mid_blank_ratio: 0.10`
+    - `main_mid_blank_ratio_warmup_iter: 1200`
+    - `main_mid_t_min_ratio: 0.35`
+    - `main_mid_t_max_ratio: 0.60`
+  - inference route remains unchanged and stable:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=false`
+    - structure checkpoint path remains `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- Expected x26 diagnostics:
+  - first verify the guard works:
+    - runtime log must show x20 `best_G.pth` as pretrain
+    - if a stale remote YAML still points somewhere else, training should now fail immediately instead of wasting a run
+  - during training:
+    - `stats_main_mid_blank_ratio_requested` should ramp from `0.0` toward `0.10`
+    - `stats_main_mid_blank_ratio` should stay small early and only later become non-zero on more batches
+    - `stats_timestep_high_ratio` should remain much closer to x20/x24 than x25 did
+  - during test:
+    - the first hard samples should be checked again in this order:
+      - `000098_bottom`
+      - `000098_right`
+      - `000098_center`
+    - if x26 is on the right track, these should stop exploding to `~0.93` white ratio at hole level
+
+- Static validation after the new code edit:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py` passes `py_compile`
+- Also added `expected_pretrain_model_G` to the local x24/x25 train YAMLs so those lines will fail fast too if the runtime warm start drifts again.
