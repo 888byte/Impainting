@@ -330,6 +330,15 @@ class DenoisingModel(BaseModel):
             self.color_aux_loss_start_iter = int(train_opt.get("color_aux_loss_start_iter", 0))
             self.color_aux_blur_kernel = int(train_opt.get("color_aux_blur_kernel", 7))
             self.color_aux_clamp_b_min = float(train_opt.get("color_aux_clamp_b_min", 1e-3))
+            self.color_aux_target_domain = str(
+                train_opt.get("color_aux_target_domain", "lut")
+            ).lower()
+            if self.color_aux_target_domain not in {"lut", "gt"}:
+                logger.warning(
+                    "[Model] unsupported color_aux_target_domain=%s, fallback to lut",
+                    self.color_aux_target_domain,
+                )
+                self.color_aux_target_domain = "lut"
             if self.color_aux_blur_kernel > 1 and self.color_aux_blur_kernel % 2 == 0:
                 self.color_aux_blur_kernel += 1
             if self.color_aux_loss_weight > 0:
@@ -338,7 +347,8 @@ class DenoisingModel(BaseModel):
                     f"weight={self.color_aux_loss_weight}, "
                     f"start_iter={self.color_aux_loss_start_iter}, "
                     f"blur_kernel={self.color_aux_blur_kernel}, "
-                    f"clamp_b_min={self.color_aux_clamp_b_min}"
+                    f"clamp_b_min={self.color_aux_clamp_b_min}, "
+                    f"target_domain={self.color_aux_target_domain}"
                 )
 
             # x22: explicit hole-only high-frequency texture supervision.
@@ -979,17 +989,21 @@ class DenoisingModel(BaseModel):
         if (
             self.color_aux_loss_weight > 0
             and step >= self.color_aux_loss_start_iter
-            and training_target_lut is not None
         ):
             hole_mask = (1 - self.mask).expand_as(training_target)
             hole_denom = hole_mask.sum().clamp_min(1.0)
             x0_hat = self._estimate_x0_from_noise(sde, self.state, noise, timesteps)
             x0_hat_blur = self._blur_for_color_aux(x0_hat, self.color_aux_blur_kernel)
-            target_lut_blur = self._blur_for_color_aux(
-                training_target_lut, self.color_aux_blur_kernel
+            color_aux_target = (
+                training_target
+                if self.color_aux_target_domain == "gt"
+                else training_target_lut
+            )
+            target_blur = self._blur_for_color_aux(
+                color_aux_target, self.color_aux_blur_kernel
             )
             color_aux_loss = (
-                (x0_hat_blur - target_lut_blur).abs() * hole_mask
+                (x0_hat_blur - target_blur).abs() * hole_mask
             ).sum() / hole_denom
             color_aux_loss_weighted = self.color_aux_loss_weight * color_aux_loss
             loss = loss + color_aux_loss_weighted

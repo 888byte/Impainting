@@ -2354,3 +2354,204 @@ Clean-up / restore note:
 - Static validation after the new code edit:
   - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py` passes `py_compile`
 - Also added `expected_pretrain_model_G` to the local x24/x25 train YAMLs so those lines will fail fast too if the runtime warm start drifts again.
+
+## 2026-05-03 x26 result: route / warm-start corrected, white reduced, but split failure remains (white on hard low-confidence holes, warm/pink hue on stable holes)
+
+- Evidence checked against:
+  - train log: `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x26-ramped-smallmainmix_260503-103112.log`
+  - test log: `C:\Users\admin\Desktop\test_ir-sde-brushnet-x26-ramped-smallmainmix-current-domain_260503-134440.log`
+- High-level outcome:
+  - x26 is **better than x25** and directionally correct.
+  - It fixed the x25 runtime hygiene issue and reduced the catastrophic white collapse.
+  - But the failure mode is now split into two distinct classes:
+    1. some hard samples still show late-stage white overshoot
+    2. some non-white samples are visually acceptable in structure but keep a warm/pink hue bias
+
+- x26 training / route hygiene is correct this time:
+  - warm start guard succeeded; actual runtime log shows:
+    - `pretrain_model_G = /home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x20-strongmask-cleancompose/models/best_G.pth`
+    - `expected_pretrain_model_G = ...same path...`
+  - train-side x26 losses are all active as intended:
+    - high-t blank-hole branch enabled
+    - mid-t blank-hole branch enabled
+    - mid-t HF trunk loss enabled
+  - inference route remains clean and unchanged:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=false`
+    - structure checkpoint stays `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- x26 main-mix scheduler behavior from the train log:
+  - early stage behaves conservatively as designed:
+    - iter 20: `stats_main_mid_blank_ratio_requested=0.001667`, actual `stats_main_mid_blank_ratio=0.0000`
+    - iter 40: requested `0.003333`, actual `0.0000`
+    - iter 100: requested `0.008333`, actual `0.0000`
+  - around the 1000-iter checkpoint used for best selection, x26 has only **1 / 16** hybrid-mid sample in the main batch on many steps:
+    - e.g. iter 900: requested `0.075`, actual `0.0625`
+  - after warmup, actual full-ratio operation is batch-rounded to **2 / 16 = 0.125**:
+    - e.g. later logs around iter 4320 show requested `0.10`, actual `0.125`
+
+- Important checkpoint-selection consequence:
+  - x26 test loads `best_G.pth`
+  - x26 best checkpointing starts at iter `1000`
+  - train log shows many `[best-texture]` / `[best-total]` updates immediately after iter `1000` while the main hybrid ratio is still below the final intended regime
+  - so the tested x26 `best_G` is still relatively early in the scheduled main-mix rollout, i.e. before the final x26 regime has fully dominated
+
+- White-failure status in x26: clearly improved vs x25, but not solved.
+  - hard examples from the same `000098_*` group:
+    - `000098_bottom`:
+      - x25: `final_white_ratio_hole=0.934181`, `final_gt_l1=0.342377`
+      - x26: `final_white_ratio_hole=0.438620`, `final_gt_l1=0.096073`
+      - interpretation: huge recovery, but still a real white overshoot remains in the hard low-confidence subset
+    - `000098_center`:
+      - x25: `final_white_ratio_hole=0.451539`, `final_gt_l1=0.208188`
+      - x26: `final_white_ratio_hole=0.231778`, `final_gt_l1=0.105230`
+      - interpretation: same pattern, much better but not clean
+    - `000098_right`:
+      - x25: `final_white_ratio_hole=0.931165`, `final_gt_l1=0.417303`
+      - x26: `final_white_ratio_hole=0.575777`, `final_gt_l1=0.166833`
+      - interpretation: still the hardest one among the first group
+  - confidence-slice evidence still points to the old mechanism:
+    - `000098_bottom`: low-confidence subregion `final_low white=0.7575` vs high-confidence `0.1976`
+    - `000098_right`: low-confidence subregion `final_low white=0.8839` vs high-confidence `0.3393`
+  - conclusion: residual whitening is still concentrated in the low-reliability hole subset during the late reverse trajectory, not from input prior whiteness and not from compose
+
+- Stable non-white samples in x26 are now quite good:
+  - `000098_left`: `final_gt_l1=0.082415`, `final_white_ratio_hole=0.000000`
+  - `000098_top`: `final_gt_l1=0.095655`, `final_white_ratio_hole=0.000000`
+  - `000180_bottom`: `final_gt_l1=0.072303`, `final_white_ratio_hole=0.000000`
+- These samples show x26 is not globally broken; the trunk can stay stable when the hole is easier or reliability is more favorable.
+
+- New observation from user screenshots + log evidence: some samples are no longer white, but remain visually warm / pink.
+  - Example `000257_bottom`:
+    - `final_gt_l1=0.090196` vs `prior_gt_l1=0.114658` vs `lut_gt_l1=0.124258`
+    - `final_white_ratio_hole=0.027040`
+    - `confidence_hole_mean=0.418768`
+    - `rawprior_to_safeprior_hole=0.050748`
+    - interpretation: this is **not** a white-collapse sample. Trajectory stays stable; the remaining issue is hue bias / warm cast.
+  - Example `000348_right`:
+    - `final_gt_l1=0.122570` vs `prior_gt_l1=0.160261` vs `lut_gt_l1=0.161100`
+    - `final_white_ratio_hole=0.000000`
+    - `confidence_hole_mean=0.465463`
+    - `rawprior_to_safeprior_hole=0.055634`
+    - interpretation: again not a white-collapse case. The final image is better than prior/LUT in GT error, but visually still inherits a warm/pink chroma bias.
+
+- Current interpretation of the pink samples:
+  - they are **not** generated by the same failure mode as the white ones
+  - their trajectories stay stable and non-white all the way to `t=4`
+  - the remaining problem is that the final prediction stays too close to the warm color manifold induced by the color-prior / LUT path, while the diffusion objective alone does not fully neutralize that low-frequency hue bias
+  - evidence for this interpretation:
+    - pink examples have `final_white_ratio_hole ~ 0`
+    - but `final_prior_l1` / `final_lut_l1` remain fairly small, indicating the result still sits near the prior/LUT chroma manifold
+
+
+## 2026-05-03 x27 direction: keep x26 anti-white route, add weak GT low-frequency color anchor, and delay best-checkpoint selection
+
+- Goal after x26:
+  - preserve x26's anti-white gains
+  - reduce warm/pink hue bias on the already-stable samples
+  - avoid selecting `best_G` too early, before the scheduled main-mix regime is fully active
+
+- Minimal code change added in:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+- New training option:
+  - `train.color_aux_target_domain: lut | gt`
+- Behavior:
+  - existing x12 `color_aux_loss_weight` path is now configurable
+  - `lut` keeps the old behavior (blurred x0 vs `training_target_lut`)
+  - `gt` changes it to a weak hole-only low-frequency color anchor against blurred paired GT (`training_target`)
+- Reason:
+  - x26 showed that some samples are structurally fine and no longer white, but still too warm/pink
+  - this is exactly the regime where a weak GT low-frequency color anchor is appropriate; it addresses hue bias without changing the inference graph or route
+
+- Added new train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x27-ramped-colorfix.yml`
+- Added new test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x27-ramped-colorfix-current-domain.yml`
+
+- x27 policy:
+  - warm start still strictly from x20 stable base (`expected_pretrain_model_G` guard kept)
+  - keep x26 anti-white route unchanged:
+    - paired current-domain
+    - refined mask
+    - clean compose
+    - `known_only`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=false`
+  - keep x26 mid-t auxiliaries:
+    - `infer_x0_mid_loss_weight: 0.0015`
+    - `texture_hf_mid_loss_weight: 0.005`
+  - keep ramped small main-mix:
+    - `main_mid_blank_ratio_start: 0.0`
+    - `main_mid_blank_ratio: 0.10`
+    - `main_mid_blank_ratio_warmup_iter: 1200`
+  - new color-fix term:
+    - `color_aux_loss_weight: 0.01`
+    - `color_aux_target_domain: gt`
+  - delay best checkpoint start:
+    - `best_save_start_iter: 1500`
+    - this prevents `best_G` from being captured too early, before x26/x27 scheduled main-mix has fully entered its intended operating regime
+
+- Expected x27 diagnostic signature:
+  1. train log should still confirm x20 warm start exactly
+  2. `stats_main_mid_blank_ratio_requested` should ramp as before
+  3. first selected `best_G` should now occur only after iter `1500`
+  4. if the hypothesis is correct:
+     - white-heavy hard samples should stay at least as good as x26
+     - stable-but-pink samples like `000257_bottom` / `000348_right` should move closer to GT in low-frequency chroma while keeping `final_white_ratio_hole` near zero
+
+- Static validation after x27 code/config edits:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py` passes `py_compile`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\train.py` passes `py_compile`
+
+
+## 2026-05-03 x26 checkpoint comparison: `best_G` vs `best_total_G` vs `6000_G`
+
+- Compared logs:
+  - x26 earlier `best_G` probe (already recorded above)
+  - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x26-ramped-smallmainmix-current-domain_260503-142825.log`
+    - runtime `pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x26-ramped-smallmainmix/models/6000_G.pth`
+  - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x26-ramped-smallmainmix-current-domain_260503-143254.log`
+    - runtime `pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x26-ramped-smallmainmix/models/best_total_G.pth`
+- Both new tests still keep the correct stable inference route:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `restore_S_guidance=False`
+  - structure checkpoint path remains `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- Key result: `best_total_G` is effectively the same as `best_G`, while `6000_G` is clearly worse on the hard white-failure probes.
+
+- Hard-sample comparison on the first `000098_*` probe set:
+  - `000098_bottom`
+    - x26 `best_G`: `final_gt_l1=0.096073`, `final_white_ratio_hole=0.438620`
+    - x26 `best_total_G`: `final_gt_l1=0.097280`, `final_white_ratio_hole=0.444682`
+    - x26 `6000_G`: `final_gt_l1=0.179629`, `final_white_ratio_hole=0.722810`
+    - interpretation: `best_total_G ~= best_G`; `6000_G` falls back toward the old white basin
+  - `000098_center`
+    - x26 `best_G`: `final_gt_l1=0.105230`, `final_white_ratio_hole=0.231778`
+    - x26 `best_total_G`: `final_gt_l1=0.107294`, `final_white_ratio_hole=0.231740`
+    - x26 `6000_G`: `final_gt_l1=0.151337`, `final_white_ratio_hole=0.407880`
+    - interpretation: `best_total_G ~= best_G`; `6000_G` is materially worse
+  - `000098_left`
+    - x26 `best_G`: `final_gt_l1=0.082415`, `final_white_ratio_hole=0.000000`
+    - x26 `best_total_G`: `final_gt_l1=0.081114`, `final_white_ratio_hole=0.000000`
+    - x26 `6000_G`: `final_gt_l1=0.084867`, `final_white_ratio_hole=0.071522`
+    - interpretation: even on an easier sample, `6000_G` reintroduces residual white
+  - `000098_right`
+    - x26 `best_G`: `final_gt_l1=0.166833`, `final_white_ratio_hole=0.575777`
+    - x26 `best_total_G`: `final_gt_l1=0.165594`, `final_white_ratio_hole=0.572551`
+    - x26 `6000_G`: `final_gt_l1=0.253087`, `final_white_ratio_hole=0.806923`
+    - interpretation: same pattern; `best_total_G ~= best_G`, `6000_G` is clearly worse
+  - `000098_top`
+    - x26 `best_G`: `final_gt_l1=0.095655`, `final_white_ratio_hole=0.000000`
+    - x26 `best_total_G`: `final_gt_l1=0.095574`, `final_white_ratio_hole=0.000000`
+    - x26 `6000_G`: `final_gt_l1=0.100269`, `final_white_ratio_hole=0.096392`
+    - interpretation: `best_total_G` and `best_G` are functionally identical; `6000_G` again degrades
+
+- Operational conclusion for x26:
+  - checkpoint fishing inside x26 does **not** change the core diagnosis
+  - `best_total_G` does not provide a new regime beyond `best_G`
+  - the late `6000_G` checkpoint is not a better final model; it re-whitens hard samples and even reintroduces white on easier ones
+  - therefore, do **not** spend more time expecting a later x26 checkpoint to rescue the remaining white/pink issues
+  - if time is limited, the correct next move is to leave x26 checkpoint selection as solved and move to the next minimal-change branch (`x27`) rather than continue probing more x26 snapshots
