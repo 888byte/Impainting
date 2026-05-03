@@ -2663,3 +2663,160 @@ Clean-up / restore note:
   2. `stats_main_mid_blank_ratio_requested` should stay at `0.10` from the start
   3. first probe should compare against x26 `best_G` immediately after the first saved checkpoint (500 or early `best_G`)
   4. success criterion is simple: the `000098_bottom/center/right` white ratios must not exceed the x26 `best_G` baseline again
+
+
+## 2026-05-03 x28 result: current best white-stable base; residual white remains only on the hard low-confidence holes
+
+- Logs:
+  - train: `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x28-x26resume-whitefixfinal_260503-205142.log`
+  - test: `C:\Users\admin\Desktop\test_ir-sde-brushnet-x28-x26resume-whitefixfinal-current-domain_260503-230610.log`
+
+- Training hygiene is correct:
+  - actual warm start:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x26-ramped-smallmainmix/models/best_G.pth`
+  - route objective is the intended steady x26 regime from iter 0:
+    - `stats_main_mid_blank_ratio_requested=0.1000`
+    - actual batch-rounded `stats_main_mid_blank_ratio=0.1250` (`2 / 16`)
+  - no x27 regression term:
+    - `loss_color_aux=0`
+  - early best checkpoint appears at iter `618`
+
+- x28 is better than x26 on most of the hard probe set:
+  - `000098_bottom`
+    - x26: `final_gt_l1=0.096073`, `final_white_ratio_hole=0.438620`
+    - x28: `final_gt_l1=0.077664`, `final_white_ratio_hole=0.345569`
+  - `000098_center`
+    - x26: `final_gt_l1=0.105230`, `final_white_ratio_hole=0.231778`
+    - x28: `final_gt_l1=0.102192`, `final_white_ratio_hole=0.237353`
+    - interpretation: essentially tied on white, slightly better on GT error
+  - `000098_left`
+    - x26: `final_gt_l1=0.082415`, `final_white_ratio_hole=0.000000`
+    - x28: `final_gt_l1=0.077488`, `final_white_ratio_hole=0.000000`
+  - `000098_right`
+    - x26: `final_gt_l1=0.166833`, `final_white_ratio_hole=0.575777`
+    - x28: `final_gt_l1=0.129230`, `final_white_ratio_hole=0.472720`
+  - `000098_top`
+    - x26: `final_gt_l1=0.095655`, `final_white_ratio_hole=0.000000`
+    - x28: `final_gt_l1=0.092468`, `final_white_ratio_hole=0.000000`
+
+- Residual white is still the same old mechanism:
+  - the input priors are not white, but late reverse still grows white in the hard hole subset
+  - confidence slices still show the failure is concentrated in low-reliability regions:
+    - `000098_bottom`: `final_low white=0.6260` vs `final_high white=0.1336`
+    - `000098_center`: `final_low white=0.4001` vs `final_high white=0.1394`
+    - `000098_right`: `final_low white=0.7754` vs `final_high white=0.2404`
+  - conclusion: x28 is the best anti-white line so far, but it still does not completely solve the hard low-confidence white basin
+
+- Practical decision under time pressure:
+  - fully eliminating the remaining white would likely require another dedicated white-focused line
+  - given current time constraints, x28 should be treated as the final white-stable base and further work should move sideways (texture/detail modules) rather than spending more iterations trying to zero out the last hard white cases
+
+
+## 2026-05-03 x29 direction: stop chasing residual white directly; add `texture_core` on top of the x28 base with train/test symmetry
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x29-x28resume-texturecore.yml`
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x29-x28resume-texturecore-current-domain.yml`
+
+- Why this branch:
+  - user time is limited, and x28 already gives the best white-stable base so far
+  - residual white remains only in hard low-confidence holes
+  - the next most practical move is to add a sidecar texture/detail module on top of the stable base rather than keep perturbing the trunk objective
+
+- x29 policy:
+  - warm start from x28 `best_G`:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x28-x26resume-whitefixfinal/models/best_G.pth`
+  - keep the x28 anti-white trunk objective unchanged:
+    - `color_aux_loss_weight: 0.0`
+    - `sde_mu_hole_mode: known_only`
+    - `main_mid_blank_ratio: 0.10`
+    - `infer_x0_mid_loss_weight: 0.0015`
+    - `texture_hf_mid_loss_weight: 0.005`
+  - enable `texture_core` in both training and test configs with the previously-tested light x21-style settings:
+    - `enabled: true`
+    - `insert_mid: true`
+    - `insert_dec: false`
+    - `gate_hidden: 8`
+    - `boundary_width: 2`
+    - `zero_init_last: true`
+  - keep train/test network structure symmetric to avoid route mismatch
+
+- x29 optimisation policy:
+  - trunk remains conservative:
+    - `lr_G=2e-7`
+  - new texture-core parameters learn faster:
+    - `lr_new=1e-6`
+  - initial trunk freeze to preserve x28 white stability while the new texture branch warms up:
+    - `freeze_pretrained_until_iter=400`
+    - `freeze_loaded_pretrained_only=true`
+  - short run with frequent checkpoints:
+    - `niter=3000`
+    - `save_checkpoint_freq=500`
+    - `best_save_start_iter=500`
+
+- Expected x29 behavior:
+  - do **not** expect it to magically solve the hard white problem
+  - expect it to preserve x28's white behavior as much as possible while trying to improve texture/detail on the already-stable samples
+
+
+## 2026-05-03 overnight decision: do not re-enable `restore_S_guidance`; scale up the sidecar texture branch instead
+
+- User requested a larger overnight run instead of another small few-thousand-step tweak.
+- Code/history evidence says **do not** re-enable the original structure-guidance path (`restore_S_guidance`) for this overnight shot:
+  - early historical configs (`x8`-`x12`) kept `restore_S_guidance=true`
+  - tracking already records that turning off `restore_S_guidance` was one of the key steps toward removing the old white-failure route
+  - every stable current-domain line from `x13` through `x29` keeps:
+    - `restore_S_guidance=false`
+  - x28, the current best white-stable base, also keeps:
+    - `restore_S_guidance=false`
+- Therefore the original structure-guidance path is not a safe “bigger overnight” add-on under the current degraded-known route; it is a historically high-risk switch for white regression.
+
+
+## 2026-05-03 x30 overnight branch: keep x28 white-stable route, but scale `texture_core` to the stronger original-enhanced setting
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore.yml`
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x30-x28resume-overnight-texturecore-current-domain.yml`
+
+- x30 policy:
+  - warm start from x28 `best_G`:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x28-x26resume-whitefixfinal/models/best_G.pth`
+  - keep the whole x28 anti-white route unchanged:
+    - `restore_S_guidance=false`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=known_only`
+    - `main_mid_blank_ratio=0.10`
+    - `infer_x0_mid_loss_weight=0.0015`
+    - `texture_hf_mid_loss_weight=0.005`
+  - do **not** re-enable `mu_denoiser`
+  - enlarge the sidecar texture branch to the stronger original-enhanced setting instead of the lighter x21-style setting:
+    - `texture_core.enabled=true`
+    - `insert_mid=true`
+    - `insert_dec=true`
+    - `gate_hidden=16`
+    - `boundary_width=3`
+    - `zero_init_last=true`
+
+- Why x30 is the right overnight compromise:
+  - It is a genuinely bigger change than x29
+  - It uses the already-best x28 white-stable trunk as the base
+  - It keeps train/test network structure strictly symmetric
+  - It avoids the historically risky `restore_S_guidance` switch
+
+- x30 optimisation schedule is intentionally overnight-sized:
+  - `niter=12000`
+  - `save_checkpoint_freq=1000`
+  - `best_save_start_iter=1000`
+  - trunk stays conservative:
+    - `lr_G=2e-7`
+  - new texture branch learns faster:
+    - `lr_new=2e-6`
+  - initial trunk freeze while new branch warms up:
+    - `freeze_pretrained_until_iter=800`
+
+- Expected x30 behavior:
+  - it is still **not** designed to fully eliminate the remaining hard white cases
+  - it is designed to spend the overnight budget on texture/detail improvement while preserving as much of x28 white stability as possible
