@@ -52,6 +52,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         texture_core_opt: Optional[dict] = None,
         main_guidance_opt: Optional[dict] = None,
         restore_S_guidance: bool = False,
+        restore_S_guidance_scale: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -59,6 +60,7 @@ class ConditionalUNetWithBrushNet(nn.Module):
         self.nf = nf
         self.brushnet_enabled = brushnet_enabled
         self.restore_S_guidance = restore_S_guidance
+        self.restore_S_guidance_scale = float(restore_S_guidance_scale)
         self.brushnet_prior_dropout_prob = float(brushnet_prior_dropout_prob)
         self.brushnet_feature_scale = float(brushnet_feature_scale)
         self.brushnet_use_spatial_gate = bool(brushnet_use_spatial_gate)
@@ -70,6 +72,8 @@ class ConditionalUNetWithBrushNet(nn.Module):
             raise ValueError("brushnet_prior_dropout_prob must be in [0, 1]")
         if not 0.0 <= self.brushnet_confidence_floor <= 1.0:
             raise ValueError("brushnet_confidence_floor must be in [0, 1]")
+        if not 0.0 <= self.restore_S_guidance_scale <= 1.0:
+            raise ValueError("restore_S_guidance_scale must be in [0, 1]")
         if self.brushnet_input_source not in {
             "residual",
             "xt",
@@ -395,7 +399,11 @@ class ConditionalUNetWithBrushNet(nn.Module):
             # Baseline compatibility fix only; not counted as the texture-core
             # innovation. This restores the legacy S guidance when requested.
             if self.restore_S_guidance and S is not None and len(blocks) > 4:
-                x = blocks[4](x, S)
+                guided = blocks[4](x, S)
+                if self.restore_S_guidance_scale >= 1.0:
+                    x = guided
+                elif self.restore_S_guidance_scale > 0.0:
+                    x = x + self.restore_S_guidance_scale * (guided - x)
 
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
@@ -461,6 +469,7 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
     texture_core_opt = opt.get("texture_core", {})
     main_guidance_opt = opt.get("main_guidance", {})
     restore_S_guidance = opt.get("restore_S_guidance", False)
+    restore_S_guidance_scale = opt.get("restore_S_guidance_scale", 1.0)
 
     return ConditionalUNetWithBrushNet(
         in_nc=network_opt.get("in_nc", 3),
@@ -478,6 +487,7 @@ def create_brushnet_unet(opt: dict) -> nn.Module:
         texture_core_opt=texture_core_opt,
         main_guidance_opt=main_guidance_opt,
         restore_S_guidance=restore_S_guidance,
+        restore_S_guidance_scale=restore_S_guidance_scale,
     )
 
 
@@ -499,6 +509,7 @@ if __name__ == "__main__":
             "use_mask_gate": True,
         },
         restore_S_guidance=True,
+        restore_S_guidance_scale=0.2,
     ).to(device)
 
     batch_size = 2

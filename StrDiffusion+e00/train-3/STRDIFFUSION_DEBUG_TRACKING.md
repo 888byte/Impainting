@@ -3169,3 +3169,210 @@ Clean-up / restore note:
     - `py_compile` passed
   - x32 train/test YAML
     - `yaml.safe_load` passed
+
+## 2026-05-04 x32 early result: structure-on selective branch is learning now, but still only a partial recovery
+
+- Logs analysed:
+  - train:
+    - `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x32-x30resume-restoreSselective_260504-190712.log`
+  - test:
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x32-x30resume-restoreSselective-current-domain_260504-204139.log`
+
+- Good news first:
+  - x32 fixes the x31 optimiser-grouping issue:
+    - `[Model] Param groups: pretrained=151 (lr=2.00e-07), new=211 (lr=1.00e-06)`
+  - this means the restored `restore_S_guidance` SPADE path is no longer silently trapped in the pure pretrained/frozen bucket
+  - train/test route is also still fully consistent:
+    - `texture_core.enabled=True`
+    - `mu_denoiser.enabled=True`
+    - `restore_S_guidance=True`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - structure checkpoint path still uses required `e00s` path
+
+- Training-side status:
+  - x32 is still early relative to the planned `niter=12000`
+  - best tracking only starts after `iter >= 2000`
+  - after the first valid best stage, total loss improves quickly:
+    - `iter 2000 best-total loss_total = 8.2369e-02`
+    - `iter 2106 best-total loss_total = 6.3586e-02`
+  - current observed tail around `iter 2260~2360` is roughly:
+    - `loss_total ~ 7.2e-02`
+  - so x32 is **not** dead-on-arrival; the selective structure branch is genuinely learning now
+
+- Visual/result status versus x31:
+  - the hard bright-hole white failure is still present, but **slightly better** than x31
+  - `000098_bottom`
+    - x31 best_G: `final_white_ratio_hole=0.9369`
+    - x32 current best_G: `final_white_ratio_hole=0.8743`
+  - `000098_right`
+    - x31 best_G: `0.9346`
+    - x32 current best_G: `0.8724`
+  - `000098_center`
+    - x31 best_G: `0.5385`
+    - x32 current best_G: `0.5334`
+  - lighter/easier cases also improve slightly:
+    - `000098_left`: `0.1369 -> 0.1282`
+    - `000098_top`: `0.1707 -> 0.1503`
+  - dark cases remain stable:
+    - `000180_bottom`: `final_white_ratio_hole=0.0013`
+
+- Interpretation:
+  - x32 is **better than x31**, so the selective-new structure fix did move the branch in the right direction
+  - but the improvement is still only partial; the bright-hole white failure remains severe on the same hard samples
+  - therefore x32 should **not** be treated as already solved, but it also should **not** be discarded as quickly as x31
+
+- Decision recommendation:
+  - if the constraint is **structure must stay on**, x32 is the first branch worth giving a bit more time
+  - recommended next step is:
+    - continue x32 only to a short next checkpoint window (roughly `iter 4000~5000`)
+    - retest the same hard samples before committing to the full 12k run
+  - stop/adjust immediately if the hard bright-hole metrics still do not move materially:
+    - `000098_bottom` / `000098_right` still above about `0.80` white
+    - `000098_center` still around `0.50+`
+  - in other words:
+    - **continue a bit, but with a stop-loss**
+    - do **not** just assume blind long training to 12k will automatically solve it
+
+## 2026-05-04 x32 follow-up at ~6k: stop-loss hit, continued training regressed bright-hole white failure
+
+- Logs analysed:
+  - train:
+    - `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x32-x30resume-restoreSselective_260504-190712.log`
+  - test:
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x32-x30resume-restoreSselective-current-domain_260504-233151.log`
+
+- Train-side status up to ~6k:
+  - x32 continued training normally and still kept the corrected optimiser grouping:
+    - `[Model] Param groups: pretrained=151 (lr=2.00e-07), new=211 (lr=1.00e-06)`
+  - the trunk unfreeze happened as expected at `iter 800`
+  - best-total kept improving after the early 2k stage:
+    - `iter 2916 best-total loss_total = 6.2348e-02`
+    - `iter 3403 best-total loss_total = 6.1367e-02`
+    - `iter 3609 best-total loss_total = 6.2014e-02`
+  - but by the time training reached `iter 4000~6000`, the online loss no longer showed a clean monotonic gain toward a visibly better anti-white solution:
+    - `iter 4000 loss_total = 6.7172e-02`
+    - `iter 5900 loss_total = 6.6536e-02`
+    - `iter 6000 loss_total = 8.0857e-02`
+
+- Test-side result:
+  - the tested route is still structurally correct and symmetric:
+    - `texture_core.enabled=True`
+    - `mu_denoiser.enabled=True`
+    - `restore_S_guidance=True`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - structure checkpoint path still uses the required:
+      - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - however, the actual bright-hole white failure got **worse** than the earlier x32 test
+
+- x32 early test (`204139`) -> later x32 test (`233151`) on the same hard cases:
+  - `000098_bottom`
+    - `final_white_ratio_hole: 0.8743 -> 0.9724`
+  - `000098_center`
+    - `0.5334 -> 0.6137`
+  - `000098_left`
+    - `0.1282 -> 0.2655`
+  - `000098_right`
+    - `0.8724 -> 0.9553`
+  - `000098_top`
+    - `0.1503 -> 0.2159`
+  - the darker reference case still remains stable:
+    - `000180_bottom` continues to avoid this bright-white collapse pattern
+
+- Additional hard evidence from the later x32 test:
+  - `000098_bottom`
+    - `final_hole_mean=1.1478`
+    - `final_low white=1.0000`
+    - `final_high white=0.9516`
+  - `000098_right`
+    - `final_hole_mean=1.1667`
+    - `final_low white=0.9993`
+    - `final_high white=0.9215`
+  - this is no longer just "partial residual white"; this is a strong return toward the old bright-hole white attractor
+
+- Final interpretation for x32:
+  - the selective-new structure fix **did** solve the x31 optimiser-grouping bug
+  - but after giving x32 the requested extra time, the stop-loss condition was hit:
+    - the hard bright-hole white metrics did not improve into a safe range
+    - and by the later test they clearly regressed
+  - therefore x32 should **not** be continued further as-is
+
+- Decision:
+  - **stop x32**
+  - do **not** keep waiting for more convergence on this branch
+  - the next step should be a direction adjustment, not more blind training time on the same x32 setup
+
+## 2026-05-04 x33 restart version: gated restore-S guidance instead of full-strength SPADE overwrite
+
+- User question after x32:
+  - whether the newly re-enabled modules have a structural problem
+  - request a clean restart version rather than continuing the regressed x32 branch
+
+- Code-level diagnosis:
+  - in `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\brushnet_wrapper.py`
+  - the restored structure-guidance path was previously applied as:
+    - `x = blocks[4](x, S)`
+  - unlike:
+    - BrushNet (`feature_scale`)
+    - texture_core (`zero_init_last`)
+  - the restored SPADE path had **no strength gate at all**
+  - this matches the observed failure pattern:
+    - bright / shallow / low-confidence holes overexpose badly
+    - darker holes remain comparatively stable
+  - therefore the issue is not a train/test mismatch; it is more likely a **full-strength restore-S injection problem** when mixing current-domain x30 trunk + restored legacy SPADE guidance
+
+- Structural fix added:
+  - file:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\brushnet_wrapper.py`
+  - new option:
+    - `restore_S_guidance_scale`
+  - new behaviour:
+    - if `restore_S_guidance=true`, the SPADE-guided feature is blended instead of hard-overwriting:
+      - `x = x + scale * (guided - x)`
+    - `scale=1.0` keeps old behaviour
+    - `scale<1.0` makes structure guidance softer and reduces the risk of bright-hole overdrive
+
+- Restart branch created:
+  - train config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x33-x30resume-restoreSgated.yml`
+  - test config:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x33-x30resume-restoreSgated-current-domain.yml`
+
+- x33 route policy:
+  - restart from the safer x30 base again:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+  - keep fallback fill for missing structure-guidance tensors from:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+  - keep modules enabled in both train and test:
+    - `texture_core=true`
+    - `mu_denoiser=true`
+    - `restore_S_guidance=true`
+  - keep current-domain route semantics:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=known_only`
+  - structure network checkpoint path remains exactly:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- x33 stabilisation choices:
+  - `restore_S_guidance_scale: 0.2`
+  - `lr_new: 5e-7` (down from x32 `1e-6`)
+  - `freeze_pretrained_until_iter: 1200`
+  - `best_save_start_iter: 2500`
+  - keep selective-new prefixes for restored SPADE blocks:
+    - `downs.0.4.`
+    - `downs.1.4.`
+    - `downs.2.4.`
+    - `downs.3.4.`
+
+- Validation:
+  - `brushnet_wrapper.py`
+    - `py_compile` passed
+  - x33 train/test YAML
+    - `yaml.safe_load` passed
+
+- Expected purpose of x33:
+  - not to remove all white failure instantly
+  - but to test whether the main regression with structure-on came from **ungated restore-S guidance amplitude**
+  - if x33 works, bright hard holes should stop racing toward near-1.0 hole means as aggressively as x32/x31
