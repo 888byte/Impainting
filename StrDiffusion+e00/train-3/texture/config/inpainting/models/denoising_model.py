@@ -406,12 +406,7 @@ class DenoisingModel(BaseModel):
             #   which defaults to 10x lr_G so randomly-initialised weights converge
             #   faster without destabilising the pretrained backbone.
             lr_new = float(train_opt.get("lr_new", train_opt["lr_G"] * 10))
-            fallback_new_module_prefixes = (
-                "brushnet.",
-                "mglc_mid.",
-                "mglc_dec.",
-                "main_guidance_proj.",
-            )
+            fallback_new_module_prefixes = self._get_new_module_prefixes()
             pretrained_param_names = self._resolve_pretrained_param_names(
                 fallback_new_module_prefixes
             )
@@ -523,6 +518,18 @@ class DenoisingModel(BaseModel):
         )
         raise NotImplementedError("Unsupported lr scheme for Mu-Denoiser.")
 
+    def _get_new_module_prefixes(self):
+        prefixes = [
+            "brushnet.",
+            "mglc_mid.",
+            "mglc_dec.",
+            "main_guidance_proj.",
+        ]
+        for prefix in self.train_opt.get("force_new_param_prefixes", []) or []:
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+        return tuple(prefixes)
+
     def _resolve_pretrained_param_names(self, fallback_new_module_prefixes):
         loaded_names = set(getattr(self, "loaded_model_param_names", set()) or set())
         if loaded_names and self.freeze_loaded_pretrained_only:
@@ -530,6 +537,7 @@ class DenoisingModel(BaseModel):
                 name
                 for name, _ in self.model.named_parameters()
                 if name in loaded_names
+                and not any(name.startswith(prefix) for prefix in fallback_new_module_prefixes)
             }
         return {
             name
@@ -544,7 +552,7 @@ class DenoisingModel(BaseModel):
             return
 
         frozen_names = self._resolve_pretrained_param_names(
-            ("brushnet.", "mglc_mid.", "mglc_dec.", "main_guidance_proj.")
+            self._get_new_module_prefixes()
         )
         for name, param in self.model.named_parameters():
             if name in frozen_names:

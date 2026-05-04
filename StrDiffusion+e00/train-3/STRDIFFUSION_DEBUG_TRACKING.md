@@ -2985,3 +2985,187 @@ Clean-up / restore note:
 - Important interpretation:
   - x31 is **not** a claim that the bright-hole white issue has been solved
   - x31 is a deliberate, user-driven switch from ?continue isolating anti-white fixes? to ?accept current residual white and spend the overnight budget on the broader original-enhanced full stack?
+
+## 2026-05-04 x31 full-module branch result: not a simple unconverged case, should stop and adjust direction
+
+- Logs analysed:
+  - train:
+    - `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x31-x30resume-fullmodules-restores_260504-114419.log`
+  - test:
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x31-x30resume-fullmodules-restores-current-domain_260504-165341.log` (`best_G`)
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x31-x30resume-fullmodules-restores-current-domain_260504-170255.log` (`best_total_G`)
+
+- Training-side facts:
+  - primary warm start is correct:
+    - `pretrain_model_G = .../ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+  - fallback for restored SPADE / structure-guidance tensors is active:
+    - first load: `274/378`, `missing=104`
+    - fallback attempt from original texture checkpoint
+    - fallback actually fills only `64` tensors
+  - optimizer grouping is notable:
+    - `[Model] Param groups: pretrained=362 (lr=2.00e-07), new=0 (lr=1.00e-06)`
+    - this means the x31 full-module branch is **not** really running with a visible `new`-param bucket in the main G optimizer
+  - freeze is also active at the start:
+    - `[Freeze] frozen 362 pretrained trunk params until iter 800`
+  - Mu-Denoiser clearly trains and its loss drops fast:
+    - early `loss_mu_total ~ 0.40`
+    - around `iter 1600`, `loss_mu_total ~ 0.065`
+  - total training loss keeps improving numerically:
+    - e.g. `iter 1589 best-total loss_total = 6.3693e-02`
+    - later still improves again around `iter 1733`, `loss_total = 6.1061e-02`
+
+- Test-route check:
+  - route is clean in both best and best_total tests:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `restore_S_guidance=True`
+    - `texture_core.enabled=True`
+    - `mu_denoiser.enabled=True`
+  - structure checkpoint path is still the required one:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - so x31 visual failures are **real model behaviour**, not another train/test mismatch
+
+- Hard-sample outcome (`best_G`, source-of-record = logged white-ratio / hole stats / screenshots):
+  - `000098_bottom`
+    - `prior_hole(mean)=0.7957`
+    - `final_hole(mean)=1.1022`
+    - `final_white_ratio_hole=0.9369`
+    - `final_low white=1.0000`, `final_high white=0.8892`
+  - `000098_center`
+    - `prior_hole(mean)=0.7068`
+    - `final_hole(mean)=0.8160`
+    - `final_white_ratio_hole=0.5385`
+    - `final_low white=0.6517`, `final_high white=0.4704`
+  - `000098_left`
+    - `prior_hole(mean)=0.5439`
+    - `final_hole(mean)=0.6202`
+    - `final_white_ratio_hole=0.1369`
+  - `000098_right`
+    - `prior_hole(mean)=0.7989`
+    - `final_hole(mean)=1.1177`
+    - `final_white_ratio_hole=0.9346`
+    - `final_low white=0.9995`, `final_high white=0.8848`
+  - `000098_top`
+    - `prior_hole(mean)=0.5189`
+    - `final_hole(mean)=0.6017`
+    - `final_white_ratio_hole=0.1707`
+  - `000180_bottom`
+    - `prior_hole(mean)=0.3594`
+    - `final_hole(mean)=0.4337`
+    - `final_white_ratio_hole=0.0000`
+
+- Hard-sample outcome (`best_total_G`, source-of-record = logged white-ratio / hole stats / screenshots):
+  - `000098_bottom`
+    - `final_hole(mean)=1.0898`
+    - `final_white_ratio_hole=0.9251`
+    - `final_low white=1.0000`, `final_high white=0.8685`
+  - `000098_center`
+    - `final_hole(mean)=0.7926`
+    - `final_white_ratio_hole=0.5065`
+    - `final_low white=0.6209`, `final_high white=0.4377`
+  - `000098_left`
+    - `final_hole(mean)=0.6299`
+    - `final_white_ratio_hole=0.1475`
+  - `000098_right`
+    - `final_hole(mean)=1.0994`
+    - `final_white_ratio_hole=0.9223`
+    - `final_low white=0.9965`, `final_high white=0.8653`
+  - `000098_top`
+    - `final_hole(mean)=0.5996`
+    - `final_white_ratio_hole=0.1611`
+  - `000180_bottom`
+    - `final_hole(mean)=0.4372`
+    - `final_white_ratio_hole=0.0000`
+
+- Interpretation:
+  - x31 is **not** a mild undertrained / waiting-to-converge branch
+  - `best_G` and `best_total_G` are both bad in the same bright-hole way
+  - the catastrophic white failure on `000098_bottom` / `000098_right` is already close to old collapse-style behaviour (`white ~0.93`)
+  - darker holes remain stable, so this is still the same brightness-sensitive failure mode, but x31 makes it much worse than x28/x30
+  - because training loss keeps improving while the bright-hole visual failure remains catastrophic, this should be judged as an **objective / direction regression**, not as a simple convergence issue
+
+- Decision:
+  - **do not spend more time continuing x31 as-is waiting for convergence**
+  - treat x31 as a wrong-direction full-module branch for the current degraded-known current-domain route
+  - if further work is needed, roll back to the x28/x30 family and re-add modules much more selectively instead of keeping `restore_S_guidance=True` and hoping longer training will fix it
+
+## 2026-05-04 x32 plan: keep texture_core + Mu-Denoiser + restore_S_guidance, but make restored SPADE guidance truly train as a selective "new branch"
+
+- User requirement:
+  - keep the already useful modules:
+    - `texture_core`
+    - `mu_denoiser`
+  - **structure guidance must also stay on**
+  - train/test network must remain strictly consistent
+
+- x31-specific issue identified from code + logs:
+  - x31 turned `restore_S_guidance=true`, but the optimizer grouping showed:
+    - `[Model] Param groups: pretrained=362, new=0`
+  - this means the restored SPADE guidance branch did **not** end up in a visible higher-LR / new-module bucket
+  - combined with:
+    - fallback only filling part of the missing tensors (`64 / 104`)
+    - initial freeze of loaded pretrained params
+  - the restored structure-guidance path in x31 was not being trained in the intended "new-side-branch warmup" way
+
+- Code change to support a selective structure-on branch:
+  - file:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+  - new behaviour:
+    - added `_get_new_module_prefixes()`
+    - `train.force_new_param_prefixes` can now explicitly mark loaded parameters as **new**, even when `freeze_loaded_pretrained_only=true`
+    - `_resolve_pretrained_param_names(...)` now excludes any forced-new prefixes from the loaded/pretrained set
+    - `_apply_pretrained_trunk_freeze()` now uses the same merged new-prefix set, so these forced-new params will not be frozen with the pretrained trunk
+  - intended effect:
+    - keep the x30 trunk / BrushNet / texture-core weights stable
+    - but let the restored SPADE structure-guidance tensors actually adapt as a selective high-LR branch
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x32-x30resume-restoreSselective.yml`
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x32-x30resume-restoreSselective-current-domain.yml`
+
+- x32 route policy:
+  - base warm start stays on x30:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+  - fallback for restored structure-guidance tensors still uses:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+  - keep:
+    - `texture_core.enabled=true`
+    - `mu_denoiser.enabled=true`
+    - `restore_S_guidance=true`
+  - keep stable current-domain route semantics:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=known_only`
+  - structure checkpoint path remains exactly:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- x32 selective-new prefixes:
+  - `downs.0.4.`
+  - `downs.1.4.`
+  - `downs.2.4.`
+  - `downs.3.4.`
+  - rationale:
+    - in `brushnet_wrapper.py`, when `restore_S_guidance=true`, each down block appends `SPADEBlock` at `downs[i][4]`
+    - these are exactly the restored legacy structure-guidance tensors that need to adapt, instead of being silently treated as frozen/loaded trunk
+
+- x32 optimisation schedule:
+  - `lr_G = 2e-7`
+  - `lr_new = 1e-6`
+  - `freeze_pretrained_until_iter = 800`
+  - `freeze_loaded_pretrained_only = true`
+  - `best_save_start_iter = 2000`
+  - `niter = 12000`
+
+- Train/test consistency:
+  - x32 train and test both enable:
+    - `texture_core`
+    - `mu_denoiser`
+    - `restore_S_guidance`
+  - this keeps the x32 branch structurally symmetric and avoids another train/test mismatch
+
+- Validation:
+  - `denoising_model.py`
+    - `py_compile` passed
+  - x32 train/test YAML
+    - `yaml.safe_load` passed
