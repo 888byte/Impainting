@@ -3376,3 +3376,86 @@ Clean-up / restore note:
   - not to remove all white failure instantly
   - but to test whether the main regression with structure-on came from **ungated restore-S guidance amplitude**
   - if x33 works, bright hard holes should stop racing toward near-1.0 hole means as aggressively as x32/x31
+
+## 2026-05-05 correction after comparing original StrDiffusion: issue is not "original structure guidance is wrong", but our restart baseline was not original-like enough
+
+- User objection is valid:
+  - the original StrDiffusion structure-guidance path itself is not obviously broken
+  - in the original code:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion\train\texture\config\inpainting\models\modules\DenoisingUNet_arch.py`
+  - `ConditionalUNet` also uses a full `SPADEBlock` at each down stage, not a weakened gate
+  - so the previous x33-style "softened structure amplitude" is **not** a faithful reproduction of the original structure-guidance regime
+
+- More important original-vs-x31/x32 differences found in code/config:
+  1. original structure-on route starts from a **structure-on pretrained checkpoint**
+     - original enhanced config:
+       - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet.yml`
+       - `path.pretrain_model_G = /home/610-wws/Impainting/StrDiffusion+e00/train/experiments/inpainting/ir-sde/models/best_G.pth`
+     - original finetune config comments explicitly recommend a fully converged structure-guided starting point
+  2. original structure-on finetune uses:
+     - `sde_mu_hole_mode: condition_lut`
+     - not the later white-stable current-domain `known_only` route
+  3. x31/x32 instead were enabling `restore_S_guidance=true` on top of an x30 base that had long been trained with:
+     - `restore_S_guidance=false`
+     - `sde_mu_hole_mode=known_only`
+
+- Revised interpretation:
+  - the main problem is more likely:
+    - **"turning original-style full structure guidance back on over an x30 no-structure / known-only base"**
+  - not simply:
+    - **"structure guidance amplitude is inherently too large"**
+
+## 2026-05-05 x34 restart version: original-like full restore-S restart for current-domain
+
+- Goal:
+  - give the user a restart version that is **closer to original StrDiffusion logic**
+  - keep train/test structure consistent
+  - keep current-domain degraded/prefill route
+  - but avoid the x31/x32 mistake of using an x30 no-structure main checkpoint as the primary generator source
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x34-origrestore-currentdomain.yml`
+
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x34-origrestore-currentdomain.yml`
+
+- x34 key design:
+  - keep:
+    - `texture_core.enabled=true`
+    - `mu_denoiser.enabled=true`
+    - `restore_S_guidance=true`
+  - do **not** use reduced `restore_S_guidance_scale`
+    - x34 goes back to full original-like structure guidance
+  - primary generator warm start now uses the original structure-on checkpoint:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train/experiments/inpainting/ir-sde/models/best_G.pth`
+  - fallback fill now uses x30 to recover missing current branch tensors:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+  - switch back to the original structure-on hole-mu setting:
+    - `sde_mu_hole_mode: condition_lut`
+  - in test config, keep train/test consistency:
+    - `sde_mu_hole_mode: condition_lut`
+    - `expected_train_sde_mu_hole_mode: condition_lut`
+  - keep current-domain inference semantics:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+  - structure network checkpoint path remains exactly:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- x34 optimisation simplification:
+  - `freeze_pretrained_until_iter: 0`
+  - `lr_G: 5e-7`
+  - `best_save_start_iter: 2500`
+  - remove x32 selective forced-new SPADE prefixes from the config
+  - rationale:
+    - if the primary checkpoint already contains full structure-guidance weights,
+      we should not treat the structure path as a newly attached x30-era addon
+
+- Validation:
+  - x34 train/test YAML
+    - `yaml.safe_load` passed
+
+- Current recommendation status:
+  - if the user insists on an original-like structure-guidance restart,
+    - **x34 is the correct restart branch to try next**
+  - x33 remains a soft-gated experimental fallback idea,
+    - but it is no longer the preferred branch after re-checking the original code/config logic
