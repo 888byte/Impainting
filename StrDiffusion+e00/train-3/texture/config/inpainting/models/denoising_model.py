@@ -1599,29 +1599,56 @@ class DenoisingModel(BaseModel):
             print('load-------------------------------')
             logger.info("Loading model for G [{:s}] ...".format(load_path_G))
             
-            # 加载完整 checkpoint（可能包含 mu_denoiser）
+            # ???? checkpoint????? mu_denoiser?
             checkpoint = torch.load(load_path_G, map_location=self.device)
+            model_state, mu_denoiser_state = self._split_checkpoint_state(checkpoint)
             
-            # 分离主模型和 D_mu 的权重
-            model_state = {}
-            mu_denoiser_state = {}
-            
-            for k, v in checkpoint.items():
-                if k.startswith('mu_denoiser.'):
-                    # D_mu 权重（去掉前缀）
-                    mu_denoiser_state[k[len('mu_denoiser.'):]] = v
-                elif k.startswith('module.mu_denoiser.'):
-                    mu_denoiser_state[k[len('module.mu_denoiser.'):]] = v
-                elif k.startswith('module.'):
-                    model_state[k[7:]] = v
+            # ???????? active checkpoint ?? trunk / BrushNet / texture_core
+            load_info = self.load_network_from_state(
+                model_state,
+                self.model,
+                self.opt["path"]["strict_load"],
+            )
+
+            # ???????????? restore_S_guidance ?????? checkpoint
+            # ?????????????/?? checkpoint ?? missing keys?
+            fallback_path_G = self.opt["path"].get("pretrain_model_G_fallback")
+            fallback_only_missing = bool(
+                self.opt["path"].get("pretrain_model_G_fallback_only_missing", True)
+            )
+            missing_keys = list(load_info.get("missing", []) or [])
+            if fallback_path_G and missing_keys:
+                logger.info(
+                    "[LoadFallback] attempting to fill %d missing tensors from [%s]",
+                    len(missing_keys),
+                    fallback_path_G,
+                )
+                fallback_checkpoint = torch.load(fallback_path_G, map_location=self.device)
+                fallback_model_state, _ = self._split_checkpoint_state(fallback_checkpoint)
+                if fallback_only_missing:
+                    missing_set = set(missing_keys)
+                    fallback_model_state = {
+                        k: v for k, v in fallback_model_state.items() if k in missing_set
+                    }
+                if fallback_model_state:
+                    fallback_info = self.load_network_from_state(
+                        fallback_model_state,
+                        self.model,
+                        False,
+                    )
+                    fallback_loaded = len(fallback_info.get("loaded_param_names", set()) or set())
+                    logger.info(
+                        "[LoadFallback] loaded %d fallback tensors into G",
+                        fallback_loaded,
+                    )
                 else:
-                    model_state[k] = v
-            
-            # 加载主模型
-            self.load_network_from_state(model_state, self.model, self.opt["path"]["strict_load"])
+                    logger.warning(
+                        "[LoadFallback] no matching tensors found in fallback checkpoint for current missing keys"
+                    )
+
             self._maybe_bootstrap_brushnet_from_trunk()
             
-            # 加载 D_mu（如果有）
+            # ?? D_mu?????
             use_mu_denoiser = getattr(self, 'use_mu_denoiser', False)
             mu_denoiser = getattr(self, 'mu_denoiser', None)
             if use_mu_denoiser and mu_denoiser is not None and len(mu_denoiser_state) > 0:
@@ -1629,14 +1656,31 @@ class DenoisingModel(BaseModel):
                     mu_denoiser.load_state_dict(mu_denoiser_state, strict=False)
                     self.mu_denoiser_has_weights = True
                     self.mu_denoiser_loaded_weights = True
-                    logger.info(f"[Model] Mu-Denoiser 权重已加载 ({len(mu_denoiser_state)} 个参数)")
+                    logger.info(f"[Model] Mu-Denoiser ????? ({len(mu_denoiser_state)} ???)")
                 except Exception as e:
-                    logger.warning(f"[Model] Mu-Denoiser 权重加载失败: {e}")
+                    logger.warning(f"[Model] Mu-Denoiser ??????: {e}")
             elif use_mu_denoiser and len(mu_denoiser_state) == 0:
-                logger.info("[Model] Checkpoint 中未找到 Mu-Denoiser 权重，将从头训练")
-    
+                logger.info("[Model] Checkpoint ???? Mu-Denoiser ????????")
+
+    def _split_checkpoint_state(self, checkpoint):
+        """Split a combined checkpoint into main-model and mu-denoiser states."""
+        model_state = {}
+        mu_denoiser_state = {}
+
+        for k, v in checkpoint.items():
+            if k.startswith('mu_denoiser.'):
+                mu_denoiser_state[k[len('mu_denoiser.'):]] = v
+            elif k.startswith('module.mu_denoiser.'):
+                mu_denoiser_state[k[len('module.mu_denoiser.'):]] = v
+            elif k.startswith('module.'):
+                model_state[k[7:]] = v
+            else:
+                model_state[k] = v
+
+        return model_state, mu_denoiser_state
+
     def load_network_from_state(self, state_dict, network, strict=True):
-        """从 state_dict 加载网络（辅助方法）"""
+        """? state_dict ??????????"""
         from torch.nn.parallel import DataParallel, DistributedDataParallel
         if isinstance(network, (DataParallel, DistributedDataParallel)):
             network = network.module
@@ -1650,7 +1694,8 @@ class DenoisingModel(BaseModel):
         }
         model_ref = self.model.module if isinstance(self.model, (DataParallel, DistributedDataParallel)) else self.model
         if network is model_ref:
-            self.loaded_model_param_names = loaded_param_names
+            existing_loaded = set(getattr(self, "loaded_model_param_names", set()) or set())
+            self.loaded_model_param_names = existing_loaded | loaded_param_names
         total = len(network.state_dict())
         loaded = max(0, total - len(missing))
         logger.info(
@@ -1665,6 +1710,11 @@ class DenoisingModel(BaseModel):
             logger.warning("[LoadCheck] missing keys sample: %s", missing[:20])
         if unexpected:
             logger.warning("[LoadCheck] unexpected keys sample: %s", unexpected[:20])
+        return {
+            "missing": missing,
+            "unexpected": unexpected,
+            "loaded_param_names": loaded_param_names,
+        }
 
     def _maybe_bootstrap_brushnet_from_trunk(self):
         brushnet_opt = self.opt.get("brushnet", {})

@@ -2820,3 +2820,168 @@ Clean-up / restore note:
 - Expected x30 behavior:
   - it is still **not** designed to fully eliminate the remaining hard white cases
   - it is designed to spend the overnight budget on texture/detail improvement while preserving as much of x28 white stability as possible
+
+
+## 2026-05-04 x30 result: residual white is strongly brightness-sensitive; light low-confidence holes still blow out, dark holes are mostly stable
+
+- Logs:
+  - train: `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore_260504-001142.log`
+  - test: `C:\Users\admin\Desktop\test_ir-sde-brushnet-x30-x28resume-overnight-texturecore-current-domain_260504-103622.log`
+
+- Training hygiene is correct:
+  - warm start is exactly from x28 best:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x28-x26resume-whitefixfinal/models/best_G.pth`
+  - train/test structure stays symmetric:
+    - `texture_core.enabled=True`
+    - `restore_S_guidance=False`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+  - therefore the overnight result can be interpreted as a real model-behavior result, not a route mismatch
+
+- x30 confirms a more specific pattern than just “some samples still white”:
+  - **light / bright holes with low confidence remain the unstable subset**
+  - **dark holes are much more stable even when confidence is not especially high**
+
+- Representative bright-hole failures:
+  - `000098_bottom`
+    - `prior_hole(mean)=0.7957`
+    - `confidence_hole_mean=0.3974`
+    - `final_hole(mean)=0.9791`
+    - `final_white_ratio_hole=0.6312`
+    - low-confidence slice: `final_low white=0.9568`
+  - `000098_right`
+    - `prior_hole(mean)=0.7989`
+    - `confidence_hole_mean=0.3970`
+    - `final_hole(mean)=0.9917`
+    - `final_white_ratio_hole=0.6766`
+    - low-confidence slice: `final_low white=0.9546`
+  - `000098_center`
+    - `prior_hole(mean)=0.7068`
+    - `confidence_hole_mean=0.4177`
+    - `final_hole(mean)=0.7454`
+    - `final_white_ratio_hole=0.3661`
+    - low-confidence slice: `final_low white=0.5308`
+
+- Representative darker / lower-luminance holes:
+  - `000180_bottom`
+    - `prior_hole(mean)=0.3594`
+    - `confidence_hole_mean=0.4093`
+    - `final_hole(mean)=0.3911`
+    - `final_white_ratio_hole=0.0000`
+  - `000180_right`
+    - `prior_hole(mean)=0.4029`
+    - `confidence_hole_mean=0.3827`
+    - `final_hole(mean)=0.3922`
+    - `final_white_ratio_hole=0.0784`
+  - `000257_bottom`
+    - `prior_hole(mean)=0.6116`
+    - `confidence_hole_mean=0.4188`
+    - `final_hole(mean)=0.6561`
+    - `final_white_ratio_hole=0.0626`
+
+- Key interpretation:
+  - the failure is **not** simply “low confidence => white”
+  - confidence matters, but **hole luminance / brightness prior matters too**
+  - more accurate statement:
+    - the remaining white failure happens mainly on **bright, smooth, low-confidence holes**
+    - dark holes are comparatively robust even when confidence is mediocre
+
+- Consequence for next-step planning:
+  - adding `texture_core` alone does **not** fix the bright-hole whitening mechanism
+  - this means the residual issue is now more about **luminance calibration / brightness overshoot** in the trunk reverse process than about missing texture modules
+  - so:
+    1. if the project goal is “overall best practical result under time pressure”, x30/x28 can be accepted as the current base and work can continue on other modules
+    2. if the goal is specifically to eliminate the remaining bright-hole whitening, that requires a dedicated brightness-targeted fix rather than just adding more generic structure/detail branches
+
+
+## 2026-05-04 x31 overnight full-module branch: keep x30 current-domain route, but intentionally re-enable original structure guidance and Mu-Denoiser
+
+- User decision:
+  - x30 logs/local bad cases now show a very specific residual failure: **bright / smooth / low-confidence holes still blow out to white**, while darker holes are mostly stable.
+  - User no longer wants to keep spending the overnight budget on small anti-white-only tweaks, and explicitly asked to **add the other modules back in, including structure guidance**, then run a longer training stage.
+
+- Evidence-based risk statement before enabling it:
+  - tracking already records that `restore_S_guidance=false` was part of the stable x20/x26/x28/x30 current-domain route
+  - therefore x31 is **not** treated as a low-risk safe extension
+  - it is an intentional, higher-risk ?full-module overnight? branch because the user prefers broader capability gain over continuing to isolate the white issue first
+
+- Code support added to make this branch technically sound:
+  - file:
+    - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+  - new behavior:
+    - primary load still uses `path.pretrain_model_G`
+    - optional secondary init path now supports:
+      - `path.pretrain_model_G_fallback`
+      - `path.pretrain_model_G_fallback_only_missing`
+    - when the primary checkpoint misses tensors (the main x31 case is the newly re-enabled `restore_S_guidance` SPADE blocks), the loader can pull **only missing keys** from a fallback checkpoint
+  - why this is needed:
+    - x31 resumes from x30 `best_G`, but x30 was trained with `restore_S_guidance=false`
+    - turning `restore_S_guidance=true` adds the legacy SPADE structure-guidance tensors back into `network_G`
+    - without fallback init, those tensors would be random
+    - with fallback init, x31 can reuse the original StrDiffusion-compatible SPADE weights exactly as the wrapper layout was designed for
+
+- New train config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x31-x30resume-fullmodules-restores.yml`
+- New test config:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x31-x30resume-fullmodules-restores-current-domain.yml`
+
+- x31 policy:
+  - base checkpoint:
+    - primary warm start from x30 `best_G`
+      - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+    - hard guard:
+      - `expected_pretrain_model_G` points to the same x30 `best_G`
+  - restore the original structure-guidance path:
+    - `restore_S_guidance=true`
+  - keep current active sidecar modules on:
+    - `texture_core.enabled=true`
+    - `insert_mid=true`
+    - `insert_dec=true`
+  - re-enable Mu-Denoiser for the long run:
+    - `mu_denoiser.enabled=true`
+    - `use_for_condition_mu=false`
+  - keep the current-domain route semantics unchanged:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=known_only`
+  - structure-network checkpoint path remains fixed to the required path with trailing `s`:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- x31 fallback init source for the newly restored SPADE path:
+  - `path.pretrain_model_G_fallback`:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+  - `path.pretrain_model_G_fallback_only_missing=true`
+  - intended effect:
+    - reuse the original StrDiffusion-compatible SPADE tensors only for the keys that x30 `best_G` does not contain
+    - keep the rest of the x30 trunk / BrushNet / texture-core weights untouched
+
+- x31 optimisation schedule:
+  - long overnight run size stays at:
+    - `niter=12000`
+  - checkpoint cadence:
+    - `save_checkpoint_freq=1000`
+    - `best_save_start_iter=1500`
+  - trunk stays conservative:
+    - `lr_G=2e-7`
+  - newly activated / newly missing-filled modules learn faster but not as aggressively as x30 texture-only overnight:
+    - `lr_new=1e-6`
+  - initial freeze remains:
+    - `freeze_pretrained_until_iter=800`
+    - `freeze_loaded_pretrained_only=true`
+
+- Train/test symmetry check for x31:
+  - both train and test configs now agree on:
+    - `texture_core.enabled=true`
+    - `restore_S_guidance=true`
+    - `mu_denoiser.enabled=true`
+  - this avoids another train/test network mismatch while running the full-module branch
+
+- Validation:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\models\denoising_model.py`
+    - `py_compile` passed
+  - x31 train/test YAML:
+    - `yaml.safe_load` passed
+
+- Important interpretation:
+  - x31 is **not** a claim that the bright-hole white issue has been solved
+  - x31 is a deliberate, user-driven switch from ?continue isolating anti-white fixes? to ?accept current residual white and spend the overnight budget on the broader original-enhanced full stack?
