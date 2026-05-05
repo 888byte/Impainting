@@ -1,328 +1,328 @@
-# StrDiffusion 排错跟踪：no-retrain 原版路径消融
+﻿# StrDiffusion 鎺掗敊璺熻釜锛歯o-retrain 鍘熺増璺緞娑堣瀺
 
-更新时间：2026-04-22
-工作区：`D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3`
+鏇存柊鏃堕棿锛?026-04-22
+宸ヤ綔鍖猴細`D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3`
 
-## 当前结论
+## 褰撳墠缁撹
 
-- 这轮不重新训练，只做推理期消融：保持 `ConditionalUNetWithBrushNet` wrapper 以兼容当前 checkpoint key，但关闭新增模块。
-- 保留 `restore_S_guidance=true`，因为它是原版 StrDiffusion 的结构引导路径，不计入 BrushNet/MGLC/Mu-Denoiser 新增分支。
-- `infer_x0` 属于训练侧辅助 loss/监控；本轮推理不使用。训练配置已把 `train.infer_x0_loss_weight` 置为 `0.0`，并固定 `infer_x0_grad=false`。
-- 后续只维护主推理树：`D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting`；不再继续处理 `_texture1_patch`。
+- 杩欒疆涓嶉噸鏂拌缁冿紝鍙仛鎺ㄧ悊鏈熸秷铻嶏細淇濇寔 `ConditionalUNetWithBrushNet` wrapper 浠ュ吋瀹瑰綋鍓?checkpoint key锛屼絾鍏抽棴鏂板妯″潡銆?
+- 淇濈暀 `restore_S_guidance=true`锛屽洜涓哄畠鏄師鐗?StrDiffusion 鐨勭粨鏋勫紩瀵艰矾寰勶紝涓嶈鍏?BrushNet/MGLC/Mu-Denoiser 鏂板鍒嗘敮銆?
+- `infer_x0` 灞炰簬璁粌渚ц緟鍔?loss/鐩戞帶锛涙湰杞帹鐞嗕笉浣跨敤銆傝缁冮厤缃凡鎶?`train.infer_x0_loss_weight` 缃负 `0.0`锛屽苟鍥哄畾 `infer_x0_grad=false`銆?
+- 鍚庣画鍙淮鎶や富鎺ㄧ悊鏍戯細`D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting`锛涗笉鍐嶇户缁鐞?`_texture1_patch`銆?
 
-## 已排除/不再优先追的方向
+## 宸叉帓闄?涓嶅啀浼樺厛杩界殑鏂瑰悜
 
-- 不再把问题单独归因于 infer_x0 反传：`infer_x0_weighted` 反传会明显增加显存，当前先关闭。
-- 不再继续盲目加强 MGLC 或扩大 BrushNet 注入：先证明去掉新增分支后主干是否能恢复。
-- 不再仅看最终图判断；必须同时看日志中的 route、checkpoint、condition/mu、hole 区统计和 `state_*` 轨迹。
-- 不直接切回原始 `ConditionalUNet` 类；这样可能导致当前增强 checkpoint 的 key 大量不匹配。当前用 wrapper 但 bypass 新增模块。
+- 涓嶅啀鎶婇棶棰樺崟鐙綊鍥犱簬 infer_x0 鍙嶄紶锛歚infer_x0_weighted` 鍙嶄紶浼氭槑鏄惧鍔犳樉瀛橈紝褰撳墠鍏堝叧闂€?
+- 涓嶅啀缁х画鐩茬洰鍔犲己 MGLC 鎴栨墿澶?BrushNet 娉ㄥ叆锛氬厛璇佹槑鍘绘帀鏂板鍒嗘敮鍚庝富骞叉槸鍚﹁兘鎭㈠銆?
+- 涓嶅啀浠呯湅鏈€缁堝浘鍒ゆ柇锛涘繀椤诲悓鏃剁湅鏃ュ織涓殑 route銆乧heckpoint銆乧ondition/mu銆乭ole 鍖虹粺璁″拰 `state_*` 杞ㄨ抗銆?
+- 涓嶇洿鎺ュ垏鍥炲師濮?`ConditionalUNet` 绫伙紱杩欐牱鍙兘瀵艰嚧褰撳墠澧炲己 checkpoint 鐨?key 澶ч噺涓嶅尮閰嶃€傚綋鍓嶇敤 wrapper 浣?bypass 鏂板妯″潡銆?
 
-## 本轮新增 no-retrain 配置
+## 鏈疆鏂板 no-retrain 閰嶇疆
 
-主推理入口：
+涓绘帹鐞嗗叆鍙ｏ細
 `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\test.py`
 
-可直接使用的配置：
+鍙洿鎺ヤ娇鐢ㄧ殑閰嶇疆锛?
 
 ```powershell
 cd D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting
 
-# 推荐先跑：关闭 BrushNet/MGLC/Mu-Denoiser，但保持当前 x7 训练域 condition_lut
+# 鎺ㄨ崘鍏堣窇锛氬叧闂?BrushNet/MGLC/Mu-Denoiser锛屼絾淇濇寔褰撳墠 x7 璁粌鍩?condition_lut
 python test.py -opt options/test/ir-sde-no-extra-current-domain.yml
 
-# 对照：更接近原版 hole 侧 known_only 语义，但可能和当前 x7 训练域不一致
+# 瀵圭収锛氭洿鎺ヨ繎鍘熺増 hole 渚?known_only 璇箟锛屼絾鍙兘鍜屽綋鍓?x7 璁粌鍩熶笉涓€鑷?
 python test.py -opt options/test/ir-sde-no-extra-original-semantics.yml
 ```
 
-如果 YAML 里的 `path.pretrain_model_G` 不是你要测的当前 checkpoint，用命令行覆盖，不需要改文件：
+濡傛灉 YAML 閲岀殑 `path.pretrain_model_G` 涓嶆槸浣犺娴嬬殑褰撳墠 checkpoint锛岀敤鍛戒护琛岃鐩栵紝涓嶉渶瑕佹敼鏂囦欢锛?
 
 ```powershell
 python test.py -opt options/test/ir-sde-no-extra-current-domain.yml `
   --set path.pretrain_model_G=/path/to/current_G.pth
 ```
 
-## 每次运行必须检查的日志
+## 姣忔杩愯蹇呴』妫€鏌ョ殑鏃ュ織
 
-查找这些日志标签：
+鏌ユ壘杩欎簺鏃ュ織鏍囩锛?
 
 - `[RouteCheck] network_G=ConditionalUNetWithBrushNet model_class=ConditionalUNetWithBrushNet no_extra_route=True`
 - `[RouteCheck] brushnet.enabled(config/runtime)=False/False`
 - `[RouteCheck] texture_core.enabled(config/runtime)=False/False`
 - `[RouteCheck] mu_denoiser.enabled(config/available/runtime/has_weights)=False/.../False/False`
 - `[RouteCheck] restore_S_guidance=True`
-- `[RouteCheck] sde_mu_hole_mode=condition_lut` 或 `known_only`
-- `[RouteCheck] pretrain_model_G=...`，确认不是误用了旧/随机 checkpoint
-- `[LoadCheck] loaded ... missing=... unexpected=...`，确认 checkpoint 真实加载情况
+- `[RouteCheck] sde_mu_hole_mode=condition_lut` 鎴?`known_only`
+- `[RouteCheck] pretrain_model_G=...`锛岀‘璁や笉鏄鐢ㄤ簡鏃?闅忔満 checkpoint
+- `[LoadCheck] loaded ... missing=... unexpected=...`锛岀‘璁?checkpoint 鐪熷疄鍔犺浇鎯呭喌
 - `[NoExtraRoute] BrushNet/MGLC/Mu-Denoiser are bypassed...`
-- `[Inference Debug] ... cond_hole ... raw_hole ... final_hole ...`，观察 hole 区是否快速灰/黑/白塌缩
+- `[Inference Debug] ... cond_hole ... raw_hole ... final_hole ...`锛岃瀵?hole 鍖烘槸鍚﹀揩閫熺伆/榛?鐧藉缂?
 
-## 判断分支
+## 鍒ゆ柇鍒嗘敮
 
-1. 如果 `no_extra_current_domain` 明显改善：优先回查 BrushNet prior、MGLC 注入、Mu-Denoiser 的任一分支是否破坏主干。
-2. 如果 `no_extra_current_domain` 仍差，但 `known_only` 改善：优先回查 `condition_lut` hole anchor 与当前 checkpoint 训练目标是否不一致。
-3. 如果两个 no-extra 都差：优先回查原版不变量是否仍被破坏：`training_target/GT/x0`、`condition_mu`、`sde.set_mu()`、`reverse_optimum_step` target 必须同域一致。
-4. 如果日志里 `no_extra_route=False`：先不要看图，说明配置没有真正关闭新增模块。
+1. 濡傛灉 `no_extra_current_domain` 鏄庢樉鏀瑰杽锛氫紭鍏堝洖鏌?BrushNet prior銆丮GLC 娉ㄥ叆銆丮u-Denoiser 鐨勪换涓€鍒嗘敮鏄惁鐮村潖涓诲共銆?
+2. 濡傛灉 `no_extra_current_domain` 浠嶅樊锛屼絾 `known_only` 鏀瑰杽锛氫紭鍏堝洖鏌?`condition_lut` hole anchor 涓庡綋鍓?checkpoint 璁粌鐩爣鏄惁涓嶄竴鑷淬€?
+3. 濡傛灉涓や釜 no-extra 閮藉樊锛氫紭鍏堝洖鏌ュ師鐗堜笉鍙橀噺鏄惁浠嶈鐮村潖锛歚training_target/GT/x0`銆乣condition_mu`銆乣sde.set_mu()`銆乣reverse_optimum_step` target 蹇呴』鍚屽煙涓€鑷淬€?
+4. 濡傛灉鏃ュ織閲?`no_extra_route=False`锛氬厛涓嶈鐪嬪浘锛岃鏄庨厤缃病鏈夌湡姝ｅ叧闂柊澧炴ā鍧椼€?
 
-## 下次继续排查的最短路径
+## 涓嬫缁х画鎺掓煡鐨勬渶鐭矾寰?
 
-- 先贴对应 run 的 `test_*.log` 中 `[RouteCheck]`、`[LoadCheck]`、`[Inference Debug]` 几行。
-- 同时贴同一样本的 `x_init.png`、`condition_mu.png`、`state_1/state_10/state_25/state_50/state_100/final.png`。
-- 只在 no-extra 路径复现后，再决定是否逐个打开 BrushNet、MGLC、Mu-Denoiser 做二分定位。
+- 鍏堣创瀵瑰簲 run 鐨?`test_*.log` 涓?`[RouteCheck]`銆乣[LoadCheck]`銆乣[Inference Debug]` 鍑犺銆?
+- 鍚屾椂璐村悓涓€鏍锋湰鐨?`x_init.png`銆乣condition_mu.png`銆乣state_1/state_10/state_25/state_50/state_100/final.png`銆?
+- 鍙湪 no-extra 璺緞澶嶇幇鍚庯紝鍐嶅喅瀹氭槸鍚﹂€愪釜鎵撳紑 BrushNet銆丮GLC銆丮u-Denoiser 鍋氫簩鍒嗗畾浣嶃€?
 
-## 2026-04-22 21:20 日志复盘：no-extra 仍发白
+## 2026-04-22 21:20 鏃ュ織澶嶇洏锛歯o-extra 浠嶅彂鐧?
 
-已查看两份日志：
+宸叉煡鐪嬩袱浠芥棩蹇楋細
 
 - `C:\Users\admin\Desktop\test_ir-sde-no-extra-current-domain_260422-204651.log`
 - `C:\Users\admin\Desktop\test_ir-sde-no-extra-original-semantics_260422-205916.log`
 
-关键事实：
+鍏抽敭浜嬪疄锛?
 
-- `no_extra_route=True`，说明 BrushNet/MGLC/Mu-Denoiser 已经真正关闭。
-- 当前权重 `32000_G.pth` 主干加载完整：`loaded 231/231`，新增分支为 `unexpected=147`，符合关闭新增模块后的预期。
-- 但两次运行仍是 `discriminator_guidance=True` 且 `deterministic_reverse=False`。
-- 因此这两次还不是“纯 no-extra sampler”诊断；仍混入判别器候选选择和随机反推噪声。
-- `condition_lut` 版本中，`cond_hole` 和 `prior_hole` 都不是白色，但 `raw_hole/final_hole` 白色比例很高，说明发白发生在 reverse sampler/score 轨迹中，而不是输入先验直接是白色。
+- `no_extra_route=True`锛岃鏄?BrushNet/MGLC/Mu-Denoiser 宸茬粡鐪熸鍏抽棴銆?
+- 褰撳墠鏉冮噸 `32000_G.pth` 涓诲共鍔犺浇瀹屾暣锛歚loaded 231/231`锛屾柊澧炲垎鏀负 `unexpected=147`锛岀鍚堝叧闂柊澧炴ā鍧楀悗鐨勯鏈熴€?
+- 浣嗕袱娆¤繍琛屼粛鏄?`discriminator_guidance=True` 涓?`deterministic_reverse=False`銆?
+- 鍥犳杩欎袱娆¤繕涓嶆槸鈥滅函 no-extra sampler鈥濊瘖鏂紱浠嶆贩鍏ュ垽鍒櫒鍊欓€夐€夋嫨鍜岄殢鏈哄弽鎺ㄥ櫔澹般€?
+- `condition_lut` 鐗堟湰涓紝`cond_hole` 鍜?`prior_hole` 閮戒笉鏄櫧鑹诧紝浣?`raw_hole/final_hole` 鐧借壊姣斾緥寰堥珮锛岃鏄庡彂鐧藉彂鐢熷湪 reverse sampler/score 杞ㄨ抗涓紝鑰屼笉鏄緭鍏ュ厛楠岀洿鎺ユ槸鐧借壊銆?
 
-已更新两个 no-extra YAML：
+宸叉洿鏂颁袱涓?no-extra YAML锛?
 
 - `inference.deterministic_reverse: true`
 - `inference.discriminator_guidance.enabled: false`
 
-下一步先重跑 `ir-sde-no-extra-current-domain.yml`，日志应出现：
+涓嬩竴姝ュ厛閲嶈窇 `ir-sde-no-extra-current-domain.yml`锛屾棩蹇楀簲鍑虹幇锛?
 
 - `no_extra_route=True pure_no_extra_route=True`
 - `discriminator_guidance=False`
 - `deterministic_reverse=True`
 
-如果 pure no-extra 仍白，再回查主干 score / S guidance / checkpoint 主干训练分布；如果 pure no-extra 不白，问题优先归因于判别器引导或随机 reverse noise。
+濡傛灉 pure no-extra 浠嶇櫧锛屽啀鍥炴煡涓诲共 score / S guidance / checkpoint 涓诲共璁粌鍒嗗竷锛涘鏋?pure no-extra 涓嶇櫧锛岄棶棰樹紭鍏堝綊鍥犱簬鍒ゅ埆鍣ㄥ紩瀵兼垨闅忔満 reverse noise銆?
 
-## 2026-04-22 21:50 继续复盘：纯 no-extra 仍发白后的下一步
+## 2026-04-22 21:50 缁х画澶嶇洏锛氱函 no-extra 浠嶅彂鐧藉悗鐨勪笅涓€姝?
 
-如果新 run 已确认：
+濡傛灉鏂?run 宸茬‘璁わ細
 
 - `no_extra_route=True`
 - `pure_no_extra_route=True`
 - `discriminator_guidance=False`
 - `deterministic_reverse=True`
 
-但 mask 区仍然发白，则可以排除 BrushNet / MGLC / Mu-Denoiser / 判别器 / 随机 reverse noise 是主因。
+浣?mask 鍖轰粛鐒跺彂鐧斤紝鍒欏彲浠ユ帓闄?BrushNet / MGLC / Mu-Denoiser / 鍒ゅ埆鍣?/ 闅忔満 reverse noise 鏄富鍥犮€?
 
-下一步优先隔离 `restore_S_guidance` / SPADE 结构路径：新增两个诊断配置：
+涓嬩竴姝ヤ紭鍏堥殧绂?`restore_S_guidance` / SPADE 缁撴瀯璺緞锛氭柊澧炰袱涓瘖鏂厤缃細
 
 - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-no-structure-current-domain.yml`
 - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-no-structure-known-only.yml`
 
-它们保持：
+瀹冧滑淇濇寔锛?
 
 - BrushNet=false
 - MGLC=false
 - Mu-Denoiser=false
 - D guidance=false
 - deterministic_reverse=true
-- 但 `restore_S_guidance=false`
+- 浣?`restore_S_guidance=false`
 
-同时在 `utils/sde_utils.py` 增加 `[Trajectory Debug]`，会在若干关键步记录 hole 的 mean/min/max/white 和 score_abs_mean，用来确认是哪个阶段开始推白。
+鍚屾椂鍦?`utils/sde_utils.py` 澧炲姞 `[Trajectory Debug]`锛屼細鍦ㄨ嫢骞插叧閿璁板綍 hole 鐨?mean/min/max/white 鍜?score_abs_mean锛岀敤鏉ョ‘璁ゆ槸鍝釜闃舵寮€濮嬫帹鐧姐€?
 
-判断：
+鍒ゆ柇锛?
 
-1. 关掉 `restore_S_guidance` 后明显不白：优先修结构 S/edge/SPADE 路径。
-2. 关掉 `restore_S_guidance` 后仍白：优先查当前 32000_G 主干 score 是否已被训练分布带偏，或者当前推理 condition/x0 与训练域仍不一致。
+1. 鍏虫帀 `restore_S_guidance` 鍚庢槑鏄句笉鐧斤細浼樺厛淇粨鏋?S/edge/SPADE 璺緞銆?
+2. 鍏虫帀 `restore_S_guidance` 鍚庝粛鐧斤細浼樺厛鏌ュ綋鍓?32000_G 涓诲共 score 鏄惁宸茶璁粌鍒嗗竷甯﹀亸锛屾垨鑰呭綋鍓嶆帹鐞?condition/x0 涓庤缁冨煙浠嶄笉涓€鑷淬€?
 
-## 2026-04-22 23:00 去噪起点修正
+## 2026-04-22 23:00 鍘诲櫔璧风偣淇
 
-用户指出推理去噪起点不对：原版 StrDiffusion inpainting 的 clean start/mu 应该是 `known_pixels * mask_known`，hole 区在加噪前是黑色；`noise_state()` 之后 hole 才会有小幅 Gaussian noise。
+鐢ㄦ埛鎸囧嚭鎺ㄧ悊鍘诲櫔璧风偣涓嶅锛氬師鐗?StrDiffusion inpainting 鐨?clean start/mu 搴旇鏄?`known_pixels * mask_known`锛宧ole 鍖哄湪鍔犲櫔鍓嶆槸榛戣壊锛沗noise_state()` 涔嬪悗 hole 鎵嶄細鏈夊皬骞?Gaussian noise銆?
 
-日志确认之前 `no-structure-current-domain` 使用了：
+鏃ュ織纭涔嬪墠 `no-structure-current-domain` 浣跨敤浜嗭細
 
 - `sde_mu_hole_mode=condition_lut`
-- `cond_hole(mean≈0.69~0.81)`
+- `cond_hole(mean鈮?.69~0.81)`
 
-这说明 hole 被 LUT 内容预填了，确实不是原版黑洞起点，也会导致去噪过程看起来只是轻微调整。
+杩欒鏄?hole 琚?LUT 鍐呭棰勫～浜嗭紝纭疄涓嶆槸鍘熺増榛戞礊璧风偣锛屼篃浼氬鑷村幓鍣繃绋嬬湅璧锋潵鍙槸杞诲井璋冩暣銆?
 
-已修改：
+宸蹭慨鏀癸細
 
-- `ir-sde-no-extra-current-domain.yml` 改为 `sde_mu_hole_mode: known_only`
-- `ir-sde-no-extra-no-structure-current-domain.yml` 改为 `sde_mu_hole_mode: known_only`
-- 推理日志新增 `x_init_hole(...)` 和 `noisy_start_hole(...)`
-- 中间图新增 `x_start_noisy.png`
+- `ir-sde-no-extra-current-domain.yml` 鏀逛负 `sde_mu_hole_mode: known_only`
+- `ir-sde-no-extra-no-structure-current-domain.yml` 鏀逛负 `sde_mu_hole_mode: known_only`
+- 鎺ㄧ悊鏃ュ織鏂板 `x_init_hole(...)` 鍜?`noisy_start_hole(...)`
+- 涓棿鍥炬柊澧?`x_start_noisy.png`
 
-下一次应优先跑带结构的原版路径：
+涓嬩竴娆″簲浼樺厛璺戝甫缁撴瀯鐨勫師鐗堣矾寰勶細
 
 `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-current-domain.yml`
 
-期望日志：
+鏈熸湜鏃ュ織锛?
 
 - `sde_mu_hole_mode=known_only`
-- `x_init_hole(mean≈0,min≈0,max≈0,white=0)`
-- `noisy_start_hole` 为接近 0 的小噪声，而不是 LUT 灰/白块
+- `x_init_hole(mean鈮?,min鈮?,max鈮?,white=0)`
+- `noisy_start_hole` 涓烘帴杩?0 鐨勫皬鍣０锛岃€屼笉鏄?LUT 鐏?鐧藉潡
 
-如果这个起点正确后仍没有有效去噪，再查主干 score/训练分布。
+濡傛灉杩欎釜璧风偣姝ｇ‘鍚庝粛娌℃湁鏈夋晥鍘诲櫔锛屽啀鏌ヤ富骞?score/璁粌鍒嗗竷銆?
 
-## 2026-04-22 23:35 黑洞起点正确，但纯 mean sampler 无纹理
+## 2026-04-22 23:35 榛戞礊璧风偣姝ｇ‘锛屼絾绾?mean sampler 鏃犵汗鐞?
 
-新日志 `test_ir-sde-no-extra-current-domain_260422-232202.log` 说明：
+鏂版棩蹇?`test_ir-sde-no-extra-current-domain_260422-232202.log` 璇存槑锛?
 
-- `x_init_hole(mean=0,min=0,max=0)`，原版黑洞起点已经正确。
-- `noisy_start_hole` 只有小噪声，起点问题已修正。
-- 在纯诊断路径中：`deterministic_reverse=True` 且 `discriminator_guidance=False`，hole 从黑色逐渐变成浅色/白色均值块，但没有纹理。
+- `x_init_hole(mean=0,min=0,max=0)`锛屽師鐗堥粦娲炶捣鐐瑰凡缁忔纭€?
+- `noisy_start_hole` 鍙湁灏忓櫔澹帮紝璧风偣闂宸蹭慨姝ｃ€?
+- 鍦ㄧ函璇婃柇璺緞涓細`deterministic_reverse=True` 涓?`discriminator_guidance=False`锛宧ole 浠庨粦鑹查€愭笎鍙樻垚娴呰壊/鐧借壊鍧囧€煎潡锛屼絾娌℃湁绾圭悊銆?
 
-这说明当前问题不再是起点错误，而是：关闭所有辅助分支并使用 deterministic mean sampler 时，当前主干只给出均值/颜色趋势，不能生成纹理细节。
+杩欒鏄庡綋鍓嶉棶棰樹笉鍐嶆槸璧风偣閿欒锛岃€屾槸锛氬叧闂墍鏈夎緟鍔╁垎鏀苟浣跨敤 deterministic mean sampler 鏃讹紝褰撳墠涓诲共鍙粰鍑哄潎鍊?棰滆壊瓒嬪娍锛屼笉鑳界敓鎴愮汗鐞嗙粏鑺傘€?
 
-新增两个下一步配置：
+鏂板涓や釜涓嬩竴姝ラ厤缃細
 
 1. `ir-sde-no-extra-original-sampler-known-only.yml`
-   - BrushNet/MGLC/Mu-Denoiser 仍关闭
-   - `known_only` 黑洞起点
-   - 恢复原版 sampler 风格：`deterministic_reverse=false` + `discriminator_guidance=true`
-   - 用来确认原版随机+D sampler 是否能给当前主干带回纹理。
+   - BrushNet/MGLC/Mu-Denoiser 浠嶅叧闂?
+   - `known_only` 榛戞礊璧风偣
+   - 鎭㈠鍘熺増 sampler 椋庢牸锛歚deterministic_reverse=false` + `discriminator_guidance=true`
+   - 鐢ㄦ潵纭鍘熺増闅忔満+D sampler 鏄惁鑳界粰褰撳墠涓诲共甯﹀洖绾圭悊銆?
 
 2. `ir-sde-brushnet-only-known-start.yml`
-   - 黑洞起点 + 原版结构引导
-   - 只打开 BrushNet，关闭 MGLC/Mu-Denoiser/D guidance
-   - 用来验证“只注入颜色先验图，不改主干结构”是否能提供纹理/颜色参考。
+   - 榛戞礊璧风偣 + 鍘熺増缁撴瀯寮曞
+   - 鍙墦寮€ BrushNet锛屽叧闂?MGLC/Mu-Denoiser/D guidance
+   - 鐢ㄦ潵楠岃瘉鈥滃彧娉ㄥ叆棰滆壊鍏堥獙鍥撅紝涓嶆敼涓诲共缁撴瀯鈥濇槸鍚﹁兘鎻愪緵绾圭悊/棰滆壊鍙傝€冦€?
 
-判断：
+鍒ゆ柇锛?
 
-- 如果 original-sampler 有纹理：之前纯 deterministic 诊断过于保守，最终路径需要保留原版 sampler。
-- 如果 original-sampler 仍无纹理，但 brushnet-only 有纹理：说明当前主干单独不够，BrushNet prior 是必要条件。
-- 如果两者都无纹理：优先查 BrushNet 输入/特征注入强度，或当前 32000_G 主干训练分布已经偏成均值填充。
+- 濡傛灉 original-sampler 鏈夌汗鐞嗭細涔嬪墠绾?deterministic 璇婃柇杩囦簬淇濆畧锛屾渶缁堣矾寰勯渶瑕佷繚鐣欏師鐗?sampler銆?
+- 濡傛灉 original-sampler 浠嶆棤绾圭悊锛屼絾 brushnet-only 鏈夌汗鐞嗭細璇存槑褰撳墠涓诲共鍗曠嫭涓嶅锛孊rushNet prior 鏄繀瑕佹潯浠躲€?
+- 濡傛灉涓よ€呴兘鏃犵汗鐞嗭細浼樺厛鏌?BrushNet 杈撳叆/鐗瑰緛娉ㄥ叆寮哄害锛屾垨褰撳墠 32000_G 涓诲共璁粌鍒嗗竷宸茬粡鍋忔垚鍧囧€煎～鍏呫€?
 
-## 2026-04-23 00:25 original-sampler / BrushNet-only 仍失败后的结论
+## 2026-04-23 00:25 original-sampler / BrushNet-only 浠嶅け璐ュ悗鐨勭粨璁?
 
-新日志：
+鏂版棩蹇楋細
 
 - `test_ir-sde-no-extra-original-sampler-known-only_260422-235949.log`
-  - no-extra 路由成立：BrushNet=false, MGLC=false, Mu-Denoiser=false。
-  - 黑洞起点成立：`x_init_hole(mean=0,min=0,max=0)`。
-  - 恢复随机 reverse + D guidance 后，hole 仍主要变成浅灰/白块，没有纹理。
+  - no-extra 璺敱鎴愮珛锛欱rushNet=false, MGLC=false, Mu-Denoiser=false銆?
+  - 榛戞礊璧风偣鎴愮珛锛歚x_init_hole(mean=0,min=0,max=0)`銆?
+  - 鎭㈠闅忔満 reverse + D guidance 鍚庯紝hole 浠嶄富瑕佸彉鎴愭祬鐏?鐧藉潡锛屾病鏈夌汗鐞嗐€?
 - `test_ir-sde-brushnet-only-known-start_260423-000710.log`
-  - BrushNet 权重确实加载并参与：`loaded 326/326`，BrushNet runtime=true。
-  - 起点仍正确，但输出只出现黑/深色块，不是有效纹理修复。
+  - BrushNet 鏉冮噸纭疄鍔犺浇骞跺弬涓庯細`loaded 326/326`锛孊rushNet runtime=true銆?
+  - 璧风偣浠嶆纭紝浣嗚緭鍑哄彧鍑虹幇榛?娣辫壊鍧楋紝涓嶆槸鏈夋晥绾圭悊淇銆?
 
-因此已排除：
+鍥犳宸叉帓闄わ細
 
-1. “只是起点不是黑洞” —— 已修正，仍失败。
-2. “只是 deterministic mean sampler 太保守” —— 恢复随机+D 后仍失败。
-3. “BrushNet 没加载/没生效” —— BrushNet-only 明显改变轨迹，但方向错误。
-4. “关掉新增模块就能恢复原版能力” —— 当前 32000_G 的 no-extra 主干路径仍不能恢复纹理。
+1. 鈥滃彧鏄捣鐐逛笉鏄粦娲炩€?鈥斺€?宸蹭慨姝ｏ紝浠嶅け璐ャ€?
+2. 鈥滃彧鏄?deterministic mean sampler 澶繚瀹堚€?鈥斺€?鎭㈠闅忔満+D 鍚庝粛澶辫触銆?
+3. 鈥淏rushNet 娌″姞杞?娌＄敓鏁堚€?鈥斺€?BrushNet-only 鏄庢樉鏀瑰彉杞ㄨ抗锛屼絾鏂瑰悜閿欒銆?
+4. 鈥滃叧鎺夋柊澧炴ā鍧楀氨鑳芥仮澶嶅師鐗堣兘鍔涒€?鈥斺€?褰撳墠 32000_G 鐨?no-extra 涓诲共璺緞浠嶄笉鑳芥仮澶嶇汗鐞嗐€?
 
-下一步不再继续盲调 x7 推理参数，而是做 **原版 StrDiffusion sampler parity**：当前 enhanced 路径虽然模拟了原版采样，但仍不是逐行原版 `reverse_sde` 分支。已新增两个配置，用同一个 wrapper/checkpoint 做无重训对照：
+涓嬩竴姝ヤ笉鍐嶇户缁洸璋?x7 鎺ㄧ悊鍙傛暟锛岃€屾槸鍋?**鍘熺増 StrDiffusion sampler parity**锛氬綋鍓?enhanced 璺緞铏界劧妯℃嫙浜嗗師鐗堥噰鏍凤紝浣嗕粛涓嶆槸閫愯鍘熺増 `reverse_sde` 鍒嗘敮銆傚凡鏂板涓や釜閰嶇疆锛岀敤鍚屼竴涓?wrapper/checkpoint 鍋氭棤閲嶈瀵圭収锛?
 
 - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-legacy-reverse-current-domain.yml`
   - no BrushNet/MGLC/Mu
   - `force_legacy_reverse=true`
   - `condition_known_source=lut`, `structure_source=lut`
-  - 目的：验证是否是 enhanced reverse 分支本身偏离原版。
+  - 鐩殑锛氶獙璇佹槸鍚︽槸 enhanced reverse 鍒嗘敮鏈韩鍋忕鍘熺増銆?
 
 - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-no-extra-legacy-reverse-gt-parity.yml`
   - no BrushNet/MGLC/Mu
   - `force_legacy_reverse=true`
   - `condition_known_source=gt_if_available`, `structure_source=gt_if_available`
-  - 目的：在训练集/有 GT 的样本上尽量贴近原版 StrDiffusion 测试语义，判断当前 x7 主干是否还保留原版修复能力。
+  - 鐩殑锛氬湪璁粌闆?鏈?GT 鐨勬牱鏈笂灏介噺璐磋繎鍘熺増 StrDiffusion 娴嬭瘯璇箟锛屽垽鏂綋鍓?x7 涓诲共鏄惁杩樹繚鐣欏師鐗堜慨澶嶈兘鍔涖€?
 
-新增日志应出现：
+鏂板鏃ュ織搴斿嚭鐜帮細
 
 - `force_legacy_reverse=True`
 - `[LegacyReverseRoute] ... enhanced_inference=false`
-- `[StructureRoute] ... resolved=lut` 或 `resolved=gt`
+- `[StructureRoute] ... resolved=lut` 鎴?`resolved=gt`
 
-判断：
+鍒ゆ柇锛?
 
-- current-domain legacy 能改善：之前问题集中在 enhanced reverse/composite 逻辑。
-- current-domain 仍差但 gt-parity 改善：问题集中在当前推理 condition/structure 构造和原版训练/测试语义不一致。
-- 两者仍差：当前 x7 checkpoint 的主干 score 已经被后续训练/新增模块带偏；无重训关闭模块无法恢复原版能力，需要回到原版收敛 checkpoint 或做主干冻结/小学习率恢复训练。
+- current-domain legacy 鑳芥敼鍠勶細涔嬪墠闂闆嗕腑鍦?enhanced reverse/composite 閫昏緫銆?
+- current-domain 浠嶅樊浣?gt-parity 鏀瑰杽锛氶棶棰橀泦涓湪褰撳墠鎺ㄧ悊 condition/structure 鏋勯€犲拰鍘熺増璁粌/娴嬭瘯璇箟涓嶄竴鑷淬€?
+- 涓よ€呬粛宸細褰撳墠 x7 checkpoint 鐨勪富骞?score 宸茬粡琚悗缁缁?鏂板妯″潡甯﹀亸锛涙棤閲嶈鍏抽棴妯″潡鏃犳硶鎭㈠鍘熺増鑳藉姏锛岄渶瑕佸洖鍒板師鐗堟敹鏁?checkpoint 鎴栧仛涓诲共鍐荤粨/灏忓涔犵巼鎭㈠璁粌銆?
 
-## 2026-04-23 10:50 legacy reverse + GT parity 仍失败
+## 2026-04-23 10:50 legacy reverse + GT parity 浠嶅け璐?
 
-新日志：
+鏂版棩蹇楋細
 
 - `test_ir-sde-no-extra-legacy-reverse-current-domain_260423-103607.log`
 - `test_ir-sde-no-extra-legacy-reverse-gt-parity_260423-104051.log`
 
-确认信息：
+纭淇℃伅锛?
 
-- `force_legacy_reverse=True`，确实走了原版 `reverse_sde` 分支（`enhanced_inference=false`）。
-- no-extra 路由成立：BrushNet=false, MGLC=false, Mu-Denoiser=false。
-- `loaded 231/231 tensors into ConditionalUNetWithBrushNet`，当前 x7 checkpoint 的原版主干权重全部加载。
-- 起点仍正确：`x_init_hole(mean=0,min=0,max=0)`。
-- GT parity 中结构来源确实为 GT：`[StructureRoute] ... resolved=gt has_gt=True`。
+- `force_legacy_reverse=True`锛岀‘瀹炶蛋浜嗗師鐗?`reverse_sde` 鍒嗘敮锛坄enhanced_inference=false`锛夈€?
+- no-extra 璺敱鎴愮珛锛欱rushNet=false, MGLC=false, Mu-Denoiser=false銆?
+- `loaded 231/231 tensors into ConditionalUNetWithBrushNet`锛屽綋鍓?x7 checkpoint 鐨勫師鐗堜富骞叉潈閲嶅叏閮ㄥ姞杞姐€?
+- 璧风偣浠嶆纭細`x_init_hole(mean=0,min=0,max=0)`銆?
+- GT parity 涓粨鏋勬潵婧愮‘瀹炰负 GT锛歚[StructureRoute] ... resolved=gt has_gt=True`銆?
 
-结论：
+缁撹锛?
 
-即使使用原版 sampler 分支，并且在训练集/有 GT 情况下把 condition/structure 尽量贴近原版 StrDiffusion，当前 x7 的 `32000_G.pth` 主干仍不能修复。此时问题基本不在推理分支、起点、D guidance、BrushNet/MGLC/Mu 开关，而是当前 checkpoint 的主干 score 已经偏离原版可修复解。
+鍗充娇浣跨敤鍘熺増 sampler 鍒嗘敮锛屽苟涓斿湪璁粌闆?鏈?GT 鎯呭喌涓嬫妸 condition/structure 灏介噺璐磋繎鍘熺増 StrDiffusion锛屽綋鍓?x7 鐨?`32000_G.pth` 涓诲共浠嶄笉鑳戒慨澶嶃€傛鏃堕棶棰樺熀鏈笉鍦ㄦ帹鐞嗗垎鏀€佽捣鐐广€丏 guidance銆丅rushNet/MGLC/Mu 寮€鍏筹紝鑰屾槸褰撳墠 checkpoint 鐨勪富骞?score 宸茬粡鍋忕鍘熺増鍙慨澶嶈В銆?
 
-下一步验证不再继续用 x7 盲调，而是做两件事：
+涓嬩竴姝ラ獙璇佷笉鍐嶇户缁敤 x7 鐩茶皟锛岃€屾槸鍋氫袱浠朵簨锛?
 
-1. **原版 baseline checkpoint parity**
-   - 新增配置：
+1. **鍘熺増 baseline checkpoint parity**
+   - 鏂板閰嶇疆锛?
      `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-baseline-original-checkpoint-gt-parity.yml`
-   - 默认加载：
+   - 榛樿鍔犺浇锛?
      `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
-   - 若它能正常修复，则说明当前推理代码已经足够接近原版，问题集中在 x7 checkpoint 主干被训练带偏。
-   - 若它也不能修复，则还需要继续对齐当前 `texture-1` 测试树与原版 `StrDiffusion/test/texture` 的数据/结构生成。 
+   - 鑻ュ畠鑳芥甯镐慨澶嶏紝鍒欒鏄庡綋鍓嶆帹鐞嗕唬鐮佸凡缁忚冻澶熸帴杩戝師鐗堬紝闂闆嗕腑鍦?x7 checkpoint 涓诲共琚缁冨甫鍋忋€?
+   - 鑻ュ畠涔熶笉鑳戒慨澶嶏紝鍒欒繕闇€瑕佺户缁榻愬綋鍓?`texture-1` 娴嬭瘯鏍戜笌鍘熺増 `StrDiffusion/test/texture` 鐨勬暟鎹?缁撴瀯鐢熸垚銆?
 
-2. **checkpoint 主干漂移审计**
-   - 新增脚本：
+2. **checkpoint 涓诲共婕傜Щ瀹¤**
+   - 鏂板鑴氭湰锛?
      `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\tools\checkpoint_trunk_audit.py`
-   - 比较原版 baseline 和 x7 之间共享的 ConditionalUNet 主干权重漂移。
-   - 输出：
+   - 姣旇緝鍘熺増 baseline 鍜?x7 涔嬮棿鍏变韩鐨?ConditionalUNet 涓诲共鏉冮噸婕傜Щ銆?
+   - 杈撳嚭锛?
      `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\STRDIFFUSION_CHECKPOINT_DRIFT.md`
 
-如果 baseline parity 正常且 drift 很大，后续无重训可选方案只有：
+濡傛灉 baseline parity 姝ｅ父涓?drift 寰堝ぇ锛屽悗缁棤閲嶈鍙€夋柟妗堝彧鏈夛細
 
-- 直接使用原版 baseline checkpoint 推理；或
-- 做 checkpoint surgery：把 x7 checkpoint 中原版主干权重替换回 baseline，只保留新增模块权重，再做 no-extra/BrushNet-only 推理消融。
+- 鐩存帴浣跨敤鍘熺増 baseline checkpoint 鎺ㄧ悊锛涙垨
+- 鍋?checkpoint surgery锛氭妸 x7 checkpoint 涓師鐗堜富骞叉潈閲嶆浛鎹㈠洖 baseline锛屽彧淇濈暀鏂板妯″潡鏉冮噸锛屽啀鍋?no-extra/BrushNet-only 鎺ㄧ悊娑堣瀺銆?
 
-## 2026-04-23 12:10 baseline checkpoint parity 有效后的下一步
+## 2026-04-23 12:10 baseline checkpoint parity 鏈夋晥鍚庣殑涓嬩竴姝?
 
-用户反馈 `ir-sde-baseline-original-checkpoint-gt-parity`：
+鐢ㄦ埛鍙嶉 `ir-sde-baseline-original-checkpoint-gt-parity`锛?
 
-- 原版 baseline checkpoint 已经能修，边缘/统一颜色区域明显恢复。
-- 仍存在局部黑/深色斑块，复杂纹理区域细节不足。
+- 鍘熺増 baseline checkpoint 宸茬粡鑳戒慨锛岃竟缂?缁熶竴棰滆壊鍖哄煙鏄庢樉鎭㈠銆?
+- 浠嶅瓨鍦ㄥ眬閮ㄩ粦/娣辫壊鏂戝潡锛屽鏉傜汗鐞嗗尯鍩熺粏鑺備笉瓒炽€?
 
-结合 `STRDIFFUSION_CHECKPOINT_DRIFT.md`：
+缁撳悎 `STRDIFFUSION_CHECKPOINT_DRIFT.md`锛?
 
-- baseline vs x7 共享主干 `231` 个 tensor。
-- x7 多出 `189` 个新增模块 tensor。
-- 主干 global `relative_rms≈0.060467`，漂移最大在 `mid_block*`、`ups.*` 和早期 `downs.0`。
+- baseline vs x7 鍏变韩涓诲共 `231` 涓?tensor銆?
+- x7 澶氬嚭 `189` 涓柊澧炴ā鍧?tensor銆?
+- 涓诲共 global `relative_rms鈮?.060467`锛屾紓绉绘渶澶у湪 `mid_block*`銆乣ups.*` 鍜屾棭鏈?`downs.0`銆?
 
-结论：
+缁撹锛?
 
-1. 当前 `texture-1` 推理链路已经足够接近原版，原版 baseline checkpoint 可以恢复基本修复能力。
-2. x7 关闭新增模块仍失败，说明 x7 的原版主干被后续训练带偏，而不是推理路径本身坏。
-3. baseline 的黑斑更多像原版随机+D adaptive sampler 的候选选择伪影，尤其在参考先验/GT/LUT 的 hole 区没有暗色内容时，D 仍可能选到局部过暗 proposal。
+1. 褰撳墠 `texture-1` 鎺ㄧ悊閾捐矾宸茬粡瓒冲鎺ヨ繎鍘熺増锛屽師鐗?baseline checkpoint 鍙互鎭㈠鍩烘湰淇鑳藉姏銆?
+2. x7 鍏抽棴鏂板妯″潡浠嶅け璐ワ紝璇存槑 x7 鐨勫師鐗堜富骞茶鍚庣画璁粌甯﹀亸锛岃€屼笉鏄帹鐞嗚矾寰勬湰韬潖銆?
+3. baseline 鐨勯粦鏂戞洿澶氬儚鍘熺増闅忔満+D adaptive sampler 鐨勫€欓€夐€夋嫨浼奖锛屽挨鍏跺湪鍙傝€冨厛楠?GT/LUT 鐨?hole 鍖烘病鏈夋殫鑹插唴瀹规椂锛孌 浠嶅彲鑳介€夊埌灞€閮ㄨ繃鏆?proposal銆?
 
-已新增/修改：
+宸叉柊澧?淇敼锛?
 
-- 增强版 D guard：`D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\utils\sde_utils.py`
-  - 增加 dark-ratio 检查。
-  - enhanced guarded sampler 使用 color_prior/GT/LUT 作为安全参考，而不是黑洞 `mu`。
-  - 日志新增：`[DiscriminatorGuard] rejected_candidates=...`。
+- 澧炲己鐗?D guard锛歚D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\utils\sde_utils.py`
+  - 澧炲姞 dark-ratio 妫€鏌ャ€?
+  - enhanced guarded sampler 浣跨敤 color_prior/GT/LUT 浣滀负瀹夊叏鍙傝€冿紝鑰屼笉鏄粦娲?`mu`銆?
+  - 鏃ュ織鏂板锛歚[DiscriminatorGuard] rejected_candidates=...`銆?
 
-- 新增 baseline sampler 对照配置：
+- 鏂板 baseline sampler 瀵圭収閰嶇疆锛?
   - `ir-sde-baseline-original-checkpoint-guarded-sampler-gt-parity.yml`
-    - baseline G，enhanced guarded stochastic + D。
-    - 目标：保留纹理同时抑制黑斑。
+    - baseline G锛宔nhanced guarded stochastic + D銆?
+    - 鐩爣锛氫繚鐣欑汗鐞嗗悓鏃舵姂鍒堕粦鏂戙€?
   - `ir-sde-baseline-original-checkpoint-deterministic-gt-parity.yml`
-    - baseline G，deterministic + no D。
-    - 目标：验证黑斑是否由 stochastic/D 造成；预期更平滑、纹理更少。
+    - baseline G锛宒eterministic + no D銆?
+    - 鐩爣锛氶獙璇侀粦鏂戞槸鍚︾敱 stochastic/D 閫犳垚锛涢鏈熸洿骞虫粦銆佺汗鐞嗘洿灏戙€?
 
-- 新增 checkpoint surgery 脚本：
+- 鏂板 checkpoint surgery 鑴氭湰锛?
   - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\tools\make_baseline_trunk_hybrid.py`
-  - 生成：baseline trunk + x7 added modules。
-  - 默认输出：
+  - 鐢熸垚锛歜aseline trunk + x7 added modules銆?
+  - 榛樿杈撳嚭锛?
     `/home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/log/ir-sde-brushnet-ft-x7/models/32000_G.baseline_trunk_x7_extra.pth`
 
-- 新增 hybrid BrushNet-only 对照配置：
+- 鏂板 hybrid BrushNet-only 瀵圭収閰嶇疆锛?
   - `ir-sde-hybrid-baseline-trunk-brushnet-only-guarded-gt-parity.yml`
   - `ir-sde-hybrid-baseline-trunk-brushnet-only-deterministic-gt-parity.yml`
 
-下一步顺序：
+涓嬩竴姝ラ『搴忥細
 
-1. 先跑 baseline guarded sampler，看黑斑是否消失同时保留纹理。
-2. 再跑 baseline deterministic，确认黑斑是否由 D/stochastic 引入。
-3. 如果 baseline guarded 较好，再生成 hybrid checkpoint 并跑 hybrid BrushNet-only，验证 x7 的 BrushNet 能否在 baseline 主干上提供颜色/纹理先验。
+1. 鍏堣窇 baseline guarded sampler锛岀湅榛戞枒鏄惁娑堝け鍚屾椂淇濈暀绾圭悊銆?
+2. 鍐嶈窇 baseline deterministic锛岀‘璁ら粦鏂戞槸鍚︾敱 D/stochastic 寮曞叆銆?
+3. 濡傛灉 baseline guarded 杈冨ソ锛屽啀鐢熸垚 hybrid checkpoint 骞惰窇 hybrid BrushNet-only锛岄獙璇?x7 鐨?BrushNet 鑳藉惁鍦?baseline 涓诲共涓婃彁渚涢鑹?绾圭悊鍏堥獙銆?
 
 ## 2026-04-23 14:35 switch to 48000 checkpoint
 
@@ -751,7 +751,7 @@ Current strongest hypothesis:
   - x7 was trained with `train.sde_mu_hole_mode=condition_lut`, so the hole clean state seen during training is a bright filled target-domain estimate, **not a black/empty hole**.
   - In current inference runs, `x_init_hole(mean)` is still very bright (`0.61~0.82` depending on sample), so the reverse path starts from a pale anchor rather than a blank hole.
   - This matches the user observation: high-confidence areas can keep some texture, but low-confidence areas do not synthesize structure and instead stay pale/white.
-  - Therefore the remaining issue is likely **not** “which inference switch to toggle”, but that the x7 checkpoint has learned to denoise around a filled hole anchor instead of learning robust hole generation from noise.
+  - Therefore the remaining issue is likely **not** 鈥渨hich inference switch to toggle鈥? but that the x7 checkpoint has learned to denoise around a filled hole anchor instead of learning robust hole generation from noise.
 
 Secondary suspicion confirmed by code inspection:
 
@@ -759,7 +759,7 @@ Secondary suspicion confirmed by code inspection:
   - `_build_lut_transformed()` blends LUT output back with the original image using `effective_weight = lut_confidence * lut_strength`.
   - `ColorPriorGenerator.generate_quality()` heavily smooths Lab deltas (multi-scale + guided/bilateral filtering).
   - So even `lut_strength: 1.0` does **not** imply a strong visible domain shift; the actual transform can still be weak.
-- This matches the user’s feeling that “变色了和没变色差不多”.
+- This matches the user鈥檚 feeling that 鈥滃彉鑹蹭簡鍜屾病鍙樿壊宸笉澶氣€?
 
 New instrumentation added:
 
@@ -822,8 +822,8 @@ Files restored/verified:
 
 Important fix:
 
-- The two x8 YAML files had their Linux Chinese dataset directory accidentally saved as `?????`.
-- Restored it to UTF-8 `裁剪的图片` in:
+- The two x8 YAML files had their Linux Chinese dataset directory accidentally saved as `"""""`.
+- Restored it to UTF-8 `瑁佸壀鐨勫浘鐗嘸 in:
   - `degradation.mask_root`
   - `datasets.train.dataroot_GT`
   - `datasets.train.dataroot_mask`
@@ -859,8 +859,8 @@ Validation commands run on 2026-04-25:
   - no `PixelBrushNetLite`
   - no `brushnet_lite`
   - no remaining `lite:` matches in train/test inpainting Python/YAML files
-- Search check for corrupted `?????` dataset paths:
-  - no remaining `?????` in train/test option YAML files.
+- Search check for corrupted `"""""` dataset paths:
+  - no remaining `"""""` in train/test option YAML files.
 
 Expected logs for the next x8 training/test run:
 
@@ -932,7 +932,7 @@ Why LUT gain was changed:
 Validation run locally after the fix:
 
 - YAML parse OK for both x8 train/test configs.
-- UTF-8 Chinese dataset path values survived; no `?` replacement in dataset path lines.
+- UTF-8 Chinese dataset path values survived; no `"` replacement in dataset path lines.
 - No `PixelBrushNetLite`, `brushnet_lite`, or `lite:` references in the two x8 configs.
 - Python compile OK for touched train/test code paths.
 - Static checks confirm:
@@ -1050,42 +1050,42 @@ Expected inference log after retraining with this fix:
 - `[Target Debug] ... final_white_ratio_hole=... target_like_gt_l1=...`
 - No `[WhiteMask Alert]` for normal samples.
 
-## 2026-04-26 x9-clean: 回归原版 StrDiffusion 训练语义
+## 2026-04-26 x9-clean: 鍥炲綊鍘熺増 StrDiffusion 璁粌璇箟
 
-### 问题根因
+### 闂鏍瑰洜
 
-x8 的 `infer_x0` + `x0_recon` 辅助 loss 额外做了一次 `sde.noise_fn()` 前向+反向（VRAM 翻倍），
-且 teacher-forcing 导致模型在 hole 区只见过含 `B(t)*target` 的分布，推理时 hole 从 0 开始则偏白。
-`lut_delta_gain=4.5` 导致全局颜色偏黄。
+x8 鐨?`infer_x0` + `x0_recon` 杈呭姪 loss 棰濆鍋氫簡涓€娆?`sde.noise_fn()` 鍓嶅悜+鍙嶅悜锛圴RAM 缈诲€嶏級锛?
+涓?teacher-forcing 瀵艰嚧妯″瀷鍦?hole 鍖哄彧瑙佽繃鍚?`B(t)*target` 鐨勫垎甯冿紝鎺ㄧ悊鏃?hole 浠?0 寮€濮嬪垯鍋忕櫧銆?
+`lut_delta_gain=4.5` 瀵艰嚧鍏ㄥ眬棰滆壊鍋忛粍銆?
 
-### x9-clean 改动
+### x9-clean 鏀瑰姩
 
-| 文件 | 改动 |
+| 鏂囦欢 | 鏀瑰姩 |
 |------|------|
-| `denoising_model.py` (训练) | 删除 `_estimate_x0_from_noise`、`x0_recon`、`infer_x0` 全部参数和 loss 分支；简化 `optimize_parameters` 为原版单 loss + MuDenoiser |
-| `denoising_model.py` (训练) | `_build_lut_transformed` 改为自适应 fade-degree LUT |
-| `train.py` | `condition_mu = training_target * mask_for_sde`（hole=0），删除 `mu_hole_mode` 分支 |
-| `denoising_model.py` (推理) | LUT 逻辑同步为 fade-degree-aware；`condition_mu = known_source * mask_known` |
-| 新增 `ir-sde-brushnet-ft-x9-clean.yml` | 训练配置，从 `best_G.pth` 初始化 |
-| 新增 `ir-sde-brushnet-x9-clean-current-domain.yml` | 推理配置 |
+| `denoising_model.py` (璁粌) | 鍒犻櫎 `_estimate_x0_from_noise`銆乣x0_recon`銆乣infer_x0` 鍏ㄩ儴鍙傛暟鍜?loss 鍒嗘敮锛涚畝鍖?`optimize_parameters` 涓哄師鐗堝崟 loss + MuDenoiser |
+| `denoising_model.py` (璁粌) | `_build_lut_transformed` 鏀逛负鑷€傚簲 fade-degree LUT |
+| `train.py` | `condition_mu = training_target * mask_for_sde`锛坔ole=0锛夛紝鍒犻櫎 `mu_hole_mode` 鍒嗘敮 |
+| `denoising_model.py` (鎺ㄧ悊) | LUT 閫昏緫鍚屾涓?fade-degree-aware锛沗condition_mu = known_source * mask_known` |
+| 鏂板 `ir-sde-brushnet-ft-x9-clean.yml` | 璁粌閰嶇疆锛屼粠 `best_G.pth` 鍒濆鍖?|
+| 鏂板 `ir-sde-brushnet-x9-clean-current-domain.yml` | 鎺ㄧ悊閰嶇疆 |
 
-### 首 100 步必须验证的指标
+### 棣?100 姝ュ繀椤婚獙璇佺殑鎸囨爣
 
-| 指标 | 正常范围 | 含义 |
+| 鎸囨爣 | 姝ｅ父鑼冨洿 | 鍚箟 |
 |------|----------|------|
-| `stats_sde_mu_hole_mean` | ≈ 0.0 | SDE mu 在 hole 区必须为零 |
-| `stats_train_target_hole_mean` | 0.3~0.6 | target 是正常壁画颜色 |
-| `stats_training_target_delta` | 0.02~0.04 | LUT 变色不过激 |
-| `stats_noise_std` | 0.5~2.0 | 模型输出噪声正常 |
+| `stats_sde_mu_hole_mean` | 鈮?0.0 | SDE mu 鍦?hole 鍖哄繀椤讳负闆?|
+| `stats_train_target_hole_mean` | 0.3~0.6 | target 鏄甯稿鐢婚鑹?|
+| `stats_training_target_delta` | 0.02~0.04 | LUT 鍙樿壊涓嶈繃婵€ |
+| `stats_noise_std` | 0.5~2.0 | 妯″瀷杈撳嚭鍣０姝ｅ父 |
 
-### 命令
+### 鍛戒护
 
 ```bash
-# 训练
+# 璁粌
 cd /home/610-wws/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting
 python train.py -opt options/train/ir-sde-brushnet-ft-x9-clean.yml
 
-# 推理
+# 鎺ㄧ悊
 cd /home/610-wws/Impainting/StrDiffusion/test/texture-1/config/inpainting
 python test.py -opt options/test/ir-sde-brushnet-x9-clean-current-domain.yml
 ```
@@ -1271,7 +1271,7 @@ Inference log:
 Hard sample results still failed:
 - `000098_center: final_gt_l1=0.258537, prior_gt_l1=0.204685`
 - `000098_left:   final_gt_l1=0.351338, prior_gt_l1=0.217610`
-- `[WhiteMask Alert]` still triggered with `final_hole_mean?0.90`
+- `[WhiteMask Alert]` still triggered with `final_hole_mean"0.90`
 
 ### What x11 already ruled out
 
@@ -1465,8 +1465,8 @@ What is now confirmed to be correct:
 - inference no longer shows the old `0.97~0.99` white ratio collapse on the hard center sample
 
 Representative improvement:
-- earlier broken x12 center run: `final_white_ratio_hole ≈ 0.79`
-- corrected x12 center run: `final_white_ratio_hole ≈ 0.22`
+- earlier broken x12 center run: `final_white_ratio_hole 鈮?0.79`
+- corrected x12 center run: `final_white_ratio_hole 鈮?0.22`
 
 So the pipeline is no longer suffering from the same pure implementation bug as before.
 
@@ -1712,7 +1712,7 @@ Implication:
 
 Additional confirmation:
 - x14 training logs show `loss_color_aux = 0`, so the remaining bright attractor is not caused by color auxiliary loss.
-- x14 test logs still show `final_hole_mean ≈ 0.97` and large `final_gt_l1 > prior_gt_l1`, even though white-ratio collapse is much lower than the earlier pure-white failures.
+- x14 test logs still show `final_hole_mean 鈮?0.97` and large `final_gt_l1 > prior_gt_l1`, even though white-ratio collapse is much lower than the earlier pure-white failures.
 
 Action taken:
 - reintroduced a **small, explicit inference-like blank-hole x0 supervision** branch in:
@@ -1756,7 +1756,7 @@ Clean-up / restore note:
   - This is the current active clean line. Older x12/x13/x14/x15 checkpoints should not be used as warm starts for it.
 
 - 2026-04-30 / x16 result conclusion:
-  - x16 clean-init **falsified** the remaining “bad warm start” hypothesis.
+  - x16 clean-init **falsified** the remaining 鈥渂ad warm start鈥?hypothesis.
   - Evidence:
     - train log loads the original baseline trunk:
       - `pretrain_model_G=/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
@@ -1769,7 +1769,7 @@ Clean-up / restore note:
       - `structure_source=prefill`
       - `restore_S_guidance=false`
   - Yet x16 still converges to the same bright solution:
-    - `final_hole_mean ≈ 0.97`
+    - `final_hole_mean 鈮?0.97`
     - hard samples remain much worse than `prior_gt_l1`
   - Therefore the remaining failure is **not** best explained by:
     - a route typo,
@@ -1809,7 +1809,7 @@ Clean-up / restore note:
       - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x17-hight-only.yml`
       - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x17-hight-only-current-domain.yml`
     - corrected path segment:
-      - `/home/610-wws/Impainting/dataset/裁剪的图片/...`
+      - `/home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?...`
 
 - 2026-04-30 / x17 result conclusion:
   - x17 confirmed that the previous diagnosis about the main state distribution was real:
@@ -1956,7 +1956,7 @@ Clean-up / restore note:
     - `texture_hf_loss_start_iter: 0`
     - `texture_hf_blur_kernel: 11`
 - YAML path fix recorded:
-  - the first x22 YAML drafts contained garbled Chinese dataset roots; active x22 train/test YAMLs now use the correct `/home/610-wws/Impainting/dataset/裁剪的图片/...` paths.
+  - the first x22 YAML drafts contained garbled Chinese dataset roots; active x22 train/test YAMLs now use the correct `/home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?...` paths.
 
 ## 2026-05-02 x22 result -> x23 direct trunk high-frequency supervision
 
@@ -1975,10 +1975,10 @@ Clean-up / restore note:
   - metrics remain very close to x21/x20 on the tracked samples; improvements are too small and inconsistent to count as real texture recovery.
 - Interpretation:
   - original StrDiffusion texture came primarily from the **main diffusion trunk**;
-  - in x20/x21/x22, we deliberately protected the trunk to stabilize current-domain supervision and pushed most “texture pressure” onto auxiliary paths (`texture_core`, infer-branch HF loss);
+  - in x20/x21/x22, we deliberately protected the trunk to stabilize current-domain supervision and pushed most 鈥渢exture pressure鈥?onto auxiliary paths (`texture_core`, infer-branch HF loss);
   - this keeps coarse color stable, but it also explains why visible texture does not come back.
 - New active line: `x23-trunkhftexture`
-  - Keep x20’s validated current-domain route:
+  - Keep x20鈥檚 validated current-domain route:
     - paired supervision
     - refined mask
     - clean compose
@@ -2001,7 +2001,7 @@ Clean-up / restore note:
     - `lr_new: 1e-6`
     - `freeze_pretrained_until_iter: 0`
 - x23-specific fixes recorded:
-  - the first x23 YAML drafts inherited garbled Chinese dataset roots; active x23 train/test YAMLs have been corrected to `/home/610-wws/Impainting/dataset/裁剪的图片/...`
+  - the first x23 YAML drafts inherited garbled Chinese dataset roots; active x23 train/test YAMLs have been corrected to `/home/610-wws/Impainting/dataset/瑁佸壀鐨勫浘鐗?...`
   - active x23 test YAML keeps the correct structure checkpoint path:
     - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
 
@@ -2770,7 +2770,7 @@ Clean-up / restore note:
     - `restore_S_guidance=false`
   - x28, the current best white-stable base, also keeps:
     - `restore_S_guidance=false`
-- Therefore the original structure-guidance path is not a safe “bigger overnight” add-on under the current degraded-known route; it is a historically high-risk switch for white regression.
+- Therefore the original structure-guidance path is not a safe 鈥渂igger overnight鈥?add-on under the current degraded-known route; it is a historically high-risk switch for white regression.
 
 
 ## 2026-05-03 x30 overnight branch: keep x28 white-stable route, but scale `texture_core` to the stronger original-enhanced setting
@@ -2838,7 +2838,7 @@ Clean-up / restore note:
     - `structure_source=prefill`
   - therefore the overnight result can be interpreted as a real model-behavior result, not a route mismatch
 
-- x30 confirms a more specific pattern than just “some samples still white”:
+- x30 confirms a more specific pattern than just 鈥渟ome samples still white鈥?
   - **light / bright holes with low confidence remain the unstable subset**
   - **dark holes are much more stable even when confidence is not especially high**
 
@@ -2880,7 +2880,7 @@ Clean-up / restore note:
     - `final_white_ratio_hole=0.0626`
 
 - Key interpretation:
-  - the failure is **not** simply “low confidence => white”
+  - the failure is **not** simply 鈥渓ow confidence => white鈥?
   - confidence matters, but **hole luminance / brightness prior matters too**
   - more accurate statement:
     - the remaining white failure happens mainly on **bright, smooth, low-confidence holes**
@@ -2890,7 +2890,7 @@ Clean-up / restore note:
   - adding `texture_core` alone does **not** fix the bright-hole whitening mechanism
   - this means the residual issue is now more about **luminance calibration / brightness overshoot** in the trunk reverse process than about missing texture modules
   - so:
-    1. if the project goal is “overall best practical result under time pressure”, x30/x28 can be accepted as the current base and work can continue on other modules
+    1. if the project goal is 鈥渙verall best practical result under time pressure鈥? x30/x28 can be accepted as the current base and work can continue on other modules
     2. if the goal is specifically to eliminate the remaining bright-hole whitening, that requires a dedicated brightness-targeted fix rather than just adding more generic structure/detail branches
 
 
@@ -2903,7 +2903,7 @@ Clean-up / restore note:
 - Evidence-based risk statement before enabling it:
   - tracking already records that `restore_S_guidance=false` was part of the stable x20/x26/x28/x30 current-domain route
   - therefore x31 is **not** treated as a low-risk safe extension
-  - it is an intentional, higher-risk ?full-module overnight? branch because the user prefers broader capability gain over continuing to isolate the white issue first
+  - it is an intentional, higher-risk "full-module overnight" branch because the user prefers broader capability gain over continuing to isolate the white issue first
 
 - Code support added to make this branch technically sound:
   - file:
@@ -2984,7 +2984,7 @@ Clean-up / restore note:
 
 - Important interpretation:
   - x31 is **not** a claim that the bright-hole white issue has been solved
-  - x31 is a deliberate, user-driven switch from ?continue isolating anti-white fixes? to ?accept current residual white and spend the overnight budget on the broader original-enhanced full stack?
+  - x31 is a deliberate, user-driven switch from "continue isolating anti-white fixes" to "accept current residual white and spend the overnight budget on the broader original-enhanced full stack"
 
 ## 2026-05-04 x31 full-module branch result: not a simple unconverged case, should stop and adjust direction
 
@@ -3459,3 +3459,179 @@ Clean-up / restore note:
     - **x34 is the correct restart branch to try next**
   - x33 remains a soft-gated experimental fallback idea,
     - but it is no longer the preferred branch after re-checking the original code/config logic
+
+## 2026-05-05 x34 result: original-like restore-S + condition_lut is catastrophic on current-domain route; do not continue
+
+- Logs analysed:
+  - train:
+    - `C:\Users\admin\Desktop\train_ir-sde-brushnet-ft-x34-origrestore-currentdomain_260505-005609.log`
+  - test:
+    - `C:\Users\admin\Desktop\test_ir-sde-brushnet-x34-origrestore-currentdomain_260505-102336.log`
+
+- Train-side status:
+  - route started as intended:
+    - `freeze_pretrained_until_iter: 0`
+    - `[Model] Param groups: pretrained=215 (lr=5.00e-07), new=147 (lr=1.00e-06)`
+  - training was numerically alive, and best-total appeared around the late-2.8k stage:
+    - `iter 2844 [best-total] loss_total = 6.4531e-02`
+    - `iter 2851 [best-total] loss_total = 6.4677e-02`
+    - by `iter 2900`, online `loss_total = 6.3129e-02`
+  - therefore x34 is **not** a simple dead-on-arrival load failure
+
+- Test-side route check:
+  - train/test structure is still consistent:
+    - `texture_core.enabled=True`
+    - `mu_denoiser.enabled=True`
+    - `restore_S_guidance=True`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=condition_lut`
+    - `expected_train_sde_mu_hole_mode=condition_lut`
+  - structure checkpoint path is still correct:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- But actual x34 inference result is far worse than x32:
+  - bright hard cases completely blow up:
+    - `000098_bottom`
+      - `final_hole_mean=16.1909`
+      - `final_white_ratio_hole=1.0000`
+    - `000098_center`
+      - `final_hole_mean=7.8509`
+      - `final_white_ratio_hole=0.9493`
+    - `000098_right`
+      - `final_hole_mean=21.2888`
+      - `final_white_ratio_hole=0.9857`
+  - even medium/easier 000098 cases regress badly:
+    - `000098_left`
+      - `final_white_ratio_hole=0.8343`
+    - `000098_top`
+      - `final_white_ratio_hole=0.7494`
+  - unlike x30/x32, the failure is no longer limited to bright-hole subsets only
+  - darker families also collapse:
+    - `000180_bottom`
+      - `final_white_ratio_hole=0.7926`
+    - `000180_center`
+      - `0.7479`
+    - `000180_left`
+      - `0.8914`
+    - `000180_right`
+      - `0.9323`
+    - `000257_bottom`
+      - `0.9562`
+    - `000257_left`
+      - `0.9982`
+    - `000348_bottom`
+      - `0.7364`
+    - `000348_center`
+      - `0.5231`
+
+- Strong diagnostic clue:
+  - x34 test repeatedly shows huge `MuAnchor Debug` distances under `condition_lut`, e.g.:
+    - `000098_bottom final_lut_l1=15.433558`
+    - `000098_right final_lut_l1=20.521713`
+  - this is not a mild colour drift; it indicates the reverse trajectory is running far away from the intended LUT/colour anchor
+
+- Interpretation:
+  - the earlier user correction was right in the narrow sense:
+    - original StrDiffusion structure guidance itself is not inherently "wrong"
+  - but this x34 result proves:
+    - **the original-like full restore-S + condition_lut recipe does not transfer directly to the current-domain degraded/prefill route**
+  - this is not a 鈥渘eeds more convergence鈥?situation
+  - x34 is a route-level regression and should be stopped immediately
+
+- Decision:
+  - **stop x34**
+  - do **not** continue training this branch
+  - treat `sde_mu_hole_mode=condition_lut` as incompatible with the active current-domain route when full structure guidance is on
+  - any next structure-on branch should return to the current-domain-safe hole-mu semantics (i.e. not this x34 recipe)
+
+## 2026-05-05 x35 correct restart: strictly revert to the documented current-domain safe route
+
+- User feedback was correct: by the time x34 was created, the tracking file had already recorded the safe current-domain route clearly enough that we should not have reintroduced the original-like `restore_S_guidance=true` + `sde_mu_hole_mode=condition_lut` recipe.
+- The validated current-domain safe route remains:
+  - `restore_S_guidance=false`
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `sde_mu_hole_mode=known_only`
+- Important clarification:
+  - **keeping `restore_S_guidance=false` does not mean "structure is off"**
+  - the structure network is still used through the prefill route, and the required structure checkpoint path remains:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - what stays off is only the texture trunk's internal original-style restore-S branch, because that branch repeatedly regressed on the current-domain route (`x31` / `x32` / `x34`)
+
+- New train config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x35-currentsafe-correctrestart.yml`
+- New test config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x35-currentsafe-correctrestart-current-domain.yml`
+
+- x35 policy:
+  - this is intentionally a clean reissue of the x30 current-domain-safe recipe, not a new experimental branch
+  - only experiment naming / checkpoint output target change
+  - keep:
+    - `brushnet.enabled=true`
+    - `texture_core.enabled=true`
+    - `restore_S_guidance=false`
+    - `mu_denoiser.enabled=false`
+    - `sde_mu_hole_mode=known_only`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+  - train warm start remains x28 best_G:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x28-x26resume-whitefixfinal/models/best_G.pth`
+  - test checkpoint target becomes x35 best_G:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x35-currentsafe-correctrestart/models/best_G.pth`
+
+- Rationale:
+  - x30 was the last verified current-domain-safe training route before the later restore-S regressions
+  - x31 / x32 / x34 all proved that re-enabling the internal restore-S branch on the active current-domain degraded/prefill route is high-risk and was not justified by the accumulated evidence
+  - therefore x35 should be treated as the "correct restart" branch for retraining
+
+- Validation:
+  - x35 train YAML parsed with `yaml.safe_load`
+  - x35 test YAML parsed with `yaml.safe_load`
+  - the required structure checkpoint path still points to:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+\n\n
+
+## 2026-05-05 x36 correct enabled restart: if `restore_S_guidance` and `mu_denoiser` must both stay on, use the x32-style current-domain route rather than x34
+
+- User explicitly requires these two switches to stay on:
+  - `restore_S_guidance=true`
+  - `mu_denoiser.enabled=true`
+- Given that requirement, the technically correct route is **not** x34.
+- Code/log evidence says the two major mistakes to avoid are:
+  1. **x31 mistake**: structure guidance got turned on but the restored SPADE branch was not treated as a real trainable new branch (`Param groups ... new=0`)
+  2. **x34 mistake**: route semantics were changed back to the original-like recipe (`sde_mu_hole_mode=condition_lut`) even though the tracking had already established the active current-domain safe semantics as `known_only` + `degraded` + `prefill`
+
+- Therefore the correct enabled restart branch should keep:
+  - `restore_S_guidance=true`
+  - `restore_S_guidance_scale=1.0`
+  - `mu_denoiser.enabled=true`
+  - `texture_core.enabled=true`
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `sde_mu_hole_mode=known_only`
+- And it must also keep the x32 selective-trainability fix:
+  - `train.force_new_param_prefixes:`
+    - `downs.0.4.`
+    - `downs.1.4.`
+    - `downs.2.4.`
+    - `downs.3.4.`
+  - this is what prevents the x31 `new=0` optimizer-group bug from reappearing
+
+- New train config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x36-x30resume-restoreSmu-correct.yml`
+- New test config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x36-x30resume-restoreSmu-correct-current-domain.yml`
+
+- x36 is intentionally a clean reissue of the x32 route, not x34:
+  - warm start remains x30 best_G:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+  - fallback still only fills missing tensors from the original texture checkpoint:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+  - test structure checkpoint path still remains exactly:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+- Interpretation:
+  - x36 is the **correct enabled version** in the narrow technical sense: it keeps the requested modules on, avoids the documented x31 optimizer bug, and avoids the documented x34 route-semantic mistake.
+  - This does **not** mean x36 is already proven white-safe; it only means it is the correct way to reopen training if those two switches must stay on.
