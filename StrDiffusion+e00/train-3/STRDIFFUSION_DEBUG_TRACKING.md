@@ -3943,3 +3943,264 @@ Clean-up / restore note:
   - `mu_denoiser_runtime=True`
   - `texture_core_runtime=True`
   - structure checkpoint path must still be `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+
+## 2026-05-05 x37 result: structure-source prefill alignment fixed a real mismatch, but this alone is not enough; do not continue x37 as-is
+
+- Logs analysed:
+  - train:
+    - `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x37-x30resume-restoreSmu-prefillalign_260505-173201.log`
+  - test:
+    - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x37-x30resume-restoreSmu-prefillalign-current-domain_260505-201436.log`
+
+### What x37 successfully proved
+
+- The new train/test structure-source alignment is actually active:
+  - train log shows:
+    - `[TrainRoute] mural main_target_domain=gt condition_mu_domain=degraded structure_source_domain=prefill restore_S_guidance=True texture_core=True mu_denoiser=True`
+  - test log still shows:
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+- So the previously identified restore-S-specific train/test mismatch has been repaired correctly at the code/config level.
+
+### Training-side status
+
+- Optimizer grouping is still healthy:
+  - `[Model] Param groups: pretrained=151 (lr=2.00e-07), new=211 (lr=1.00e-06)`
+- Best-total keeps improving numerically up to around 3k:
+  - `iter 2937 [best-total] loss_total = 5.9657e-02`
+- But after that, on-line loss mostly oscillates around roughly `0.064 ~ 0.079`, without evidence that the hard white-collapse family is being specifically solved.
+
+### Test-side result: hard bright-hole white collapse is still present
+
+- `000098_bottom`
+  - `final_gt_l1=0.260288`
+  - `prior_gt_l1=0.077797`
+  - `final_white_ratio_hole=0.958767`
+- `000098_center`
+  - `final_gt_l1=0.176314`
+  - `prior_gt_l1=0.196733`
+  - `final_white_ratio_hole=0.550156`
+- `000098_right`
+  - `final_gt_l1=0.301430`
+  - `prior_gt_l1=0.096517`
+  - `final_white_ratio_hole=0.936119`
+
+- Easier `000098` slices are somewhat improved relative to x36, but still not fixed:
+  - `000098_left final_white_ratio_hole=0.187146`
+  - `000098_top final_white_ratio_hole=0.185652`
+
+- Darker family remains much more stable:
+  - `000180_bottom final_white_ratio_hole=0.000367`
+  - `000180_left final_white_ratio_hole=0.000000`
+  - `000180_right final_white_ratio_hole=0.130007`
+
+### Comparison to earlier restore-S runs
+
+- x37 is **not** the same failure mode as x34; the route is cleaner and dark holes are better controlled.
+- But x37 is still not a usable recovery of restore-S on the current-domain route because the core hard bright-hole cases remain near the old collapse regime:
+  - bottom/right still around `0.94 ~ 0.96` white ratio
+  - center still around `0.55`
+- This is not good enough to justify ?just keep training and wait for convergence?.
+
+### Additional clue from warm-start loading
+
+- x37 still starts from x30 and then tries to back-fill restore-S tensors:
+  - first load: `274/378`, missing `104`
+  - fallback from original texture checkpoint loaded only `64` tensors into G
+- Interpretation:
+  - fixing structure-source alignment repaired one real semantic mismatch
+  - but x37 still does **not** begin from a fully native, fully restored original restore-S branch state
+  - therefore another likely remaining issue is incomplete restore-S branch initialization / bootstrap quality, not merely more training time
+
+### Decision
+
+- **Do not continue x37 as-is. Adjust rather than keep training.**
+- Reason:
+  1. the repaired `prefill` alignment is real and correct
+  2. despite that, hard bright-hole collapse remains near the old failure regime
+  3. current evidence says the remaining blocker is no longer the simple train/test source mismatch; continuing x37 is unlikely to magically fix it
+
+### Practical interpretation
+
+- The user innovations (`texture_core` / MuCleaner line) still do not look like the main culprit.
+- The remaining work should focus on the restore-S branch itself:
+  - especially how restore-S weights are initialized / imported relative to the original StrDiffusion branch
+  - not on simply adding more iterations to x37
+
+
+## 2026-05-05 x38: keep prefill-aligned restore-S + MuCleaner + MGLC, but stop treating restored SPADE blocks as high-lr new modules
+
+- x37 proved that `structure_source_domain=prefill` was a real and necessary fix.
+- However x37 still failed on hard bright holes even after the source alignment was corrected.
+
+### Remaining original-vs-current difference identified after x37
+
+- In x37, the restore-S SPADE branch was still being treated as **forced new high-lr modules**:
+  - train config explicitly contained:
+    - `force_new_param_prefixes:`
+      - `downs.0.4.`
+      - `downs.1.4.`
+      - `downs.2.4.`
+      - `downs.3.4.`
+  - and trunk freeze was also enabled:
+    - `freeze_pretrained_until_iter: 800`
+- This is still unlike the original StrDiffusion situation:
+  - original restore-S weights are part of the pretrained structure-guided branch,
+  - not a set of freshly opened high-lr add-on tensors.
+
+### Interpretation
+
+- After x37, the remaining mismatch is no longer the structure source domain.
+- The next most plausible difference is optimizer treatment:
+  - we restored SPADE weights from the original branch,
+  - but then still optimized them as `new` high-lr modules instead of treating them as pretrained restore-S weights.
+
+### New restart branch: x38
+
+- Train config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x38-x30resume-restoreSmu-spadepretrained.yml`
+- Test config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x38-x30resume-restoreSmu-spadepretrained-current-domain.yml`
+
+### x38 changes relative to x37
+
+- Keep all user-requested modules on:
+  - `restore_S_guidance=true`
+  - `mu_denoiser.enabled=true`
+  - `texture_core.enabled=true`
+- Keep the repaired current-domain semantics:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `datasets.train.structure_source_domain=prefill`
+  - `sde_mu_hole_mode=known_only`
+- But change optimizer treatment of restore-S:
+  - remove forced-new SPADE prefixes (`downs.*.4.`)
+  - set `freeze_pretrained_until_iter: 0`
+
+### Practical intent of x38
+
+- BrushNet / MGLC still remain in the default `new` module family.
+- Restored SPADE blocks are now treated as pretrained restore-S weights rather than as high-lr freshly-opened modules.
+- This is a closer match to how the original restore-S branch should behave.
+
+### Validation completed
+
+- YAML safe-load passed for:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x38-x30resume-restoreSmu-spadepretrained.yml`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x38-x30resume-restoreSmu-spadepretrained-current-domain.yml`
+
+### What to verify in x38 startup logs
+
+- Train:
+  - `[TrainRoute] ... condition_mu_domain=degraded structure_source_domain=prefill ...`
+  - `restore_S_guidance=True texture_core=True mu_denoiser=True`
+  - `Param groups` should no longer be the x37-style ?SPADE forced-new? split
+- Test:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `restore_S_guidance=True`
+  - `mu_denoiser_runtime=True`
+  - `texture_core_runtime=True`
+  - structure checkpoint path must still be `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+## 2026-05-05 x39: user-intent correction — revert to full-image LUT recolor semantics instead of target/condition split
+
+- User clarified the intended experiment was **not** to invent a new target-domain / condition-domain split.
+- The intended change was only:
+  - apply the existing LUT recolor process to the full image,
+  - then let the downstream GT / supervision chain follow that recolored image consistently.
+- In other words, the desired route is closer to the original `mural_inpainting + gt_mode=full` semantics, not the later paired current-domain `GT vs degraded-known` split.
+
+### Code-level clarification behind this correction
+
+1. Original synthetic mural route already defines a full-image recolored target:
+   - file:
+     - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/data/mural_inpainting_dataset.py`
+   - facts:
+     - `gt = self._generate_gt(degraded_img, mask, current_mode)`
+     - `current_mode == 'full'` means the target is built by `ColorPriorGenerator.build_target(..., mode='full')`
+     - `ColorPriorGenerator.build_target(..., mode='full')` returns the full-image LUT transform
+   - therefore, under `mode: mural_inpainting` + `gt_mode: full`, the dataset GT tensor `Y_GT` is already the intended recolored full-image target.
+
+2. After later route refactors, simply writing `gt_mode: full` is no longer enough by itself:
+   - file:
+     - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+   - current training route logic now defaults:
+     - `main_target_domain=gt`
+     - then `condition_mu_domain` falls back to `degraded`
+   - meaning: if left implicit, training still becomes a split route (`target=Y_GT`, `condition=degraded`), which is **not** the user’s intended "whole chain recolored" setup.
+
+### Corrected restart branch: x39
+
+- Train config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x39-fullrecolor-unifiedchain.yml`
+- Test config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x39-fullrecolor-unifiedchain.yml`
+
+### x39 semantics
+
+- Keep user innovation modules on:
+  - `restore_S_guidance=true`
+  - `mu_denoiser.enabled=true`
+  - `texture_core.enabled=true`
+- Revert training data semantics back to the original full-recolor route:
+  - `datasets.train.mode: mural_inpainting`
+  - `datasets.train.gt_mode: full`
+- Explicitly prevent the unintended split introduced by later defaults:
+  - `datasets.train.main_target_domain: gt`
+  - `datasets.train.condition_mu_domain: gt`
+  - `datasets.train.structure_source_domain: gt`
+- Why these are correct:
+  - in this dataset mode, `gt` already means the full-image LUT target tensor,
+  - so `main_target=gt`, `condition_mu=gt`, and `structure_source=gt` restores a unified full-recolor chain.
+
+### Inference alignment for x39
+
+- Test config now matches that same unified recolor semantics with runtime-available tensors:
+  - `datasets.test.gt_mode: full`
+  - `inference.condition_known_source: lut`
+  - `inference.structure_source: lut`
+- Interpretation:
+  - train-side `gt` = full-image LUT target generated from the image,
+  - test-side runtime equivalent = `lut_transformed`
+  - so train/test are aligned without reintroducing the paired current-domain degraded-known split.
+
+### Initialization policy
+
+- Main warm start is the original texture baseline checkpoint with native restore-S branch:
+  - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+- No cross-route fallback is used here; this restart intentionally minimizes contamination from later current-domain branches.
+- Structure checkpoint path remains strictly:
+  - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+### Safety rationale
+
+- This branch is "safer" with respect to user intent because it does **not** keep the later `GT target vs degraded known-source` split.
+- It is also structurally conservative:
+  - original restore-S branch is loaded from the original baseline checkpoint,
+  - trunk is frozen for the whole overnight run (`freeze_pretrained_until_iter: 999999`),
+  - only the added modules are expected to adapt.
+
+### Validation completed
+
+- YAML safe-load passed for:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x39-fullrecolor-unifiedchain.yml`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x39-fullrecolor-unifiedchain.yml`
+
+### What must appear in first logs
+
+- Train:
+  - `[TrainRoute] ... main_target_domain=gt condition_mu_domain=gt structure_source_domain=gt ...`
+  - plus:
+    - `restore_S_guidance=True`
+    - `texture_core=True`
+    - `mu_denoiser=True`
+- Test:
+  - `gt_mode=full`
+  - `condition_known_source=lut`
+  - `structure_source=lut`
+  - `restore_S_guidance=True`
+  - `mu_denoiser_runtime=True`
+  - `texture_core_runtime=True`
+  - `pretrain_model_Gs=/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
