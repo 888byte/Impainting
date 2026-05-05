@@ -3635,3 +3635,123 @@ Clean-up / restore note:
 - Interpretation:
   - x36 is the **correct enabled version** in the narrow technical sense: it keeps the requested modules on, avoids the documented x31 optimizer bug, and avoids the documented x34 route-semantic mistake.
   - This does **not** mean x36 is already proven white-safe; it only means it is the correct way to reopen training if those two switches must stay on.
+
+
+## 2026-05-05 x36 result: this is the technically correct both-on version, but the route itself still regresses on bright-hole current-domain samples
+
+- Logs analysed:
+  - train:
+    - `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x36-x30resume-restoreSmu-correct_260505-115922.log`
+  - test:
+    - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x36-x30resume-restoreSmu-correct-current-domain_260505-144713.log`
+
+- What x36 proved on the technical side:
+  - the earlier low-level mistakes were actually avoided this time
+  - train config/runtime is aligned to the intended x32-style current-domain route:
+    - `restore_S_guidance=True`
+    - `mu_denoiser.enabled=True`
+    - `texture_core.enabled=True`
+    - `sde_mu_hole_mode=known_only`
+    - `condition_known_source=degraded`
+    - `structure_source=prefill`
+  - required structure checkpoint path is still correct:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - optimizer grouping is no longer the x31 bug:
+    - `[Model] Param groups: pretrained=151 (lr=2.00e-07), new=211 (lr=1.00e-06)`
+  - x30 warm start + fallback also behaved as intended:
+    - x30 main load: `274/378`, missing `104`
+    - fallback attempted to fill the missing tensors from the original texture checkpoint and loaded `64` more tensors
+  - therefore x36 is already the technically correct ?both switches on? branch in the narrow engineering sense; the remaining problem is not a train/test mismatch or an optimizer-grouping mistake
+
+- But test-side behaviour still returns to the old white failure on bright hard holes:
+  - `000098_bottom`
+    - `final_gt_l1=0.285668`
+    - `prior_gt_l1=0.077797`
+    - `final_white_ratio_hole=0.956377`
+  - `000098_center`
+    - `final_gt_l1=0.202464`
+    - `prior_gt_l1=0.196733`
+    - `final_white_ratio_hole=0.613177`
+  - `000098_right`
+    - `final_gt_l1=0.335340`
+    - `prior_gt_l1=0.096517`
+    - `final_white_ratio_hole=0.950655`
+  - milder but still present on easier 000098 samples:
+    - `000098_left final_white_ratio_hole=0.2363`
+    - `000098_top final_white_ratio_hole=0.2022`
+  - darker family is still mostly stable:
+    - `000180_bottom final_white_ratio_hole=0.0100`
+
+- Bright-hole trajectory pattern in x36 matches the old late-reverse blow-up again:
+  - `000098_bottom`
+    - `t=100 hole mean=0.8912 score_abs_mean=15.8552`
+    - `t=40 hole mean=1.1302 score_abs_mean=75.7854`
+    - `t=20 hole mean=1.1515 score_abs_mean=241.2598`
+    - `t=4 hole mean=1.1407 score_abs_mean=2203.3975`
+  - `000098_right`
+    - `t=100 hole mean=0.8888 score_abs_mean=17.6100`
+    - `t=40 hole mean=1.1423 score_abs_mean=84.1861`
+    - `t=20 hole mean=1.1683 score_abs_mean=239.1556`
+    - `t=4 hole mean=1.1587 score_abs_mean=2256.7764`
+  - this is the same late-stage white attractor / score explosion pattern already seen in the earlier restore-S branches
+
+- Interpretation:
+  - x36 shows that the problem is no longer ?we configured the branch incorrectly?
+  - instead, the combination of:
+    - `restore_S_guidance=True`
+    - `mu_denoiser.enabled=True`
+    - current-domain degraded/prefill route
+  - still fails on bright low-confidence holes even when the semantics are corrected back to `known_only`
+  - in other words:
+    - **x36 is technically correct, but functionally still not acceptable as the production current-domain route**
+
+- Decision:
+  - do not keep pretending that there exists a validated ?both-on and already correct? current-domain route after x36
+  - if a practical branch is needed now, fall back to the documented safe route (`x35` / x30-style)
+  - if the user still insists on keeping both switches on, the next step can only be split-ablation (`restore_S_guidance` only vs `mu_denoiser` only); continuing x36 as-is is not justified
+
+
+## 2026-05-05 x36 inference-only diagnosis: yes, culprit isolation can be done by inference-time parameter changes first
+
+- After re-reading the test-side code, inference-only diagnosis is not only possible, but should be preferred before opening another training branch.
+- Code evidence from:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/models/brushnet_wrapper.py`
+
+- Two important findings from code:
+  1. `restore_S_guidance` can be ablated **without changing checkpoint architecture** by keeping `restore_S_guidance=true` but setting:
+     - `restore_S_guidance_scale=0.0`
+     - in `brushnet_wrapper.py`, this keeps the same SPADE tensors loaded but nulls the runtime blend (`x` is left unchanged)
+  2. under the current x36 route, `mu_denoiser` is **not actually on the active `condition_mu` path** when:
+     - `condition_known_source=degraded`
+     - because test-side `denoising_model.py` builds:
+       - `known_source = degraded`
+       - `condition_mu = known_source * mask_known`
+     - the Mu-Denoiser output `mu_clean_lut` is only used if:
+       - `condition_known_source=mu_clean` / `mu_clean_lut`
+
+- Therefore the fastest and most correct inference-only diagnosis is:
+  1. keep the same x36 checkpoint, same current-domain route, only set `restore_S_guidance_scale=0.0`
+     - if white drops sharply, the runtime restore-S injection is the immediate culprit
+  2. keep the same x36 checkpoint, same current-domain route, set `mu_denoiser.enabled=false`
+     - if almost nothing changes, that is expected from the code and confirms that D_mu was not actually on the current route
+  3. if we want to test D_mu itself, we must deliberately put it on the route by using:
+     - `condition_known_source=mu_clean`
+
+- New inference-only diagnostic configs:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x36-verify-restoreSscale0-current-domain.yml`
+    - same x36 checkpoint / same network / same route, but `restore_S_guidance_scale=0.0`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x36-verify-muoff-current-domain.yml`
+    - same x36 checkpoint / same route, but `mu_denoiser.enabled=false`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x36-verify-muclean-current-domain.yml`
+    - same x36 checkpoint, but `condition_known_source=mu_clean` so D_mu is truly on-path
+
+- Recommended run order:
+  1. `x36-verify-restoreSscale0-current-domain`
+  2. `x36-verify-muoff-current-domain`
+  3. `x36-verify-muclean-current-domain`
+
+- Interpretation rule:
+  - if (1) improves sharply and (2) is nearly unchanged, then the immediate runtime problem is restore-S rather than D_mu
+  - if (3) gets even worse, D_mu-as-known-source is unsafe on this route
+  - if (3) improves while (2) stays near baseline, then D_mu itself may be usable, but only when explicitly put on-path; it is not the cause of the current x36 white failure by default
