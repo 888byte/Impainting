@@ -644,6 +644,7 @@ def main():
     best_psnr = 0.0
     best_iter = 0
     error = mp.Value('b', False)
+    route_debug_logged = False
 
     for epoch in range(start_epoch, total_epochs + 1):
 
@@ -746,6 +747,9 @@ def main():
                     condition_mu_domain = str(
                         opt["datasets"]["train"].get("condition_mu_domain", "")
                     ).lower()
+                    structure_source_domain = str(
+                        opt["datasets"]["train"].get("structure_source_domain", "")
+                    ).lower()
                     denoised_ref = model._denoise_image(Y_degraded_full, mask_known=None)
                     training_target_lut, _ = model._build_lut_transformed(denoised_ref)
                     if main_target_domain == "raw":
@@ -813,6 +817,40 @@ def main():
                         )
                     condition_mu = condition_mu_source * mask_for_sde
 
+                    if not structure_source_domain:
+                        structure_source_domain = condition_mu_domain
+
+                    if structure_source_domain == "degraded":
+                        structure_source_image = Y_degraded_full
+                    elif structure_source_domain == "gt":
+                        structure_source_image = Y_GT
+                    elif structure_source_domain in {"lut", "condition_lut", "target_lut"}:
+                        structure_source_image = condition_lut
+                    elif structure_source_domain in {"mu_clean", "mu_clean_lut"}:
+                        structure_source_image = mu_clean_lut
+                    elif structure_source_domain in {"prefill", "denoised", "denoised_original", "image_for_lut"}:
+                        structure_source_image = denoised_observed_mask_aware
+                    elif structure_source_domain in {"condition_mu", "mu"}:
+                        structure_source_image = condition_mu_source
+                    else:
+                        raise ValueError(
+                            f"Unsupported datasets.train.structure_source_domain={structure_source_domain!r}; "
+                            "expected degraded|gt|lut|mu_clean_lut|prefill|condition_mu"
+                        )
+
+                    if not route_debug_logged:
+                        logger.info(
+                            "[TrainRoute] mural main_target_domain=%s condition_mu_domain=%s "
+                            "structure_source_domain=%s restore_S_guidance=%s texture_core=%s mu_denoiser=%s",
+                            main_target_domain,
+                            condition_mu_domain,
+                            structure_source_domain,
+                            bool(opt.get("restore_S_guidance", False)),
+                            bool(opt.get("texture_core", {}).get("enabled", False)),
+                            bool(opt.get("mu_denoiser", {}).get("enabled", False)),
+                        )
+                        route_debug_logged = True
+
                 train_cfg = opt.get("train", {})
                 main_state_mode = str(train_cfg.get("main_state_mode", "forward")).lower()
                 main_t_min_ratio = train_cfg.get("main_t_min_ratio", None)
@@ -864,12 +902,15 @@ def main():
                     )
                 model.main_state_debug = main_state_debug
 
-                # Structure SDE mirrors texture semantics:
+                # Structure SDE:
                 #   x0 target  <- target-domain training_target
-                #   mu/known   <- inference-observable condition source
+                #   structure source image can differ from texture known-source;
+                #   for current-domain restore-S routes we must keep it aligned
+                #   with inference.structure_source instead of blindly mirroring
+                #   condition_mu_source.
                 X_GT_for_sde, _ = _build_structure_from_image(training_target, device)
                 _, X_LQ_for_sde = _build_structure_from_image(
-                    condition_mu_source, device
+                    structure_source_image, device
                 )
 
                 model.feed_data(

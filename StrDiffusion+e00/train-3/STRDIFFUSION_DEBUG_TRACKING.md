@@ -3755,3 +3755,191 @@ Clean-up / restore note:
   - if (1) improves sharply and (2) is nearly unchanged, then the immediate runtime problem is restore-S rather than D_mu
   - if (3) gets even worse, D_mu-as-known-source is unsafe on this route
   - if (3) improves while (2) stays near baseline, then D_mu itself may be usable, but only when explicitly put on-path; it is not the cause of the current x36 white failure by default
+
+
+## 2026-05-05 x36 inference-only diagnosis results: runtime restore-S is not the sole culprit; Mu-Denoiser-off is near-baseline; mu_clean route is only mildly helpful on a subset
+
+- Tested logs:
+  - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x36-verify-restoreSscale0-current-domain_260505-160536.log`
+  - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x36-verify-muoff-current-domain_260505-155710.log`
+  - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x36-verify-muclean-current-domain_260505-154917.log`
+
+- Route sanity:
+  - all three runs still load the same x36 checkpoint:
+    - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x36-x30resume-restoreSmu-correct/models/best_G.pth`
+  - all three runs still use the required structure checkpoint:
+    - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+  - all three runs keep:
+    - `structure_source=prefill`
+    - `sde_mu_hole_mode=known_only`
+  - only the intended inference-time knob differs:
+    - restore-S runtime ablated by `restore_S_guidance_scale=0.0`
+    - Mu-Denoiser disabled by `mu_denoiser.enabled=false`
+    - Mu-Denoiser forced on-path by `condition_known_source=mu_clean`
+
+- Result 1: `x36-verify-restoreSscale0-current-domain`
+  - hard bright holes did **not** improve:
+    - `000098_bottom`
+      - `final_gt_l1=0.341571`
+      - `final_white_ratio_hole=0.978402`
+    - `000098_center`
+      - `final_gt_l1=0.227322`
+      - `final_white_ratio_hole=0.619769`
+    - `000098_right`
+      - `final_gt_l1=0.408390`
+      - `final_white_ratio_hole=0.960368`
+  - even darker family also became clearly white:
+    - `000180_bottom final_white_ratio_hole=0.122460`
+    - `000180_right final_white_ratio_hole=0.147004`
+  - interpretation:
+    - runtime restore-S injection is **not** the sole immediate cause
+    - simply zeroing the restore-S blend on the x36 checkpoint does not rescue the branch
+
+- Result 2: `x36-verify-muoff-current-domain`
+  - behavior stays close to baseline x36 and is generally a bit worse:
+    - `000098_bottom`
+      - `final_gt_l1=0.401969`
+      - `final_white_ratio_hole=0.986426`
+    - `000098_center`
+      - `final_gt_l1=0.262567`
+      - `final_white_ratio_hole=0.634309`
+    - `000098_right`
+      - `final_gt_l1=0.480856`
+      - `final_white_ratio_hole=0.966691`
+  - darker family also worsens:
+    - `000180_bottom final_white_ratio_hole=0.300444`
+    - `000180_right final_white_ratio_hole=0.165396`
+  - interpretation:
+    - this matches the code expectation that with `condition_known_source=degraded`, turning Mu-Denoiser off should not fundamentally change the current route
+    - therefore Mu-Denoiser is **not** the main source of the current x36 white failure in the default degraded-known route
+
+- Result 3: `x36-verify-muclean-current-domain`
+  - forcing D_mu onto the route gives mixed results:
+    - some milder 000098 cases improve:
+      - `000098_left final_white_ratio_hole=0.107881`
+      - `000098_top final_white_ratio_hole=0.182467`
+    - hard bright holes are still very bad:
+      - `000098_bottom final_white_ratio_hole=0.951511`
+      - `000098_center final_white_ratio_hole=0.536030`
+      - `000098_right final_white_ratio_hole=0.929535`
+    - darker family still regresses relative to a safe current-domain route:
+      - `000180_bottom final_white_ratio_hole=0.257132`
+      - `000180_right final_white_ratio_hole=0.204707`
+  - interpretation:
+    - Mu-Denoiser can be mildly helpful **only when explicitly routed in**
+    - but it does **not** solve the hard bright-hole white collapse
+    - and it is unsafe to treat `mu_clean` as a drop-in replacement for the current production route
+
+- Final diagnosis from the three inference-only tests:
+  1. not a simple runtime restore-S blend bug
+  2. not a default-route Mu-Denoiser bug
+  3. `mu_clean` on-path can help some easier samples, but does not fix the core hard-hole white attractor
+  4. therefore the x36 failure is more likely a **checkpoint / learned-state incompatibility** of the combined `restore_S_guidance + mu_denoiser + current-domain degraded/prefill` branch, not something that can be rescued by a single inference-time toggle
+
+- Practical decision:
+  - do **not** continue x36
+  - do **not** treat `restore_S_guidance_scale=0` or `mu_denoiser=false` as a production fix for x36
+  - if a usable route is needed immediately, return to the documented current-domain-safe branch
+  - if structure and/or Mu-Denoiser must remain enabled, the next training branch must be redesigned from a cleaner base rather than patched only at inference time
+
+
+## 2026-05-05 x37: fixed the real restore-S mismatch against current-domain inference (`degraded` known-source + `prefill` structure-source)
+
+- User pushback was correct: the baseline StrDiffusion structure-guidance branch itself should not be blamed blindly.
+- Re-checked code difference between our current-domain route and the original-style restore-S expectation.
+
+### Code-level root cause found
+
+- Inference-side current-domain route was already using:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+- Evidence from:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/models/denoising_model.py`
+  - key lines:
+    - `752: structure_input = prepared["denoised_original"]`
+    - `753: resolved_structure_source = "prefill"`
+
+- But training-side restore-S branch was still building structure `X_LQ_for_sde` from the texture known-source path (`condition_mu_source`) by default.
+- Before this fix, with x36 config:
+  - `datasets.train.condition_mu_domain=degraded`
+  - no separate `datasets.train.structure_source_domain`
+  - therefore train-side structure source silently fell back to `degraded`
+- Evidence from:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+  - relevant logic now explicitly added at:
+    - `750-847` (`structure_source_domain` routing + `[TrainRoute]` log)
+    - `911-912` (structure SDE now uses `structure_source_image` instead of blindly reusing `condition_mu_source`)
+
+### Why this matters
+
+- This mismatch only bites when `restore_S_guidance=true`:
+  - train structure source was effectively `degraded`
+  - test structure source was `prefill`
+- So the repeated x31/x32/x36 bright-hole white collapse is now strongly attributable to a restore-S-specific train/test source mismatch, not just ?original structure guidance is bad?.
+
+### Code fix applied
+
+- Updated file:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+- Added:
+  - `datasets.train.structure_source_domain`
+- Added one-shot route log:
+  - `[TrainRoute] mural main_target_domain=%s condition_mu_domain=%s structure_source_domain=%s restore_S_guidance=%s texture_core=%s mu_denoiser=%s`
+- Current supported training structure-source routing:
+  - `degraded`
+  - `gt`
+  - `lut` / `condition_lut` / `target_lut`
+  - `mu_clean` / `mu_clean_lut`
+  - `prefill` / `denoised` / `denoised_original` / `image_for_lut`
+  - `condition_mu` / `mu`
+
+### New restart branch: x37
+
+- Train config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x37-x30resume-restoreSmu-prefillalign.yml`
+- Test config:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x37-x30resume-restoreSmu-prefillalign-current-domain.yml`
+
+### x37 intent
+
+- Keep the user innovations on:
+  - `texture_core.enabled=true`
+  - `mu_denoiser.enabled=true`
+- Keep baseline structure guidance on:
+  - `restore_S_guidance=true`
+- Keep current-domain-safe semantics:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `sde_mu_hole_mode=known_only`
+- **New critical alignment**:
+  - `datasets.train.structure_source_domain: prefill`
+
+### Warm start / weights
+
+- Main texture warm start remains:
+  - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x30-x28resume-overnight-texturecore/models/best_G.pth`
+- Missing-key fallback remains:
+  - `/home/610-wws/Impainting/StrDiffusion+e00/train/texture/config/inpainting/log/ir-sde/models/best_G.pth`
+- Required structure checkpoint path remains exactly:
+  - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+### Validation completed
+
+- `python -m py_compile D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/train.py`
+  - passed
+- YAML safe-load passed for:
+  - `D:/code/ky/bihua/Impainting/StrDiffusion+e00/train-3/texture/config/inpainting/options/train/ir-sde-brushnet-ft-x37-x30resume-restoreSmu-prefillalign.yml`
+  - `D:/code/ky/bihua/Impainting/StrDiffusion/test/texture-1/config/inpainting/options/test/ir-sde-brushnet-x37-x30resume-restoreSmu-prefillalign-current-domain.yml`
+
+### What must appear in the first x37 logs
+
+- Train:
+  - `[TrainRoute] ... condition_mu_domain=degraded structure_source_domain=prefill ...`
+  - `Param groups ... new=` should still be non-zero
+- Test:
+  - `condition_known_source=degraded`
+  - `structure_source=prefill`
+  - `restore_S_guidance=True`
+  - `mu_denoiser_runtime=True`
+  - `texture_core_runtime=True`
+  - structure checkpoint path must still be `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
