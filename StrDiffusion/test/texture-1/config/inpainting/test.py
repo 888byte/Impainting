@@ -178,6 +178,7 @@ def _run_enhanced_test(test_loader, opt, logger, model, sde, s_sde):
             original_degraded=degraded,
             mask_hole=mask_hole,
             sample_name=img_name,
+            gt_already_target_like=bool(sample["gt_already_target_like"][0].item()) if "gt_already_target_like" in sample else False,
         )
         model.test(
             sde,

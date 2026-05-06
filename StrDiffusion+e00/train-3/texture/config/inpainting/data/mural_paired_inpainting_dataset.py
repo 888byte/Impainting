@@ -137,6 +137,24 @@ class MuralPairedInpaintingDataset(Dataset):
             f'dilate={self.mask_white_refine_dilate}, expand={self.mask_white_refine_expand})'
         )
 
+    def _build_supervision_gt(self, gt: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Build the supervision target from the paired GT itself.
+
+        This keeps paired supervision semantics intact while allowing the whole
+        chain to move into a recolored target domain when requested.
+        """
+        mode = str(self.gt_mode).lower()
+        if mode in {'paired_true', 'raw', 'gt', 'paired_gt'}:
+            return gt
+        if mode in {'full', 'gt_full', 'full_gt', 'paired_full', 'paired_gt_full'}:
+            return self.color_prior_gen.build_target(gt, mask, mode='full')
+        if mode in {'partial', 'gt_partial', 'partial_gt', 'paired_partial', 'paired_gt_partial'}:
+            return self.color_prior_gen.build_target(gt, mask, mode='partial')
+        raise ValueError(
+            f"Unsupported paired gt_mode={self.gt_mode!r}; "
+            "expected paired_true|full|partial (or gt_* aliases)."
+        )
+
     def _resolve_mask_path(self, stem: str) -> Optional[str]:
         for base in _stem_candidates(stem):
             for key in (f'{base}_mask', base):
@@ -348,14 +366,19 @@ class MuralPairedInpaintingDataset(Dataset):
             gt, degraded, mask, color_prior, confidence, conf_lut
         )
 
-        gt_gray = cv2.cvtColor(gt, cv2.COLOR_RGB2GRAY)
+        gt_true = gt.copy()
+        gt_supervision = self._build_supervision_gt(gt_true, mask)
+
+        gt_gray = cv2.cvtColor(gt_supervision, cv2.COLOR_RGB2GRAY)
         gt_edge = cv2.Canny(gt_gray, 50, 150)
 
         return {
             'degraded': self._to_tensor(degraded),
             'degraded_full': self._to_tensor(degraded),
-            'GT': self._to_tensor(gt),
-            'gt': self._to_tensor(gt),
+            'GT': self._to_tensor(gt_supervision),
+            'gt': self._to_tensor(gt_supervision),
+            'GT_true': self._to_tensor(gt_true),
+            'gt_true': self._to_tensor(gt_true),
             'GT_gray': torch.from_numpy((gt_gray.astype(np.float32) / 255.0)[None, ...]),
             'GT_edge': torch.from_numpy((gt_edge.astype(np.float32) / 255.0)[None, ...]),
             'mask': torch.from_numpy((mask.astype(np.float32) / 255.0)[None, ...]),

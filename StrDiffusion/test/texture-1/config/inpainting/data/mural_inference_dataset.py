@@ -30,6 +30,11 @@ import numpy as np
 import torch
 import torch.utils.data as data
 
+try:
+    from color_prior_generator import ColorPriorGenerator
+except ImportError:
+    from ..color_prior_generator import ColorPriorGenerator
+
 READ_IMAGE_MSG = '无法读取图像'
 READ_MASK_MSG = '无法读取掩码'
 READ_CONFIDENCE_MSG = '无法读取置信度图'
@@ -133,6 +138,32 @@ class MuralInferenceDataset(data.Dataset):
         self.gt_map = _build_stem_map(_list_image_paths(opt.get('dataroot_GT')))
         self.color_prior_map = _build_stem_map(_list_image_paths(opt.get('dataroot_color_prior')))
         self.confidence_map = _build_stem_map(_list_image_paths(opt.get('dataroot_confidence')))
+        self.color_prior_generator = None
+        lut_path = opt.get('lut_path')
+        if lut_path:
+            self.color_prior_generator = ColorPriorGenerator(
+                lut_path=lut_path,
+                alpha=opt.get('lut_alpha', 0.7),
+                beta=opt.get('lut_beta', 0.3),
+                inpaint_method=opt.get('lut_inpaint_method', 'telea'),
+                inpaint_mask_dilate=opt.get('prior_inpaint_mask_dilate', 3),
+            )
+
+    def _build_eval_gt(self, gt: np.ndarray, mask_hole: np.ndarray):
+        mode = str(self.gt_mode).lower()
+        if mode in {'paired_true', 'raw', 'gt', 'paired_gt'}:
+            return gt, False
+        if self.color_prior_generator is None:
+            raise RuntimeError(
+                f"gt_mode={self.gt_mode!r} requires lut_path / ColorPriorGenerator in the inference dataset."
+            )
+        if mode in {'full', 'gt_full', 'full_gt', 'paired_full', 'paired_gt_full'}:
+            return self.color_prior_generator.build_target(gt, (mask_hole * 255.0).round().astype(np.uint8), mode='full'), True
+        if mode in {'partial', 'gt_partial', 'partial_gt', 'paired_partial', 'paired_gt_partial'}:
+            return self.color_prior_generator.build_target(gt, (mask_hole * 255.0).round().astype(np.uint8), mode='partial'), True
+        raise ValueError(
+            f"Unsupported inference gt_mode={self.gt_mode!r}; expected paired_true|full|partial."
+        )
 
     def _refine_mask_from_observed(self, degraded: np.ndarray, mask_hole: np.ndarray, stem: str) -> np.ndarray:
         if not self.refine_mask_from_observed_white:
@@ -215,8 +246,15 @@ class MuralInferenceDataset(data.Dataset):
         }
 
         if stem in self.gt_map:
-            gt = _load_rgb_image(self.gt_map[stem], (height, width))
-            sample['GT'] = torch.from_numpy(np.transpose(gt, (2, 0, 1))).float()
+            gt_raw = _load_rgb_image(self.gt_map[stem], (height, width))
+            gt_eval_u8, gt_is_target_like = self._build_eval_gt(
+                (gt_raw * 255.0).round().astype(np.uint8),
+                mask_hole,
+            )
+            gt_eval = gt_eval_u8.astype(np.float32) / 255.0
+            sample['GT'] = torch.from_numpy(np.transpose(gt_eval, (2, 0, 1))).float()
+            sample['GT_true'] = torch.from_numpy(np.transpose(gt_raw, (2, 0, 1))).float()
+            sample['gt_already_target_like'] = bool(gt_is_target_like)
             sample['GT_path'] = self.gt_map[stem]
 
         if stem in self.color_prior_map:

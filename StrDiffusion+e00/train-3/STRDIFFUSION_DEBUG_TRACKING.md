@@ -4204,3 +4204,197 @@ Clean-up / restore note:
   - `mu_denoiser_runtime=True`
   - `texture_core_runtime=True`
   - `pretrain_model_Gs=/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+## 2026-05-06 x39 result: white collapse disappears, but the route has become a full-LUT pseudo-target reconstruction line rather than paired restoration
+
+- Logs analysed:
+  - train:
+    - `C:/Users/admin/Desktop/train_ir-sde-brushnet-ft-x39-fullrecolor-unifiedchain_260506-012222.log`
+  - test:
+    - `C:/Users/admin/Desktop/test_ir-sde-brushnet-x39-fullrecolor-unifiedchain_260506-103452.log`
+
+### What x39 did achieve
+
+- The route executes exactly as configured:
+  - train:
+    - `main_target_domain=gt`
+    - `condition_mu_domain=gt`
+    - `structure_source_domain=gt`
+    - under `mode=mural_inpainting` + `gt_mode=full`
+  - test:
+    - `gt_mode=full`
+    - `condition_known_source=lut`
+    - `structure_source=lut`
+- White collapse is gone in the tested samples:
+  - `000098_bottom final_white_ratio_hole=0.000000`
+  - `000098_center final_white_ratio_hole=0.000000`
+  - `000098_right final_white_ratio_hole=0.000000`
+  - `000180_* final_white_ratio_hole=0.000000`
+  - `000257_* final_white_ratio_hole=0.000000`
+- Average over the parsed 13 logged samples:
+  - `avg final_gt_l1 = 0.08376`
+  - `avg prior_gt_l1 = 0.12796`
+  - `avg lut_gt_l1 = 0.15190`
+  - `avg white_ratio = 0.0`
+
+### Why the user still feels the result is "not as good"
+
+This is **not** a runtime bug; it follows directly from the new semantics.
+
+1. Under `mural_inpainting + gt_mode=full`, the dataset `GT` is no longer the paired mural full-ground-truth image.
+   - It is the **full-image LUT target generated from the degraded image**.
+   - Therefore x39 is no longer learning the earlier paired current-domain restoration route.
+
+2. The training route is now almost a self-consistent recolor/reconstruction task rather than a restoration translation task.
+   - Evidence from the train log:
+     - `condition_target_gap: 0.0000` throughout
+   - Meaning:
+     - SDE condition and supervision target are already in the same target-like domain,
+     - so the model no longer has to learn the hard `observed degraded -> restored GT` translation that existed in the paired current-domain line.
+
+3. The test route also moved to full-LUT semantics by design.
+   - `gt_mode=full` means the whole output image is allowed to recolor, not only the hole.
+   - `condition_known_source=lut` + `structure_source=lut` means known/structure guidance is also running in the LUT domain.
+   - So the user-visible color shift across the whole image is expected and not a route mismatch.
+
+4. Texture improvement is weak because the branch is now too easy / too close to the LUT anchor.
+   - In the test log, many samples show `final_gt_l1 ~= raw_gt_l1`, e.g.:
+     - `000098_bottom final_gt_l1=0.054838 raw_gt_l1=0.054855`
+     - `000180_bottom final_gt_l1=0.081567 raw_gt_l1=0.081546`
+     - `000257_left final_gt_l1=0.078595 raw_gt_l1=0.078615`
+   - Interpretation:
+     - reverse diffusion is not adding much extra restoration texture beyond the already-easy LUT-domain prediction.
+
+### Correct interpretation of x39
+
+- x39 successfully validates the user's semantic correction:
+  - if the whole chain is unified into the same full-image recolor domain, the white-collapse problem largely disappears.
+- But x39 also proves that this route is **too far from the earlier paired restoration objective**.
+- Therefore x39 is not a good final restoration line if the user still wants the visual behavior of the paired current-domain restoration branch.
+
+### Important consequence for the next fix
+
+- The user's intended correction should not be implemented by switching all the way to `mural_inpainting` synthetic full-LUT supervision if the goal is still high-quality paired restoration.
+- The more accurate next step is:
+  - keep the paired dataset semantics,
+  - but add an explicit **paired-GT recolored target** (i.e. recolor the real paired GT itself),
+  - instead of replacing the whole route with the degraded-derived synthetic full-LUT target.
+
+### Decision
+
+- Do **not** continue x39 as the production training line.
+- Reason:
+  1. it solves white collapse,
+  2. but only by changing the task into a much easier unified LUT-domain reconstruction line,
+  3. which explains the user's visual complaint that texture/color feel wrong and worse than the previous restoration route.
+
+## 2026-05-06 x40 paired-GT full-LUT correction (implemented)
+
+### User intent re-confirmed
+
+- The user does **not** want a synthetic degraded-derived target route.
+- The intended change is only:
+  - recolor the supervision GT with the full-image LUT process,
+  - then let the rest of the chain train/evaluate in that recolored target domain.
+- In other words:
+  - keep **paired supervision**,
+  - but change the paired GT itself into a full-LUT target,
+  - instead of replacing the whole task with `mural_inpainting` synthetic supervision.
+
+### Code changes made
+
+1. **Paired training dataset now supports recoloring the paired GT itself**
+   - File:
+     - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\data\mural_paired_inpainting_dataset.py`
+   - Added `_build_supervision_gt(...)`
+   - Supported paired `gt_mode` semantics:
+     - `paired_true|raw|gt`
+     - `full`
+     - `partial`
+   - For `gt_mode=full`, dataset `GT` is now:
+     - `ColorPriorGenerator.build_target(paired_gt, mask, mode='full')`
+   - Dataset also returns:
+     - `GT_true`
+     - `gt_true`
+     for raw paired GT debugging.
+
+2. **Inference dataset now supports evaluating against recolored GT**
+   - File:
+     - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\data\mural_inference_dataset.py`
+   - Added `ColorPriorGenerator`
+   - Added `_build_eval_gt(...)`
+   - For `gt_mode=full`, loaded `GT` is transformed into the same full-LUT target domain.
+   - Raw GT is still preserved as:
+     - `GT_true`
+   - Added:
+     - `gt_already_target_like`
+     so inference code can avoid double-transforming GT.
+
+3. **Inference model now respects GT-already-target-like samples**
+   - File:
+     - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\models\denoising_model.py`
+   - `feed_data(...)` now accepts:
+     - `gt_already_target_like=False`
+   - `_build_training_target_like()` now returns `self.state_0` directly when GT is already transformed into target domain.
+
+4. **Test entry now forwards the GT-target-domain flag**
+   - File:
+     - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\test.py`
+   - `_run_enhanced_test(...)` now forwards:
+     - `gt_already_target_like`
+
+### New configs created
+
+1. Train:
+   - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x40-pairedgt-fullrecolor.yml`
+
+2. Test:
+   - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x40-pairedgt-fullrecolor.yml`
+
+### x40 route semantics
+
+- Dataset mode stays paired:
+  - `mode: mural_paired_inpainting`
+- Training GT becomes recolored paired GT:
+  - `gt_mode: full`
+- Main target uses paired recolored GT:
+  - `main_target_domain: gt`
+- Condition and structure use the observed-image full-LUT route:
+  - `condition_mu_domain: lut`
+  - `structure_source_domain: lut`
+- Therefore x40 keeps:
+  - **paired restoration supervision**
+  - while moving both train/test into the same **full-LUT color domain**
+  - instead of the x39 synthetic degraded-derived target.
+
+### x40 warm start and module policy
+
+- Warm start from:
+  - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x39-fullrecolor-unifiedchain/models/best_G.pth`
+- Keep user innovation modules enabled:
+  - `texture_core.enabled=true`
+  - `mu_denoiser.enabled=true`
+- Keep baseline structure branch enabled:
+  - `restore_S_guidance=true`
+- Keep required structure checkpoint path unchanged:
+  - `/home/610-wws/Impainting/StrDiffusion+e00s/train/structure/config/inpainting/log/ir-sde/models/best_G.pth`
+
+### Why x40 is the intended correction
+
+- x39 proved that full-LUT unified routing removes white collapse,
+  but it used the wrong target source (degraded-derived synthetic target).
+- x40 corrects exactly that mistake:
+  - target now comes from **paired GT recolored by LUT**,
+  - while runtime known/structure still use **observed-image LUT**,
+  - so the model must still solve a real paired restoration problem instead of an easy self-reconstruction task.
+
+### Validation
+
+- `py_compile` passed for:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\data\mural_paired_inpainting_dataset.py`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\data\mural_inference_dataset.py`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\models\denoising_model.py`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\test.py`
+- YAML parse passed for:
+  - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x40-pairedgt-fullrecolor.yml`
+  - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x40-pairedgt-fullrecolor.yml`

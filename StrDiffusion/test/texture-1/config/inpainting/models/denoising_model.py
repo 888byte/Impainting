@@ -306,6 +306,7 @@ class DenoisingModel(BaseModel):
         original_degraded=None,
         mask_hole=None,
         sample_name=None,
+        gt_already_target_like=False,
     ):
         """Load one sample while keeping the original feed_data signature."""
         self.state = state.to(self.device) if state is not None else None
@@ -335,6 +336,7 @@ class DenoisingModel(BaseModel):
         self.confidence = confidence.to(self.device) if confidence is not None else None
         self.conf_lut = conf_lut.to(self.device) if conf_lut is not None else None
         self.sample_name = sample_name or "sample"
+        self.gt_already_target_like = bool(gt_already_target_like)
 
     def _denoise_image(self, image: torch.Tensor, mask_known: Optional[torch.Tensor] = None) -> torch.Tensor:
         """A lightweight edge-preserving smoothing used before LUT processing.
@@ -636,7 +638,11 @@ class DenoisingModel(BaseModel):
 
     def _build_training_target_like(self) -> Optional[torch.Tensor]:
         """Build a visualization target that follows the training GT construction rule."""
-        if self.color_prior_generator is None or self.state_0 is None or self.mask_hole is None:
+        if self.state_0 is None or self.mask_hole is None:
+            return None
+        if getattr(self, "gt_already_target_like", False):
+            return self.state_0
+        if self.color_prior_generator is None:
             return None
 
         reference = self.state_0[0].detach().float().cpu().permute(1, 2, 0).clamp(0.0, 1.0).numpy()
