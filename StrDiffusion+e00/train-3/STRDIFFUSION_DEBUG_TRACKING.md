@@ -4398,3 +4398,75 @@ This is **not** a runtime bug; it follows directly from the new semantics.
 - YAML parse passed for:
   - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x40-pairedgt-fullrecolor.yml`
   - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x40-pairedgt-fullrecolor.yml`
+
+## 2026-05-06 x41 paired-GT full-LUT detail fine-tune (implemented)
+
+### User observation
+
+- x40 route is finally semantically correct and visually usable.
+- Remaining issue is not white collapse but **over-smooth restoration**:
+  - restored images look acceptable alone,
+  - but compared against the original image they lose local texture and fine detail.
+
+### Evidence from x40 logs
+
+- Train logs show the route is stable and semantically correct:
+  - `main_target_domain=gt`
+  - `condition_mu_domain=lut`
+  - `structure_source_domain=lut`
+- `condition_target_gap` stays non-zero, so x40 is not the x39 easy self-reconstruction route.
+- However x40 keeps all explicit texture/detail auxiliaries disabled:
+  - `loss_texture_hf=0`
+  - `loss_texture_hf_main=0`
+  - `loss_infer_x0=0`
+  - `loss_infer_x0_mid=0`
+- Test logs also show many samples have:
+  - `final_gt_l1 ~= raw_gt_l1`
+  which indicates reverse refinement is not adding much extra detail beyond the already smooth raw prediction.
+
+### Decision
+
+- Do **not** change x40 route semantics.
+- Do **not** reopen target/condition-domain experiments.
+- Add only a **small, conservative detail-learning fine-tune** on top of x40.
+
+### x41 design
+
+- Warm start from:
+  - `/home/610-wws/Impainting/StrDiffusion+e00/train-3/experiments/inpainting/ir-sde-brushnet-ft-x40-pairedgt-fullrecolor/models/best_G.pth`
+- Keep all currently validated modules enabled:
+  - `brushnet.enabled=true`
+  - `texture_core.enabled=true`
+  - `mu_denoiser.enabled=true`
+  - `restore_S_guidance=true`
+- Keep route semantics unchanged:
+  - `gt_mode=full`
+  - `main_target_domain=gt`
+  - `condition_mu_domain=lut`
+  - `structure_source_domain=lut`
+  - test `condition_known_source=lut`
+  - test `structure_source=lut`
+  - `sde_mu_hole_mode=known_only`
+- Add only one new supervision term:
+  - `texture_hf_loss_weight: 0.005`
+  - `texture_hf_source: main`
+  - `texture_hf_blur_kernel: 9`
+- Rationale:
+  - x40 is already stable and not white.
+  - The problem is smooth main-branch output, so the safest last-run adjustment is a weak main-branch HF loss rather than reopening inference-like blank-hole branches.
+- Lower learning rates for fine-tune stability:
+  - `lr_G: 1e-6`
+  - `lr_new: 2e-6`
+  - `mu_denoiser.lr: 2e-5`
+
+### Files created
+
+1. Train config:
+   - `D:\code\ky\bihua\Impainting\StrDiffusion+e00\train-3\texture\config\inpainting\options\train\ir-sde-brushnet-ft-x41-pairedgt-fullrecolor-detailfinetune.yml`
+2. Test config:
+   - `D:\code\ky\bihua\Impainting\StrDiffusion\test\texture-1\config\inpainting\options\test\ir-sde-brushnet-x41-pairedgt-fullrecolor-detailfinetune.yml`
+
+### Validation
+
+- No code changes were needed; only config-level fine-tune was added.
+- YAML parse recheck passed for both x41 train/test configs.
