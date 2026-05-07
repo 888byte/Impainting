@@ -9,8 +9,11 @@ seed_stride: 17
 num_samples: 6
 save_states: false
 output_tag: multi_sample
-texture_noise_scale: 3.5
-structure_noise_scale: 2.5
+texture_noise_scale: 3.8
+structure_noise_scale: 2.8
+texture_coarse_noise_scale: 2.2
+structure_coarse_noise_scale: 1.6
+coarse_noise_sizes: [16, 32, 64]
 # false: keep known area fixed, only make the hole highly random
 # true: even the known region state is noised, diversity will be larger but quality usually worse
 noise_known_region: false

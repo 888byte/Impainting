@@ -15,6 +15,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image
 from torchvision import transforms
@@ -38,14 +39,45 @@ def set_random_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def build_diverse_init(known_tensor, mask, sigma, noise_scale=1.0, noise_known_region=False):
+def make_multiscale_noise_like(ref_tensor, sizes):
+    b, c, h, w = ref_tensor.shape
+    valid_sizes = []
+    for size in sizes:
+        size = int(size)
+        if size <= 0:
+            continue
+        size = min(size, h, w)
+        if size >= 1:
+            valid_sizes.append(size)
+    if not valid_sizes:
+        return torch.zeros_like(ref_tensor)
+
+    noise = torch.zeros_like(ref_tensor)
+    for size in valid_sizes:
+        low = torch.randn((b, c, size, size), device=ref_tensor.device, dtype=ref_tensor.dtype)
+        up = F.interpolate(low, size=(h, w), mode="bilinear", align_corners=False)
+        noise = noise + up
+    return noise / float(len(valid_sizes))
+
+
+def build_diverse_init(
+    known_tensor,
+    mask,
+    sigma,
+    noise_scale=1.0,
+    coarse_noise_scale=0.0,
+    coarse_noise_sizes=(16, 32, 64),
+    noise_known_region=False,
+):
     """
     known_tensor: already-masked known region, e.g. Y_GT * mask
     mask: 1=known, 0=hole
     sigma: base stochastic scale
     noise_scale: amplify randomness; >1 means much more diverse but usually lower quality
     """
-    noise = torch.randn_like(known_tensor) * sigma * noise_scale
+    fine_noise = torch.randn_like(known_tensor) * noise_scale
+    coarse_noise = make_multiscale_noise_like(known_tensor, coarse_noise_sizes) * coarse_noise_scale
+    noise = (fine_noise + coarse_noise) * sigma
     if noise_known_region:
         return known_tensor + noise
     return known_tensor + noise * (1 - mask)
@@ -193,6 +225,9 @@ def main():
     output_tag = opt.get("output_tag", "multi_sample")
     texture_noise_scale = float(opt.get("texture_noise_scale", 1.0))
     structure_noise_scale = float(opt.get("structure_noise_scale", 1.0))
+    texture_coarse_noise_scale = float(opt.get("texture_coarse_noise_scale", 0.0))
+    structure_coarse_noise_scale = float(opt.get("structure_coarse_noise_scale", 0.0))
+    coarse_noise_sizes = opt.get("coarse_noise_sizes", [16, 32, 64])
     noise_known_region = bool(opt.get("noise_known_region", False))
     fixed_image_name = opt.get("fixed_image_name")
     normalized_fixed_image_name = None
@@ -255,12 +290,15 @@ def main():
         mask = mask.unsqueeze(0)
 
         logger.info(
-            "\nTesting image [%s] with fixed mask [%s], num_samples=%d, texture_noise_scale=%.3f, structure_noise_scale=%.3f, noise_known_region=%s",
+            "\nTesting image [%s] with fixed mask [%s], num_samples=%d, texture_noise_scale=%.3f, structure_noise_scale=%.3f, texture_coarse_noise_scale=%.3f, structure_coarse_noise_scale=%.3f, coarse_noise_sizes=%s, noise_known_region=%s",
             img_name,
             mask_name,
             num_samples,
             texture_noise_scale,
             structure_noise_scale,
+            texture_coarse_noise_scale,
+            structure_coarse_noise_scale,
+            coarse_noise_sizes,
             noise_known_region,
         )
 
@@ -273,6 +311,8 @@ def main():
                 mask,
                 sde.max_sigma,
                 noise_scale=texture_noise_scale,
+                coarse_noise_scale=texture_coarse_noise_scale,
+                coarse_noise_sizes=coarse_noise_sizes,
                 noise_known_region=noise_known_region,
             )
             noisy_states = build_diverse_init(
@@ -280,6 +320,8 @@ def main():
                 mask,
                 S_sde.max_sigma,
                 noise_scale=structure_noise_scale,
+                coarse_noise_scale=structure_coarse_noise_scale,
+                coarse_noise_sizes=coarse_noise_sizes,
                 noise_known_region=noise_known_region,
             )
             model.feed_data(noisy_state, Y_GT * mask, Y_GT, mask, S_sde, X_GT, X_LQ * mask)
