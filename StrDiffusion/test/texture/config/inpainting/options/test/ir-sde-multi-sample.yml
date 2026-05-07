@@ -5,11 +5,17 @@ model: denoising
 distortion: derain
 gpu_ids: [0]
 base_seed: 1234
-seed_stride: 1
-num_samples: 4
+seed_stride: 17
+num_samples: 6
 save_states: false
 output_tag: multi_sample
+texture_noise_scale: 3.5
+structure_noise_scale: 2.5
+# false: keep known area fixed, only make the hole highly random
+# true: even the known region state is noised, diversity will be larger but quality usually worse
+noise_known_region: false
 # Optional: only run one specified image stem, e.g. real-147_center
+# If you accidentally fill real-147_center_mask, the copied script will auto-strip the trailing "_mask".
 fixed_image_name: ~
 # Optional: if set, this single mask will be used for all images.
 fixed_mask_path: ~

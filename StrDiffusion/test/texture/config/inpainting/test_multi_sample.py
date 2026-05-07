@@ -38,6 +38,19 @@ def set_random_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
+def build_diverse_init(known_tensor, mask, sigma, noise_scale=1.0, noise_known_region=False):
+    """
+    known_tensor: already-masked known region, e.g. Y_GT * mask
+    mask: 1=known, 0=hole
+    sigma: base stochastic scale
+    noise_scale: amplify randomness; >1 means much more diverse but usually lower quality
+    """
+    noise = torch.randn_like(known_tensor) * sigma * noise_scale
+    if noise_known_region:
+        return known_tensor + noise
+    return known_tensor + noise * (1 - mask)
+
+
 def parse_test_options(opt_path):
     loader, _ = OrderedYaml()
     with open(opt_path, mode="r", encoding="utf-8") as f:
@@ -178,7 +191,13 @@ def main():
     seed_stride = int(opt.get("seed_stride", 1))
     save_states = bool(opt.get("save_states", False))
     output_tag = opt.get("output_tag", "multi_sample")
+    texture_noise_scale = float(opt.get("texture_noise_scale", 1.0))
+    structure_noise_scale = float(opt.get("structure_noise_scale", 1.0))
+    noise_known_region = bool(opt.get("noise_known_region", False))
     fixed_image_name = opt.get("fixed_image_name")
+    normalized_fixed_image_name = None
+    if fixed_image_name:
+        normalized_fixed_image_name = fixed_image_name[:-5] if fixed_image_name.endswith("_mask") else fixed_image_name
 
     mask_provider = SingleMaskProvider(opt)
 
@@ -214,34 +233,55 @@ def main():
 
     test_times = []
 
+    processed_images = 0
+    scanned_image_names = []
+
     for train_data in test_loader:
         img_path = train_data["GT_path"][0]
         img_name = osp.splitext(osp.basename(img_path))[0]
+        if len(scanned_image_names) < 10:
+            scanned_image_names.append(img_name)
 
-        if fixed_image_name and img_name != fixed_image_name:
+        if normalized_fixed_image_name and img_name != normalized_fixed_image_name:
             continue
 
         test_set_name = test_loader.dataset.opt["name"]
         dataset_dir = osp.join(opt["path"]["results_root"], test_set_name, output_tag, img_name)
         util.mkdir(dataset_dir)
+        processed_images += 1
 
         Y_GT, X_GT, X_LQ = train_data["GT"], train_data["GT_gray"], train_data["GT_edge"]
         mask_name, mask = mask_provider.get_mask(img_name)
         mask = mask.unsqueeze(0)
 
         logger.info(
-            "\nTesting image [%s] with fixed mask [%s], num_samples=%d",
+            "\nTesting image [%s] with fixed mask [%s], num_samples=%d, texture_noise_scale=%.3f, structure_noise_scale=%.3f, noise_known_region=%s",
             img_name,
             mask_name,
             num_samples,
+            texture_noise_scale,
+            structure_noise_scale,
+            noise_known_region,
         )
 
         for sample_idx in range(num_samples):
             seed = base_seed + sample_idx * seed_stride
             set_random_seed(seed)
 
-            noisy_state = sde.noise_state(Y_GT * mask)
-            noisy_states = S_sde.noise_state(X_LQ * mask)
+            noisy_state = build_diverse_init(
+                Y_GT * mask,
+                mask,
+                sde.max_sigma,
+                noise_scale=texture_noise_scale,
+                noise_known_region=noise_known_region,
+            )
+            noisy_states = build_diverse_init(
+                X_LQ * mask,
+                mask,
+                S_sde.max_sigma,
+                noise_scale=structure_noise_scale,
+                noise_known_region=noise_known_region,
+            )
             model.feed_data(noisy_state, Y_GT * mask, Y_GT, mask, S_sde, X_GT, X_LQ * mask)
 
             tic = time.time()
@@ -269,6 +309,14 @@ def main():
 
             save_once(dataset_dir, img_name, sample_idx, mask_name, output, output_masked, gt_img, mask_img)
             logger.info("Saved sample %d/%d for [%s], seed=%d, time=%.3fs", sample_idx + 1, num_samples, img_name, seed, toc - tic)
+
+    if processed_images == 0:
+        logger.error(
+            "No image was processed. fixed_image_name=%s, normalized_fixed_image_name=%s, first_dataset_image_names=%s",
+            fixed_image_name,
+            normalized_fixed_image_name,
+            scanned_image_names,
+        )
 
     if test_times:
         logger.info(
